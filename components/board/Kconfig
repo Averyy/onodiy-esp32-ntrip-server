@@ -3,7 +3,7 @@
 menu "Station: board and pins"
 
     config BOARD_GNSS_UART_NUM
-        int "UART port connected to GNSS receiver COM1"
+        int "UART controller of the GNSS link"
         range 1 2
         default 1
         help
@@ -11,7 +11,7 @@ menu "Station: board and pins"
             console (CH343P USB bridge), so use UART1 or UART2.
 
     config BOARD_GNSS_RX_GPIO
-        int "ESP32 RX GPIO (receiver COM1 TXD)"
+        int "ESP32 RX GPIO (the receiver's TXD)"
         range 0 48
         default 1
         help
@@ -19,7 +19,7 @@ menu "Station: board and pins"
             TXD on the UM982 + ESP32-S3 dev board.
 
     config BOARD_GNSS_TX_GPIO
-        int "ESP32 TX GPIO (receiver COM1 RXD)"
+        int "ESP32 TX GPIO (the receiver's RXD)"
         range 0 48
         default 2
         help
@@ -37,7 +37,9 @@ menu "Station: board and pins"
 
             These pins and this port are the build's defaults: a wiring saved
             on the station (Settings, Danger zone) replaces them at the next
-            start and is kept by updates and a factory reset.
+            start and is kept by updates and a factory reset. A saved wiring
+            that a later build's pin rules refuse keeps the receiver link
+            closed (nothing is sent on these pins instead).
 
     config BOARD_GNSS_RESET_GPIO
         int "GPIO driving the receiver reset line (-1 = not wired)"

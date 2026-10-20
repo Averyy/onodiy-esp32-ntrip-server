@@ -446,13 +446,15 @@ const systemPart = {
       const edit = btn('Edit pins', () => editWiring(edit));
       /* What the next start uses, when that is not what runs now. */
       let note = null;
-      if (saved && saved.problem) {
-        note = msg('warn', 'The saved wiring (' + wiringText(saved) + ') is not used: ' + saved.problem + ' Edit it, or save the defaults.');
+      const off = saved && saved.problem;
+      if (off) {
+        note = msg('bad', 'The saved wiring (' + wiringText(saved) + ') cannot be used: ' + saved.problem + ' The receiver link stays ' +
+          'off until you change it and restart.');
       } else if (!sameWiring(saved || def, w)) {
         note = msg('info', 'Saved: ' + (saved ? wiringText(saved) : 'back to the defaults (' + wiringText(def) + ')') +
           '. Takes effect after the next restart.');
       }
-      mount(wiringBox, settingRow('Receiver wiring', wiringText(w) + (isDefault ? ' (the defaults).' : '.') +
+      mount(wiringBox, settingRow('Receiver wiring', (off ? 'Off this start.' : wiringText(w) + (isDefault ? ' (the defaults).' : '.')) +
         ' Change only on a board wired differently.', edit), note);
     }
 
@@ -501,7 +503,8 @@ const systemPart = {
       sys = saved;
       renderWiring();
       toast(saved.reboot_required ? 'Saved. Restart the station to use the new wiring.' : 'Saved.', 'ok');
-      button.focus();
+      const again = wiringBox.querySelector('button');   /* the row was rebuilt: its new button */
+      if (again) again.focus();
     }
 
     /* ---- The Danger zone: restart, safe mode, the admin password, revert, the receiver wiring, factory reset ---- */

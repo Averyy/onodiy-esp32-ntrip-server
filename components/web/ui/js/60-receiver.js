@@ -4,7 +4,7 @@
  *
  * Receiver page (#/receiver): the receiver (state, model, configuration,
  * problems as messages, the messages it sends), its base position (where,
- * the checks, the map on request, Lock or Survey again), then the signals
+ * the checks, the map on request, Lock or Reset location), then the signals
  * (65-signals.js) with the sky map (66-live.js).
  * Receiver settings (#/receiver/settings): the base position, the receiver
  * profile (signals and the sky map, correction messages, and Advanced folded
@@ -314,9 +314,9 @@ function manageCtl(onSaved) {
   let stored = null, autocfg = true, recovery = 'full', held = false, fixKey = null;
   const name = k => L.recovery[MANAGE[k][1]];
   const restart = checkbox('Restart the station if the receiver stops answering', true,
-    'When restarting the receiver did not help. At most once an hour and 3 times a day.');
+    'On by default. When restarting the receiver did not help; at most once an hour and 3 times in 24 hours.');
   const choice = radios('Receiver setup', 'manage', [
-    ['auto', h('span', { class: 'opt' }, h('span', null, name('auto')), h('small', { class: 'hint' },
+    ['auto', h('span', { class: 'opt' }, h('span', null, name('auto') + ' (default)'), h('small', { class: 'hint' },
       'Sets up the receiver with the profile on this page and keeps it so. If corrections stop, it reconnects, sends the ' +
       'setup again, then restarts the receiver.'))],
     ['manual', h('span', { class: 'opt' }, h('span', null, name('manual')), h('small', { class: 'hint' },
@@ -669,7 +669,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const sgKey = p.signal_group_master + ' ' + p.signal_group_slave;
   const named = SG_CHOICES.some(c => c[0] === sgKey);
   const sgChoice = radios('Signal group', 'sgroup', SG_CHOICES.map(c => [c[0], h('span', { class: 'opt' },
-    h('span', null, c[0] + ' ' + c[1]), h('small', { class: 'hint' }, c[2]))]),
+    h('span', null, c[0] + ' ' + c[1] + (c[0] === SG_RECOMMENDED ? ' (default)' : '')), h('small', { class: 'hint' }, c[2]))]),
   named ? sgKey : null);
   sgChoice.el.querySelector('.choices').classList.add('stacked', 'grid2');
   sgChoice.el.querySelector('legend').classList.add('sr-only');
@@ -985,7 +985,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     applyBtn);
   const actions = h('div', { class: 'form-actions' }, saveBtn);
   const antLine = p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) :
-    h('span', null, 'Not set (recommended unless your antenna is in the IGS list)');
+    h('span', null, 'Not set (default; set it only for an antenna in the IGS list)');
   /* The antenna step's refusal above Advanced (in view while it is closed), the B1C/B2a step's under the messages
    * (stepsRefused). */
   const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true })];

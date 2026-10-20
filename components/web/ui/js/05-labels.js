@@ -417,6 +417,17 @@ function inMinutes(s) {
   return s < 60 ? fmt.dur(s) : fmt.dur(Math.ceil(s / 60) * 60);
 }
 
+/**
+ * Why receiver firmware updates are off: a build without them, or a receiver wired by another port than COM1.
+ * reason: the answer's flash_reason (GET /api/update, /api/gnss/flash, /api/upload/gnss), else the status's.
+ */
+function notEnabled(reason) {
+  const u = typeof S !== 'undefined' && S.status && S.status.update;
+  const why = reason || (u && u.gnss_flash_reason);
+  return why === 'receiver_port' ? 'Receiver firmware updates work only with the receiver wired by its COM1.' :
+    'Receiver firmware updates are not enabled in this build yet.';
+}
+
 /* ---- The receiver wiring (GET /api/system wiring, the status's receiver.link) ---- */
 
 /** The link's pins and port this start uses (the status's receiver.link; the dev board's before the first status). */
@@ -429,6 +440,9 @@ function sameWiring(a, b) {
   return !!a && !!b && a.rx_gpio === b.rx_gpio && a.tx_gpio === b.tx_gpio && a.port === b.port;
 }
 
+/* The link stays closed this start (receiver.link.off): the saved wiring fails the board's check. */
+const LINK_OFF = 'The receiver link is off: the saved receiver wiring cannot be used';
+
 /** "RX GPIO1, TX GPIO2, receiver COM1". */
 function wiringText(w) {
   return 'RX GPIO' + w.rx_gpio + ', TX GPIO' + w.tx_gpio + ', receiver COM' + w.port;
@@ -438,14 +452,16 @@ function wiringText(w) {
 function noReceiverText(a, link) {
   const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
     a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
-  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
   const l = link || receiverLink();
+  if (l.off) return LINK_OFF + ' (' + l.off.replace(/\.$/, '') + '). Change it under Settings → Receiver wiring.';
+  if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
   return 'Nothing arrives from the receiver. Check its power and the cable from its COM' + l.port + ' to the station ' +
     '(receiver TX to GPIO' + l.rx_gpio + ', RX to GPIO' + l.tx_gpio + '). Wired otherwise? Settings → Receiver wiring.' + next;
 }
 
 /* The Status page's no-receiver line (the pins are in the Receiver page's panel). */
 function noReceiverLead(a, link) {
+  if ((link || receiverLink()).off) return LINK_OFF + '. Change it under Settings → Receiver wiring.';
   if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.';
   return 'Nothing arrives from the receiver. Check its power and the COM' + (link || receiverLink()).port + ' cable.';
 }

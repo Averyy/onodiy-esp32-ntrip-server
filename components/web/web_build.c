@@ -533,6 +533,9 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         signal_test_brief(w, &st->sg_test);
         wj_obj_open(w, "link");
         wiring_fields(w, &s->link);
+        if (s->link_off != NULL) {
+            wj_str(w, "off", s->link_off);
+        }
         wj_obj_close(w);
     }
     wj_obj_close(w);

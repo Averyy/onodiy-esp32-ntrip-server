@@ -609,6 +609,12 @@ uv run rtcm_replay.py --listen 127.0.0.1:5600 ../../test/fixtures/rtcm/centipede
   `UNLOG COM1` until an `RTCMxxxx COM1` command. Bursts that fall due while
   it sends no RTCM are dropped (counted as `bursts_withheld`), never sent
   late. Replies go out between whole frames, never inside one.
+- `--respond-port N` (1-3, default 1) puts it on the station's link by its
+  COM2 or COM3 instead, for a station whose receiver wiring says so: COM1
+  above stands for that port (its `UNLOG`, `RTCMxxxx`, `GPGSV`,
+  `CONFIG COMn` and the restart banner); the same commands for another port
+  get an `OK` and change nothing, and the configuration dump lists all three
+  ports.
 - The station messages are its own, as configured: `RTCM1005`, `RTCM1006`,
   `RTCM1033` and `RTCM1230 COM1 n` put them at the start of every n-th
   epoch, the recording's own of those types left out. 1005/1006 carry the

@@ -367,11 +367,11 @@ function foldRows(rows, n, more, cols, open, k) {
 /* ---- Formatting -------------------------------------------------------- */
 
 const DASH = '–';
-/* Between a number and its unit: a line never breaks there ("7 min 49 s" wraps only between the pairs). */
+/* Between a number and its unit where they are apart ("12\u00a0KB": a line never breaks there). */
 const NB = '\u00a0';
 
 const fmt = {
-  /** Duration in seconds, e.g. "7 min 49 s", "3 h 12 min", "1 h" (a zero second unit is left out). */
+  /** Duration in seconds, e.g. "7min 49s", "3h 12min", "1h" (a zero second unit is left out). */
   dur(s) {
     if (s === null || s === undefined || isNaN(s)) return DASH;
     s = Math.max(0, Math.round(s));
@@ -722,11 +722,15 @@ function errText(e) {
   if (e.code === 'busy' && e.body.reason === 'receiver_session') {
     t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
   }
+  if (e.code === 'busy' && e.body.reason === 'wiring_pending') {
+    t = 'The receiver wiring changes at the next restart. Restart the station first, then update the receiver.';
+  }
   if (e.code === 'busy' && e.body.reason === 'live_view_output') {
     t = 'The sky view has the receiver\'s satellite positions turned on. The station turns them off first (the sky view stays open ' +
       'without them): start maintenance again in a few seconds.';
   }
   if (e.code === 'invalid_field' && e.field) t = fieldErrorText(e);
+  if (e.code === 'not_available_yet') t = notEnabled();
   if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';
   if (e.code === 'internal' && e.message) t += ' (' + e.message + ')';
   if (/[^.!?]$/.test(t)) t += '.';

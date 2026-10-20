@@ -459,6 +459,8 @@ function pageParts(el) {
     warn: v.filter(e => (' ' + e.className + ' ').indexOf(' t-warn ') >= 0).map(e => e.textContent),
     /* The setting rows: [title, text]. */
     settings: v.filter(e => e.className === 'setting-row').map(e => [e.kids[0].kids[0].textContent, e.kids[0].kids[1].textContent]),
+    /* The radio choices by their name. */
+    choices: v.filter(e => e.tagName === 'SPAN' && e.className === 'opt').map(e => e.kids[0].textContent),
   };
 }
 
@@ -605,6 +607,7 @@ async function settingsPageView(c) {
       await settle();
       r.wire.puts = sent.slice(n).filter(x => x.method === 'PUT').map(x => [x.path, x.body]);
       r.wire.open = [...ids.modal.walk()].some(e => e.tagName === 'FORM');
+      r.wire.answer_reboot = !!c.wire.answer.reboot_required;
       r.wire.after = pageParts(el);
     }
   }
@@ -2410,10 +2413,12 @@ WIRING = {"rx_gpio": 1, "tx_gpio": 2, "port": 1, "saved": None, "default": {"rx_
 
 
 def wiring_answer(saved, active=None):
-    """PUT /api/system's answer once `saved` is stored (None: the defaults), the station still on `active`."""
+    """PUT /api/system's answer once `saved` is stored (None: the defaults), the station still on `active`: a restart
+    is required when the next start's wiring (the saved one, else the defaults) is not this one."""
     w = {**WIRING, **(active or {}), "saved": saved}
+    nxt = saved or WIRING["default"]
     return {"hostname": "onodiy", "hostname_active": "onodiy", "public_status": False, "wiring": w,
-            "reboot_required": saved is not None and any(saved[k] != w[k] for k in ("rx_gpio", "tx_gpio", "port"))}
+            "reboot_required": any(nxt[k] != w[k] for k in ("rx_gpio", "tx_gpio", "port"))}
 
 
 def test_danger_zone_receiver_wiring_row_and_its_dialog():
@@ -2448,7 +2453,7 @@ def test_danger_zone_receiver_wiring_row_and_its_dialog():
     picked_rx, picked_tx, _ = d["wire"]["picked"]
     assert [o[0] for o in picked_rx if o[1]] == ["GPIO18"] and [o[0] for o in picked_tx if o[1]] == ["GPIO17"]
     assert d["wire"]["puts"] == [["/api/system", {"wiring": {"rx_gpio": 17, "tx_gpio": 18, "port": 2}}]]
-    assert d["wire"]["open"] is False
+    assert d["wire"]["open"] is False and d["wire"]["answer_reboot"] is True
     after = d["wire"]["after"]
     assert dict(after["settings"])["Receiver wiring"].startswith("RX GPIO1, TX GPIO2, receiver COM1 (the defaults).")
     assert ["info", "Saved: RX GPIO17, TX GPIO18, receiver COM2. Takes effect after the next restart."] in after["msgs"]
@@ -2465,9 +2470,22 @@ def test_danger_zone_receiver_wiring_row_and_its_dialog():
                     "restart."] in back["msgs"]
     assert [[o[0] for o in lst if o[2]] for lst in back["wire"]["lists"]] == [["GPIO1 (default)"], ["GPIO2 (default)"],
                                                                              ["COM1 (default)"]]
-    assert ["warn", "The saved wiring (RX GPIO26, TX GPIO2, receiver COM1) is not used: GPIO26 is used by flash/PSRAM. "
-                    "Edit it, or save the defaults."] in broken["msgs"]
+    # A saved wiring this build refuses keeps the link off: the row and its note say so.
+    assert dict(broken["settings"])["Receiver wiring"] == "Off this start. Change only on a board wired differently."
+    assert ["bad", "The saved wiring (RX GPIO26, TX GPIO2, receiver COM1) cannot be used: GPIO26 is used by flash/PSRAM. "
+                   "The receiver link stays off until you change it and restart."] in broken["msgs"]
     assert ["info", "Saved: RX GPIO17, TX GPIO18, receiver COM2. Takes effect after the next restart."] in rows_only["msgs"]
+
+
+def test_danger_zone_revert_names_the_version_and_hides_a_same_version_slot():
+    """Revert firmware (a Danger zone row): names the version the other slot holds; not offered when that slot holds
+    the version running (a reinstall left both the same)."""
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    older = {**SET_UPDATE, "app": {**SET_UPDATE["app"], "rollback_version": "v0.2.0"}}
+    same = {**SET_UPDATE, "app": {**SET_UPDATE["app"], "rollback_version": "v0.3.0"}}
+    a, b = run_editor([{**base, "update": older}, {**base, "update": same}])
+    assert dict(a["settings"])["Revert firmware"] == "Revert to v0.2.0." and "Revert" in a["buttons"]
+    assert "Revert firmware" not in dict(b["settings"]) and "Revert" not in b["buttons"]
 
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
@@ -2755,6 +2773,11 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert {"Group A", "Group B", "Time per group"} <= set(settings["fields"])
     assert not {"Station ID", "Receiver link speed (COM1)"} & set(settings["fields"]) and "Apply again" not in settings["buttons"]
     assert "Sky map" in settings["checks"]
+    # The defaults say so: signal group 3 6, Automatic setup, the restart box.
+    assert "3 6 Galileo E6 (default)" in settings["choices"] and "7 0 Most signals" in settings["choices"]
+    assert "Automatic (default)" in settings["choices"] and "Manual" in settings["choices"]
+    assert ("On by default. When restarting the receiver did not help; at most once an hour and 3 times in 24 "
+            "hours.") in settings["hints"]
     assert ("On (default): the receiver sends where each satellite is every 10s, so the Receiver page shows them "
             "on a sky map. Off: no sky map.") in settings["hints"]
     # Opened: the station ID, the link speed, the antenna model and Apply again; still open once the forms rebuild.

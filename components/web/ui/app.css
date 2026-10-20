@@ -1104,7 +1104,6 @@ table.cmp small { display: block; color: var(--muted); }
 .choices.stacked .choice { align-items: flex-start; padding: 0.55rem 0.8rem; }
 .choices.stacked .choice input { margin-top: 0.15rem; }
 .choice .opt { display: block; font-weight: 600; }
-/* Receiver setup: the restart box under Automatic, set in as its part. */
 /* A profile group's title with its chip (Correction messages). */
 .pgroup > .card-head { margin-bottom: 0; }
 .pgroup > .card-head > h3 { font-size: 1rem; }

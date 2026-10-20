@@ -97,7 +97,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 422 | `not_this_project` (app upload) |
 | 429 | `rate_limited` (with `retry_in_s`) |
 | 500 | `internal` (`message` carries the `esp_err_t` name) |
-| 501 | `not_available_yet` (receiver flashing is not enabled in this build: `flash_available` false), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
+| 501 | `not_available_yet` (receiver flashing is not available: `flash_available` false, `flash_reason` says why: not in this build, or the receiver is not wired by its COM1), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
 | 503 | `too_many_clients` (WebSocket) |
 
 ---
@@ -562,7 +562,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
-| `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; admin form only |
+| `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; with `off` (a sentence: `board_link_off_reason()`) the link stays closed this start because the saved wiring fails the board's check, and nothing is sent to the receiver (neither on it nor on the build's pins); admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with a mountpoint and the console's username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
@@ -1986,8 +1986,9 @@ TX GPIO, to the receiver's RXD; the receiver port, `1` = COM1 ... `3` =
 COM3). `saved` is the one saved on the station (settings `gnss/wiring`),
 `null` when none is (the build's applies); it takes effect at the next start,
 and app updates and a factory reset keep it. Its `problem` says why the
-board does not use it (a later build reserving one of its pins; the build's
-is used then), `null` when it is usable. `default` is the build's
+board does not use it (a later build reserving one of its pins: the
+receiver link then stays closed, `receiver.link.off`, and the build's pins
+are not used either), `null` when it is usable. `default` is the build's
 (`CONFIG_BOARD_GNSS_*`). `pins` are the GPIOs the link may use on this board:
 ones the ESP32-S3 has that the flash and PSRAM, native USB, the console, the
 strapping pins (0, 3, 45, 46), the button, the status LED, the receiver
@@ -2009,8 +2010,9 @@ next start uses another wiring than this one.
 `200` with the system object. Errors: `400 invalid_field` (`field`
 `wiring.rx_gpio`, `wiring.tx_gpio`, `wiring.port`, or `wiring` with the
 reason as the message, e.g. "GPIO26 is used by flash/PSRAM."), `409
-journal_open` (a wiring while a receiver update journal is open: it ends on
-the wiring it began with), `409 settings_unavailable`.
+journal_open` (another wiring than this start's while a receiver update
+journal is open: it ends on the wiring it began with; saving this start's
+one cancels a change waiting for the restart), `409 settings_unavailable`.
 
 ---
 
@@ -2143,8 +2145,13 @@ update runs), `409 busy`, `409 app_trial` (stage 1 or verify window).
 The user confirmed the receiver dialog. Before the request the UI shows:
 version, `expected_downtime_s` against `budget_left_s`, "do not power off
 the station or plug anything into the receiver's USB port", "the station
-profile will be re-applied", and while `flash_available` is `false`, that
-receiver firmware updates are not enabled in this build yet.
+profile will be re-applied", and while `flash_available` is `false`, why
+(`flash_reason`: not enabled in this build, or the receiver not wired by
+its COM1). With receiver flashing available, a receiver wiring saved for
+the next start (`GET /api/system` `wiring.saved` differs from the wiring in
+use, or the saved one keeps the link off) refuses the update with `409 busy`
+(`reason` `wiring_pending`) here and in `POST /api/upload/gnss/confirm`:
+an interrupted update must finish over the pins it began on.
 
 `{"build": 19152, "cross_layout_ack": false}`. One click runs the chain:
 download the manifest's package for the detected model into the package
@@ -3099,7 +3106,7 @@ Things this contract needs that the current headers do not provide yet:
    names it (section 10).
 3. **Receiver flashing available**: resolved; `flash_available` is
    `station_flash_available()` (`CONFIG_UM98X_FLASH_ENABLE`, off until the
-   bench has confirmed the receiver side).
+   bench has confirmed the receiver side, and the receiver wired by its COM1).
 4. **Rolled-back versions**: resolved; `fw_update_get_rolled_back()` and
    `fw_update_is_rolled_back()` expose the bounded list fw_update keeps
    (`ota/bad_ver`, 8 versions, written only when one is added). The banner

@@ -2278,8 +2278,9 @@ static uint32_t known_overlay(station_status_t *o)
         o->rx_sg_valid = true;
         o->rx_sg = (station_sg_t){ .master = k->sg_master, .slave = k->sg_slave };
     }
-    if (s_known_profile_gone || k->profile_hash != um98x_profile_hash(&s_profile)) {
-        return 0;   /* the profile changed since: whether it runs, and its check, are not known */
+    /* The applied record's hash: a receiver rewired to another port since has its outputs on the old one. */
+    if (s_known_profile_gone || k->profile_hash != um98x_ctl_applied_hash(&s_profile)) {
+        return 0;   /* the profile (or the port) changed since: whether it runs, and its check, are not known */
     }
     o->profile_applied = o->profile_applied || k->profile_applied;
     o->profile_acknowledged = o->profile_acknowledged || k->profile_acknowledged;
@@ -2310,7 +2311,7 @@ static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
     } else {
         memset(k, 0, sizeof(*k));
         k->valid = true;
-        k->profile_hash = um98x_profile_hash(&s_profile);
+        k->profile_hash = um98x_ctl_applied_hash(&s_profile);
         if (have_live) {
             k->receiver = live;
         }
@@ -3921,9 +3922,10 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
     if (!station_flash_available()) {
         return ESP_ERR_NOT_SUPPORTED;   /* the caller may check the package instead */
     }
+    /* A wiring that changes at the next start would leave an interrupted update on other pins. */
     if (!s_inited || !s_started || journal_open(jerr) || lifecycle_app_trial_active() || app_update_running() ||
         lifecycle_in_safe_mode() || state != STATION_STATE_STREAMING || !receiver_streams() || !supported ||
-        maint_on()) {
+        maint_on() || station_wiring_pending()) {
         return ESP_ERR_INVALID_STATE;
     }
     /* A signal-group comparison owns the receiver until it ends (the web
@@ -3969,7 +3971,7 @@ bool station_flash_available(void)
 
 bool station_wiring_saved(board_wiring_t *out)
 {
-    uint8_t blob[16];
+    uint8_t blob[64];   /* room for later versions, which only append */
     size_t len = sizeof(blob);
     if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, blob, &len) != ESP_OK) {
         return false;
@@ -3992,6 +3994,17 @@ esp_err_t station_wiring_save(const board_wiring_t *w)
     uint8_t blob[BOARD_WIRING_BLOB_LEN];
     size_t len = board_wiring_encode(w, blob, sizeof(blob));
     return settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, blob, len);
+}
+
+bool station_wiring_pending(void)
+{
+    board_wiring_t next;
+    if (!station_wiring_saved(&next)) {
+        board_wiring_default(&next);
+    }
+    board_wiring_t now;
+    board_wiring_active(&now);
+    return !board_wiring_same(&next, &now) || board_link_off_reason() != NULL;
 }
 
 const char *station_flash_reason(void)

@@ -28,8 +28,9 @@ running, so they are of no use on such a receiver. A newer package has to come
 from Unicore's UPrecise tool (see below). Receiver flashing from the station stays in
 bench builds for now and is lower priority than streaming.
 
-### What's in this build
+### What's in Build 18975
 
+From Unicore's release note for Build 18975 (we have none for Build 23575):
 TruePoint ionosphere-quality service, QZSS L6 MADOCA-PPP, improved PPP fusion and
 RTK-assisted PPP convergence, a configurable PVT reliability threshold, smoother
 best-position output, anti-jamming tuning, and a GSV message fix (NMEA 4.11 errata).

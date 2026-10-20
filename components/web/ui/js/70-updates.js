@@ -36,12 +36,6 @@ const FLASH_ACTIONS = [
     'The session is forgotten and its package released. The receiver may not run valid firmware afterwards.'],
 ];
 
-/* Why receiver firmware updates are off: this build, or a receiver wired by another port than COM1. */
-function notEnabled() {
-  const u = S.status && S.status.update;
-  return u && u.gnss_flash_reason === 'receiver_port' ? 'Receiver firmware updates work only with the receiver wired by its COM1.' :
-    'Receiver firmware updates are not enabled in this build yet.';
-}
 const TRANSFER_FAILED = 'A transfer failed; the update goes on (keep the station powered)';
 const notYetDownloaded = () => 'Receiver package downloaded and verified. ' + notEnabled() +
   ' The station now checks the package against every rule; nothing is sent to the receiver.';
@@ -87,7 +81,7 @@ const NOT_INSTALLED = ['same_image', 'rolled_back_ack_required'];
 
 function resultText(m) {
   if (m.outcome && m.outcome !== 'none') return outcomeText(m);
-  let t = lbl(L.result, m.result);
+  let t = m.result === 'not_available_yet' ? 'Verified. ' + notEnabled() : lbl(L.result, m.result);
   if (m.result === 'package_rejected' && m.failed_rule) t += ' (rule ' + m.failed_rule + (m.cross_layout ? ', other partition layout' : '') + ')';
   if (m.result !== 'ok' && m.result !== 'not_available_yet' && NOT_INSTALLED.indexOf(m.result) < 0 && m.message) t += ' (' + m.message + ')';
   return t;
@@ -263,12 +257,12 @@ function downtimeRows(down, left) {
   ];
 }
 
-function receiverWarnings(flashAvailable) {
+function receiverWarnings(flashAvailable, reason) {
   return [
     h('ul', null,
       h('li', null, 'Do not power off the station or plug anything into the receiver\'s USB port.'),
       h('li', null, 'The station profile is applied to the receiver again afterwards.')),
-    flashAvailable ? null : msg('warn', notEnabled() + ' The station verifies the package and checks it against every rule, then releases it. ' +
+    flashAvailable ? null : msg('warn', notEnabled(reason) + ' The station verifies the package and checks it against every rule, then releases it. ' +
       'Nothing is sent to the receiver.'),
   ];
 }
@@ -390,7 +384,8 @@ const updatesPart = {
         P.app_update.el, appErr);
       /* The version the station would start: the other app slot's, else (unreadable) the one before this. */
       const to = a.rollback_version || 'the version installed before ' + a.running;
-      const rb = a.rollback_available ? btn('Revert', async () => {
+      /* Nothing to go back to when the other slot holds this same version (a reinstall). */
+      const rb = a.rollback_available && a.rollback_version !== a.running ? btn('Revert', async () => {
         const ok = await dialog({ title: 'Revert to ' + to + '?', ok: 'Revert', okKind: 'danger solid',
           body: h('p', null, 'The station restarts into ' + to + '. ' + a.running +
             ' is not offered again; you can still install it from a file.') });
@@ -413,7 +408,7 @@ const updatesPart = {
         title: 'Update the receiver firmware?',
         ok: g.flash_available ? 'Update receiver' : 'Download and verify',
         body: [h('p', null, 'Install ' + g.latest + ' (build ' + g.latest_build + ') on the ' + (g.model || 'receiver') + ' (now ' + (g.running || 'unknown') + ').'),
-          downtimeRows(g.expected_downtime_s, g.budget_left_s), receiverWarnings(g.flash_available)],
+          downtimeRows(g.expected_downtime_s, g.budget_left_s), receiverWarnings(g.flash_available, g.flash_reason)],
       });
       if (!ok) return;
       gnssErr.hidden = true;
@@ -507,7 +502,7 @@ const updatesPart = {
             toast(a[0] === 'clear' ? 'Session cleared.' : 'Started.', 'ok');
             load();
           }
-        }, a[0] === 'clear' ? 'danger' : '', { disabled: !info.allowed, title: info.allowed ? null : lbl(L.why, info.why) });
+        }, a[0] === 'clear' ? 'danger' : '', { disabled: !info.allowed, title: info.allowed ? null : info.why === 'not_available_yet' ? notEnabled(f.flash_reason) : lbl(L.why, info.why) });
         /* Not in this build: the card's own line says it once for both. */
         if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
@@ -537,7 +532,7 @@ const updatesPart = {
         pr && pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
         f.receiver_text ? [h('h3', { class: 'sub' }, 'What the receiver sent'), h('pre', { class: 'log short' }, f.receiver_text)] : null,
         f.last && f.last.ended_unix && f.journal === 'none' ? msg(outcomeTone(f.last.outcome), outcomeText(f.last)) : null,
-        f.flash_available ? null : msg('', notEnabled() + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
+        f.flash_available ? null : msg('', notEnabled(f.flash_reason) + ' Retrying and restarting the receiver from here wait for that; clearing works.'),
         sessionErr,
         h('div', { class: 'form-actions' }, buttons.slice().reverse()),
         notNow.length ? h('ul', { class: 'muted small' }, notNow) : null);
@@ -705,7 +700,7 @@ const updatesPart = {
           title: 'Install this package on the receiver?',
           ok: staged.flash_available ? 'Update receiver' : 'Continue',
           body: [h('p', null, 'Expected afterwards: ' + v + '.'), downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
-            receiverWarnings(staged.flash_available)],
+            receiverWarnings(staged.flash_available, staged.flash_reason)],
         });
         if (!ok) return;
         err.hidden = true;
@@ -747,7 +742,7 @@ const updatesPart = {
         downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
         fExp.el,
         shaOk.el,
-        staged.flash_available ? null : msg('warn', notEnabled() + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
+        staged.flash_available ? null : msg('warn', notEnabled(staged.flash_reason) + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
         err,
         h('div', { class: 'form-actions' }, cancel, go));
       tick();

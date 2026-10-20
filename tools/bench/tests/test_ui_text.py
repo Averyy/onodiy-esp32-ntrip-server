@@ -102,7 +102,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  fixPending: a => fixPendingText(a[0], a[1], a[2]), configWords: a => configWords(a[0], a[1]), profileTaken: g => profileTaken(g),\n' +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  noRx: a => [noReceiverText(a[0], a[1]), noReceiverLead(a[0], a[1]), alertText(a[0], { link: a[1] })[1]],\n' +
-  '  notEnabled: st => { S.status = st; const r = notEnabled(); S.status = null; return r; },\n' +
+  '  notEnabled: a => { S.status = a[0]; const r = notEnabled(a[1]); S.status = null; return r; },\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -1152,7 +1152,7 @@ def test_signal_groups_short_and_plain():
     names = run_ui([("sgName", [int(c[0].split()[0]), int(c[0].split()[1])]) for c in choices] + [("sgName", [9, 9])])
     assert names == ["3 6 (Galileo E6)", "7 0 (most signals)", "4 5 (factory)", "5 0 (no L5)", "9 9"]
     for pair, name, line, short in choices:
-        # One short line each; "(recommended)" is the Receiver page's mark, never part of the name others reuse.
+        # One short line each; "(default)" is the Receiver page's mark, never part of the name others reuse.
         assert line.endswith(".") and len(line) <= 60, pair
         assert "recommended" not in (name + line + short).lower(), pair
         assert not any(m in line for m in ("25164", "build", "2026")), pair
@@ -2196,13 +2196,26 @@ def test_no_receiver_texts_name_the_wiring_in_use():
     assert "(receiver TX to GPIO1, RX to GPIO2)" in dev[0]
     hero = heroes(status(receiver={"state": "no_receiver", "rtcm_age_ms": None, "link": link}, alerts=[NO_RX]))[0]
     assert hero["line"] == "Nothing arrives from the receiver. Check its power and the COM2 cable."
+    # A saved wiring this build refuses: the link stays off, and the texts say why and where to change it.
+    off = {**link, "off": "GPIO26 is used by flash/PSRAM."}
+    (closed,) = run_ui([("noRx", [NO_RX, off])])
+    assert closed[0] == ("The receiver link is off: the saved receiver wiring cannot be used (GPIO26 is used by "
+                         "flash/PSRAM). Change it under Settings \u2192 Receiver wiring.")
+    assert closed[1] == ("The receiver link is off: the saved receiver wiring cannot be used. Change it under "
+                         "Settings \u2192 Receiver wiring.")
 
 
 def test_receiver_updates_off_says_why():
     """Receiver firmware updates off: a build without them, or (in a build with them) a receiver wired by another port
     than COM1, which the station's update status names (gnss_flash_reason)."""
-    build, port, none = run_ui([("notEnabled", status(update={"gnss_flash_reason": "not_enabled_in_build"})),
-                                ("notEnabled", status(update={"gnss_flash_reason": "receiver_port"})),
-                                ("notEnabled", None)])
+    build, port, none, answer = run_ui([
+        ("notEnabled", [status(update={"gnss_flash_reason": "not_enabled_in_build"}), None]),
+        ("notEnabled", [status(update={"gnss_flash_reason": "receiver_port"}), None]),
+        ("notEnabled", [None, None]),
+        # An answer's own flash_reason (GET /api/update, /api/gnss/flash, /api/upload/gnss) before any status.
+        ("notEnabled", [None, "receiver_port"])])
     assert build == none == "Receiver firmware updates are not enabled in this build yet."
-    assert port == "Receiver firmware updates work only with the receiver wired by its COM1."
+    assert port == answer == "Receiver firmware updates work only with the receiver wired by its COM1."
+    (pending,) = run_ui([("refusalText", {"status": 409, "error": {"code": "busy", "reason": "wiring_pending",
+                                                                     "message": "busy"}})])
+    assert pending == "The receiver wiring changes at the next restart. Restart the station first, then update the receiver."

@@ -5,6 +5,7 @@
 #include "board.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #include "board_pins.h"
 #include "driver/gpio.h"
@@ -41,6 +42,7 @@ static board_desc_t s_board = {
 static bool s_valid;
 static bool s_have_saved;    /* board_use_wiring() gave one */
 static board_wiring_t s_saved;
+static char s_link_off[64];  /* why the receiver link stays closed this start ("" = it opens) */
 
 const board_desc_t *board_get(void)
 {
@@ -127,6 +129,11 @@ void board_use_wiring(const board_wiring_t *w)
     }
 }
 
+const char *board_link_off_reason(void)
+{
+    return s_link_off[0] != '\0' ? s_link_off : NULL;
+}
+
 size_t board_link_pins(int8_t *out, size_t cap)
 {
     board_pin_use_t uses[OTHER_PINS_MAX];
@@ -144,9 +151,10 @@ size_t board_link_pins(int8_t *out, size_t cap)
     return n;
 }
 
-/* The saved wiring replaces the build's when it passes the check; one that
+/* The saved wiring replaces the build's when it passes the check. One that
  * does not (a later build may reserve one of its pins) is left stored and
- * shown, and the build's is used. */
+ * shown, and the receiver link stays closed: the board is wired otherwise, so
+ * the build's pins may reach something else, and nothing is sent there. */
 static void take_saved_wiring(void)
 {
     if (!s_have_saved) {
@@ -155,8 +163,9 @@ static void take_saved_wiring(void)
     const board_wiring_t w = s_saved;
     char why[64];
     if (!board_wiring_check(&w, why, sizeof(why))) {
-        ESP_LOGW(TAG, "saved receiver wiring (RX GPIO%d, TX GPIO%d, COM%u) not used: %s Using the build's.", w.rx_gpio,
-                 w.tx_gpio, (unsigned)w.port, why);
+        strlcpy(s_link_off, why, sizeof(s_link_off));
+        ESP_LOGE(TAG, "saved receiver wiring (RX GPIO%d, TX GPIO%d, COM%u) not usable: %s The receiver link stays closed.",
+                 w.rx_gpio, w.tx_gpio, (unsigned)w.port, why);
         return;
     }
     s_board.gnss_rx_gpio = w.rx_gpio;

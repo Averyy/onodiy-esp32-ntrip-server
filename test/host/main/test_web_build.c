@@ -2802,7 +2802,14 @@ TEST_CASE("status: the receiver's link, its pins and port, in the admin form onl
     TEST_ASSERT_EQUAL(17, at(link, "rx_gpio")->valueint);
     TEST_ASSERT_EQUAL(18, at(link, "tx_gpio")->valueint);
     TEST_ASSERT_EQUAL(2, at(link, "port")->valueint);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(link, "off"));   /* the link opens: no reason */
     cJSON_Delete(root);
+    /* A saved wiring the board refuses keeps the link closed: the reason. */
+    s_snap.link_off = "GPIO26 is used by flash/PSRAM.";
+    root = build_status(false);
+    TEST_ASSERT_EQUAL_STRING("GPIO26 is used by flash/PSRAM.", at(at(at(root, "receiver"), "link"), "off")->valuestring);
+    cJSON_Delete(root);
+    s_snap.link_off = NULL;
     root = build_status(true);
     TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "receiver"), "link"));
     cJSON_Delete(root);

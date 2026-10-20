@@ -715,7 +715,7 @@ TEST_CASE("connection history: the four kinds, newest first, nothing past the pa
     cJSON_Delete(root);
 }
 
-/* web_ws.c builds every status section into 1152 bytes and every caster summary into 896. */
+/* web_ws.c builds every status section into 1280 bytes and every caster summary into 896. */
 TEST_CASE("status sections with the new fields still fit the WebSocket's section buffers", "[web_live]")
 {
     static web_status_snap_t s;
@@ -725,8 +725,27 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.rtcm_age_ms = UINT32_MAX - 1;
     s.st.state = STATION_STATE_FLASH_RECOVERY;
     s.st.receiver.valid = true;
-    memset(s.st.receiver.model, 0x01, sizeof(s.st.receiver.model) - 1);         /* control bytes: \u0001 each */
-    memset(s.st.receiver.firmware, 0x01, sizeof(s.st.receiver.firmware) - 1);
+    /* The receiver's strings come from its text lines, which carry printable characters and tabs only
+     * (gnss_framing): '"' escapes worst there (2 bytes). */
+    memset(s.st.receiver.model, '"', sizeof(s.st.receiver.model) - 1);
+    memset(s.st.receiver.firmware, '"', sizeof(s.st.receiver.firmware) - 1);
+    s.st.sg_test.state = STATION_SGT_MEASURING;   /* a running comparison: every field a number */
+    s.st.sg_test.phase = 9;
+    s.st.sg_test.have_running = true;
+    s.st.sg_test.running.master = 255;
+    s.st.sg_test.running.slave = 255;
+    s.st.sg_test.left_s = UINT32_MAX - 1;
+    s.st.sg_test.decide_left_s = UINT32_MAX - 1;
+    s.st.sg_test.outcome = STATION_SGT_OUT_NONE;
+    s.st.next_detect_in_s = UINT32_MAX - 1;
+    s.st.rtcm1230_known = true;
+    s.st.position.source = UM98X_POS_SURVEY;
+    s.satellites = 65535;
+    s.sats_known = true;
+    s.link = (board_wiring_t){ .rx_gpio = 48, .tx_gpio = 48, .port = 3 };
+    static char off[64];
+    memset(off, '"', sizeof(off) - 1);   /* a closed link's reason (board_link_off_reason, 63 characters at most) */
+    s.link_off = off;
     s.st.survey_window_left_s = UINT32_MAX - 1;
     s.st.rx_maintenance = true;
     s.st.maintenance_left_s = UINT32_MAX - 1;
@@ -788,7 +807,7 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.cst[0].unreached_s = UINT32_MAX - 1;
     memset(s.cst[0].hint, '"', sizeof(s.cst[0].hint) - 1);   /* the caster component's own text */
 
-    static char frag[1152];
+    static char frag[1280];
     for (int sec = 0; sec < WEB_SEC_COUNT; sec++) {
         if (sec == WEB_SEC_UPDATE) {
             continue;   /* not changed here */

@@ -91,6 +91,13 @@ void board_wiring_default(board_wiring_t *out);
  */
 bool board_wiring_check(const board_wiring_t *w, char *why, size_t cap);
 
+/**
+ * Why the receiver link stays closed this start: the saved wiring fails
+ * board_wiring_check() (its reason, a sentence), so neither it nor the
+ * build's pins are used. NULL when the link may open.
+ */
+const char *board_link_off_reason(void);
+
 /** The pins the receiver link may use on this board, ascending (at most `cap`). @return their count. */
 size_t board_link_pins(int8_t *out, size_t cap);
 

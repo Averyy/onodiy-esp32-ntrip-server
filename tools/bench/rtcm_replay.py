@@ -35,7 +35,8 @@ BASEPOSA and SPPNAVA (--respond-position, --respond-geoid, --respond-sd; no
 solution without a position); with
 --respond-text-every it also sends a satellite-in-view sentence listing no
 satellites every that many seconds, nobody asking (the receiver's GPGSV
-output without an antenna). The input "none" sends no RTCM at all, not even
+output without an antenna); with --respond-port 2 or 3 it sits on the link by
+that port instead of COM1 (the station's receiver wiring must say the same). The input "none" sends no RTCM at all, not even
 the station messages below, on any connection and with --loop: with
 --respond, a receiver that answers but has no antenna. The RTCM
 output follows it: off after UNLOG COM1 until an RTCMxxxx command, off while

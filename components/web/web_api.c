@@ -227,6 +227,7 @@ void web_snap_status(web_status_snap_t *s)
     s->flash_available = WEB_FLASH_AVAILABLE;
     s->flash_reason = WEB_FLASH_REASON;
     board_wiring_active(&s->link);
+    s->link_off = board_link_off_reason();
 }
 
 uint32_t web_budget_now(void)
@@ -1683,9 +1684,12 @@ static esp_err_t h_system_put(web_req_t *r)
                 return web_send_error(r->req, WEB_ERR_INVALID_FIELD, why, "wiring", UINT32_MAX, NULL, NULL);
             }
         }
-        /* An open receiver update journal is finished over the wiring it began on. */
+        /* An open receiver update journal is finished over the wiring it began on: only this start's may be
+         * saved then (it cancels a change waiting for the restart). */
+        board_wiring_t now;
+        board_wiring_active(&now);
         station_snapshot(&s_st);
-        if (web_journal_view(&s_st, lifecycle_in_safe_mode()) != WEB_JOURNAL_NONE) {
+        if (web_journal_view(&s_st, lifecycle_in_safe_mode()) != WEB_JOURNAL_NONE && !board_wiring_same(&wiring, &now)) {
             return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
         }
     }
@@ -1697,7 +1701,8 @@ static esp_err_t h_system_put(web_req_t *r)
         }
         board_wiring_t active;
         board_wiring_active(&active);
-        bool differs = !board_wiring_same(&active, &wiring);
+        /* A restart is needed for another wiring, and for any while this start's link stays closed. */
+        bool differs = !board_wiring_same(&active, &wiring) || board_link_off_reason() != NULL;
         ESP_LOGI(TAG, "receiver wiring saved by the user: RX GPIO%d, TX GPIO%d, COM%u%s", wiring.rx_gpio, wiring.tx_gpio,
                  (unsigned)wiring.port, differs ? " (from the next start)" : "");
         reboot = differs ? 1 : 0;
@@ -1876,6 +1881,13 @@ static web_err_t gnss_block(const fw_update_status_t *fw, uint32_t *retry_in_s)
     return WEB_ERR_COUNT;
 }
 
+/* A receiver update waits for the restart that changes the receiver wiring (it would end on other pins);
+ * a package check alone (builds without receiver flashing) does not. */
+static bool flash_waits_for_wiring(void)
+{
+    return WEB_FLASH_AVAILABLE && station_wiring_pending();
+}
+
 static esp_err_t h_update_gnss(web_req_t *r)
 {
     uint32_t build = 0;
@@ -1886,6 +1898,9 @@ static esp_err_t h_update_gnss(web_req_t *r)
     }
     if (station_sg_test_running()) {
         return web_send_err(r->req, WEB_ERR_SIGNAL_TEST_RUNNING);
+    }
+    if (flash_waits_for_wiring()) {
+        return web_send_error(r->req, WEB_ERR_BUSY, NULL, NULL, UINT32_MAX, NULL, "wiring_pending");
     }
     if (fw_update_get_status(&s_fw) != ESP_OK) {
         return web_send_internal(r->req, ESP_FAIL);
@@ -2002,6 +2017,9 @@ static esp_err_t h_upload_gnss_confirm(web_req_t *r)
     station_snapshot(&s_st);
     if (s_st.receiver.valid && s_st.receiver.build != 0 && build < s_st.receiver.build) {
         return web_send_err(r->req, WEB_ERR_DOWNGRADE);
+    }
+    if (flash_waits_for_wiring()) {
+        return web_send_error(r->req, WEB_ERR_BUSY, NULL, NULL, UINT32_MAX, NULL, "wiring_pending");
     }
     if (fw_update_get_status(&s_fw) != ESP_OK) {
         return web_send_internal(r->req, ESP_FAIL);

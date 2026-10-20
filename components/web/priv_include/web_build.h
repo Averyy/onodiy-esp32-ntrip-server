@@ -144,6 +144,7 @@ typedef struct {
     bool flash_available;
     const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     board_wiring_t link;           /**< the receiver wiring this start uses (receiver.link) */
+    const char *link_off;          /**< why the link stays closed (board_link_off_reason), NULL = it opens */
 } web_status_snap_t;
 
 /** Sections of the status object, in the order they are written. */

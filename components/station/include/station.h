@@ -721,6 +721,13 @@ bool station_wiring_saved(board_wiring_t *out);
 esp_err_t station_wiring_save(const board_wiring_t *w);
 
 /**
+ * The next start uses another wiring than this one (a saved change, or a
+ * saved wiring this start could not use): receiver updates wait for that
+ * restart (station_request_flash refuses).
+ */
+bool station_wiring_pending(void);
+
+/**
  * Check the staged package against every pre-flight rule without flashing
  * (the receiver identity is the one confirmed this boot; nothing is sent to
  * the receiver), then release it. For builds without flashing, so the user

@@ -1311,6 +1311,11 @@ esp_err_t gnss_link_init(void)
         ESP_LOGE(TAG, "board pin map not validated: GNSS UART left closed");
         return ESP_ERR_INVALID_STATE;
     }
+    const char *off = board_link_off_reason();
+    if (off != NULL) {
+        ESP_LOGE(TAG, "saved receiver wiring not usable (%s): GNSS UART left closed", off);
+        return ESP_ERR_INVALID_STATE;
+    }
     sync_init();
     const board_desc_t *b = board_get();
     s_port = (uart_port_t)b->gnss_uart_num;

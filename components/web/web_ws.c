@@ -43,7 +43,7 @@ static const char *TAG = "web";
 #define WS_IN_MAX          256u
 #define WS_STALL_CLOSE_S   30u
 #define WS_SEND_TIMEOUT_MS 3000
-#define SEC_TEXT_MAX       1152u  /* one status section: the receiver's is the largest, about 1030 bytes at worst */
+#define SEC_TEXT_MAX       1280u  /* one status section: the receiver's is the largest (test_web_live sizes its worst case) */
 #define CST_TEXT_MAX       896u   /* one caster summary: about 780 bytes at worst (escaped name and hint, stop_reason) */
 #define MSG_SCRATCH        16384u
 #define EVENTS_MAX         16
