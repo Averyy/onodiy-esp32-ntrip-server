@@ -171,5 +171,5 @@ The firmware also runs in Espressif's QEMU, with the web UI at `http://localhost
 Our code is under the [MIT License](LICENSE). The firmware image also contains
 ESP-IDF, FreeRTOS, lwIP, Mbed TLS, cJSON and other components under their own licenses;
 see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md), which ships with every build.
-The UM982 firmware packages in `firmware/um982/` are Unicore's, redistributed for
-convenience, and **not** covered by this project's license.
+The receiver firmware packages in `firmware/um982/` and `firmware/um980/` are Unicore's,
+redistributed for convenience, and **not** covered by this project's license.
