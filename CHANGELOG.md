@@ -4,6 +4,14 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
+## v0.1.3
+
+- Receiver data no longer lost while the Logs page reads the firmware's task list (it
+  briefly blocked the receiver's serial port).
+- Pages no longer fail now and then with an empty answer when a browser has several
+  requests open: the station never closes a connection that has a request waiting, has
+  room for 10 connections, and the page retries a lost read once.
+
 ## v0.1.2
 
 - Settings, Updates: the trial line names its stage and gives the whole trial's time
