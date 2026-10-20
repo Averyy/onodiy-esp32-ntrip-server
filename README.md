@@ -29,6 +29,11 @@ affiliated with or endorsed by Onocoy.
 
 - **The board:** ESP32-S3-WROOM-1 N16R8 (16 MB flash, 8 MB PSRAM) and a Unicore UM982
   all-band receiver. The ESP32 talks to the receiver's COM1.
+- **Weak Wi-Fi where the antenna goes?** What looks like the same board is also sold with
+  an external Wi-Fi antenna: the "Um982 Wifi Ipex" option of
+  [this listing](https://www.aliexpress.com/item/1005013018359434.html). An external
+  antenna reaches much farther than the module's built-in one. Not tested with this
+  firmware yet.
 - **Antenna:** a multi-band GNSS antenna on the lower SMA socket, marked `M`. Connect
   or disconnect it only with the power off: the socket carries the antenna's power.
 - **Power:** a plain 5 V USB-A charger and an A-to-C cable into the USB-C printed

@@ -14,7 +14,7 @@ Hardware and setup notes for the AliExpress UM982 + ESP32-S3 board, used as an o
 
 ### Listing details (as seen 2026-10-05)
 - Spec fields: Model Name "UM982 ESP32"; "IS It With PCB: Yes"; "GPS type: Receiver & Antenna" (generic field, no antenna shown in the variant); Origin: Mainland China.
-- Other listings of what looks like the same "UM982 Rover Board/Station + ESP32-S3" (C$217–224): 1005013059873296, 1005013027829503, 1005013036892606, 1005013038169444, 1005013222115077, 1005013190792289. Also 1005013018359434 (C$60.38, probably a partial variant).
+- Other listings of what looks like the same "UM982 Rover Board/Station + ESP32-S3" (C$217–224): 1005013059873296, 1005013027829503, 1005013036892606, 1005013038169444, 1005013222115077, 1005013190792289. Also 1005013018359434 (Mozihao Tech Store; seen again 2026-10-20): the same title and features (TF card, Wi-Fi + BT 5.0), with the options "Esp32S3 Um982", "Um982 Wifi Ipex" (an IPEX connector for an external Wi-Fi antenna) and "Mushroom Antenna 5m".
 
 ### Seller's product description (verbatim points)
 1. Main controller ESP32S3N16R8, Wi-Fi + BLE 5.0; supports development in Python, Arduino and ESP-IDF.
