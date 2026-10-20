@@ -497,6 +497,7 @@ static void upload_gnss(const job_t *job)
     snap.expected_downtime_s = station_expected_flash_downtime_s(info.size);
     snap.budget_left_s = web_budget_now();
     snap.flash_available = WEB_FLASH_AVAILABLE;
+    snap.flash_reason = WEB_FLASH_REASON;
 
     web_resp_t r;
     web_resp_begin(&r, req, 200, s_resp, sizeof(s_resp));

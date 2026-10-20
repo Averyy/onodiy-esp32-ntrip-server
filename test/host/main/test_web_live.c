@@ -715,7 +715,7 @@ TEST_CASE("connection history: the four kinds, newest first, nothing past the pa
     cJSON_Delete(root);
 }
 
-/* web_ws.c builds every status section into 1024 bytes and every caster summary into 768. */
+/* web_ws.c builds every status section into 1152 bytes and every caster summary into 896. */
 TEST_CASE("status sections with the new fields still fit the WebSocket's section buffers", "[web_live]")
 {
     static web_status_snap_t s;
@@ -788,7 +788,7 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     s.cst[0].unreached_s = UINT32_MAX - 1;
     memset(s.cst[0].hint, '"', sizeof(s.cst[0].hint) - 1);   /* the caster component's own text */
 
-    static char frag[1024];
+    static char frag[1152];
     for (int sec = 0; sec < WEB_SEC_COUNT; sec++) {
         if (sec == WEB_SEC_UPDATE) {
             continue;   /* not changed here */

@@ -327,7 +327,7 @@ async function manageSave(c) {
   return sent.filter(x => x.method === 'PUT').map(x => x.body);
 }
 
-/* Logs' event card with two records: "Clear journal…", confirmed, answered with c.answer ([status, body]).
+/* Logs' event card with two records: "Clear journal", confirmed, answered with c.answer ([status, body]).
  * What it then shows: the toast (text, tone), the card's error line, whether it read the journal again, and
  * the time the DELETE may take before the page gives up on it. */
 async function journalClear(c) {
@@ -352,7 +352,7 @@ async function journalClear(c) {
   ids.modal = new El('div');
   const card = ui.eventCard();
   await settle();
-  const wipe = [...card.el.walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Clear journal…');
+  const wipe = [...card.el.walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Clear journal');
   const r = { shown: !!wipe && !wipe.hidden };
   wipe.fire('click');
   await settle();
@@ -457,6 +457,8 @@ function pageParts(el) {
     msgs: v.filter(e => (e.className || '').indexOf('msg ') === 0).map(m => [m.className.slice(4), m.textContent]),
     /* Amber text (the position casters get, a value that differs). */
     warn: v.filter(e => (' ' + e.className + ' ').indexOf(' t-warn ') >= 0).map(e => e.textContent),
+    /* The setting rows: [title, text]. */
+    settings: v.filter(e => e.className === 'setting-row').map(e => [e.kids[0].kids[0].textContent, e.kids[0].kids[1].textContent]),
   };
 }
 
@@ -550,17 +552,26 @@ async function receiverPageView(c) {
   return r;
 }
 
+/* The receiver wiring as GET /api/system gives it: the dev board's, nothing saved. */
+const WIRING = { rx_gpio: 1, tx_gpio: 2, port: 1, saved: null, default: { rx_gpio: 1, tx_gpio: 2, port: 1 },
+  pins: [1, 2, 4, 5, 17, 18] };
+
 /* Settings for the status c.status and the station's answers: c.wifi (GET /api/wifi), c.update (GET /api/update), c.flash
- * (GET /api/gnss/flash), c.staged (GET /api/upload/gnss). What it shows (pageParts); with c.click, also what it shows once
- * the first button of that name is pressed. */
+ * (GET /api/gnss/flash), c.staged (GET /api/upload/gnss), c.wiring (GET /api/system's wiring, WIRING by default). What it
+ * shows (pageParts); with c.click, also what it shows once the first button of that name is pressed. With c.wire, the
+ * receiver wiring's dialog: what it shows (wire.dialog, its lists as [option, greyed out, chosen]), then with
+ * c.wire.pick ([rx, tx, port]) chosen and saved (the answer c.wire.answer), the PUTs that went out and the page after. */
 async function settingsPageView(c) {
   const settle = async () => {
     for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
   };
-  routes = (m, p) => {
+  routes = (m, p, body) => {
     const path = p.split('?')[0];
     if (path === '/api/wifi') return [200, c.wifi];
-    if (path === '/api/system') return [200, { hostname: 'onodiy', hostname_active: 'onodiy', public_status: false }];
+    if (path === '/api/system' && m === 'PUT') return [200, c.wire.answer];
+    if (path === '/api/system') {
+      return [200, { hostname: 'onodiy', hostname_active: 'onodiy', public_status: false, wiring: c.wiring || WIRING }];
+    }
     if (path === '/api/update') return [200, c.update];
     if (path === '/api/gnss/flash') return [200, c.flash || { journal: 'none', flash_available: false }];
     if (path === '/api/upload/gnss') return [200, c.staged || { staged: null }];
@@ -575,6 +586,27 @@ async function settingsPageView(c) {
   if (c.click) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.click).fire('click');
     r.after = pageParts(el);
+  }
+  if (c.wire) {
+    ids.modal = new El('div');
+    [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Edit pins').fire('click');
+    await settle();
+    const lists = () => [...visible(ids.modal)].filter(e => e.tagName === 'SELECT');
+    const options = () => lists().map(s => s.options.map(o => [o.textContent, !!o.disabled, !!o.selected]));
+    r.wire = { dialog: pageParts(ids.modal), lists: options() };
+    if (c.wire.pick) {
+      lists().forEach((s, i) => {
+        s.value = String(c.wire.pick[i]);
+        s.fire('change');
+      });
+      r.wire.picked = options();
+      const n = sent.length;
+      [...ids.modal.walk()].find(e => e.tagName === 'FORM').fire('submit');
+      await settle();
+      r.wire.puts = sent.slice(n).filter(x => x.method === 'PUT').map(x => [x.path, x.body]);
+      r.wire.open = [...ids.modal.walk()].some(e => e.tagName === 'FORM');
+      r.wire.after = pageParts(el);
+    }
   }
   view.destroy();
   routes = null;
@@ -2341,8 +2373,8 @@ SET_FLASH = {"journal": "waiting",
 def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fold_outs():
     """Settings: Network (the Wi-Fi with its signal in words and dBm, Change network, the station's name and public status
     page, the setup hotspot with its name, password and its own password button), Updates (then Install manually: both
-    files, the receiver from a PC and going back), Receiver (a link to Receiver settings) and the Danger zone (restart,
-    the admin password with the BOOT-button way back, factory reset). No fold-outs anywhere: the hotspot's password field comes with its button, the update
+    files and the receiver from a PC), Receiver (a link to Receiver settings) and the Danger zone (restart, the admin
+    password with the BOOT-button way back, reverting the app, the receiver wiring, factory reset). No fold-outs anywhere: the hotspot's password field comes with its button, the update
     session's record shows whole."""
     on = {**SET_WIFI, "online": False, "rssi": None, "offline_s": 420,
           "ap": {**SET_WIFI["ap"], "active": True, "reasons": ["fallback"], "clients": 1, "password_set": False}}
@@ -2356,14 +2388,14 @@ def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fo
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
     assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set (change)"
     # Change network small in the title row; the hotspot's password through the link in its row, no button of its own.
-    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start", "Revert…",
-                              "Receiver settings", "Restart", "Change password", "Factory reset…"]
+    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start",
+                              "Receiver settings", "Restart", "Change password", "Revert", "Edit pins", "Factory reset"]
     assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held.",
                             "Position, signals, correction messages and how the receiver is set up."]
     # The hotspot's password: its field and buttons once its button is pressed (the admin password's stays as it is).
     assert off["after"]["fields"] == ["Station name", "New password"]
     assert off["after"]["buttons"][:5] == ["Change network", "change", "Cancel", "Remove password", "Set password"]
-    assert off["after"]["buttons"][-2] == "Change password"
+    assert off["after"]["buttons"][-5:] == ["Restart", "Change password", "Revert", "Edit pins", "Factory reset"]
     # Offline, the hotspot open without a password: no signal row (no word without its dBm), nothing to remove.
     assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None (set password)"
     assert "set password" in hot["buttons"] and "Remove password" not in hot["after"]["buttons"]
@@ -2372,6 +2404,71 @@ def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fo
     assert sess["subs"][-1] == "What the receiver sent"
     srows = dict(sess["rows"])
     assert srows["Package"].startswith("2.9") and srows["Transfers / loader attempts"] == "1 / 1" and srows["Blocks resent"] == "3"
+
+WIRING = {"rx_gpio": 1, "tx_gpio": 2, "port": 1, "saved": None, "default": {"rx_gpio": 1, "tx_gpio": 2, "port": 1},
+          "pins": [1, 2, 4, 5, 17, 18]}
+
+
+def wiring_answer(saved, active=None):
+    """PUT /api/system's answer once `saved` is stored (None: the defaults), the station still on `active`."""
+    w = {**WIRING, **(active or {}), "saved": saved}
+    return {"hostname": "onodiy", "hostname_active": "onodiy", "public_status": False, "wiring": w,
+            "reboot_required": saved is not None and any(saved[k] != w[k] for k in ("rx_gpio", "tx_gpio", "port"))}
+
+
+def test_danger_zone_receiver_wiring_row_and_its_dialog():
+    """Settings, Danger zone: the receiver wiring's row says the pins and port in use and whether they are the defaults;
+    Edit pins opens a dialog with three lists (the defaults marked, the pin the other list holds greyed out). Saving
+    sends the wiring, or null for the defaults; the row then says what the next start uses."""
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE}
+    saved = {"rx_gpio": 17, "tx_gpio": 18, "port": 2, "problem": None}
+    d, moved, back, broken, rows_only = run_editor([
+        {**base, "wire": {"pick": [17, 18, 2], "answer": wiring_answer(saved)}},
+        {**base, "wiring": {**WIRING, "rx_gpio": 17, "tx_gpio": 18, "port": 2, "saved": saved},
+         "wire": {"pick": [1, 2, 1], "answer": wiring_answer(None, {"rx_gpio": 17, "tx_gpio": 18, "port": 2})}},
+        {**base, "wiring": {**WIRING, "rx_gpio": 17, "tx_gpio": 18, "port": 2}, "wire": {}},
+        {**base, "wiring": {**WIRING, "saved": {"rx_gpio": 26, "tx_gpio": 2, "port": 1,
+                                                 "problem": "GPIO26 is used by flash/PSRAM."}}},
+        {**base, "wiring": {**WIRING, "saved": {**saved}, }},
+    ])
+    rows = dict(d["settings"])
+    assert rows["Receiver wiring"] == "RX GPIO1, TX GPIO2, receiver COM1 (the defaults). Change only on a board wired differently."
+    assert [t for t, _ in d["settings"]][-5:] == ["Restart the station", "Reset admin password", "Revert firmware",
+                                                    "Receiver wiring", "Factory reset"]
+    dlg = d["wire"]["dialog"]
+    assert dlg["fields"] == ["ESP32 RX pin", "ESP32 TX pin", "Receiver port"]
+    assert dlg["hints"] == ["Wired to the receiver's TXD.", "Wired to the receiver's RXD.", "Receiver firmware updates need COM1."]
+    assert dlg["buttons"] == ["Cancel", "Save"]
+    rx, tx, port = d["wire"]["lists"]
+    assert [o[0] for o in rx] == ["GPIO1 (default)", "GPIO2", "GPIO4", "GPIO5", "GPIO17", "GPIO18"]
+    assert [o[0] for o in tx] == ["GPIO1", "GPIO2 (default)", "GPIO4", "GPIO5", "GPIO17", "GPIO18"]
+    assert [o[0] for o in port] == ["COM1 (default)", "COM2", "COM3"]
+    # The pin one list holds is greyed out in the other.
+    assert [o[0] for o in rx if o[1]] == ["GPIO2"] and [o[0] for o in tx if o[1]] == ["GPIO1"]
+    picked_rx, picked_tx, _ = d["wire"]["picked"]
+    assert [o[0] for o in picked_rx if o[1]] == ["GPIO18"] and [o[0] for o in picked_tx if o[1]] == ["GPIO17"]
+    assert d["wire"]["puts"] == [["/api/system", {"wiring": {"rx_gpio": 17, "tx_gpio": 18, "port": 2}}]]
+    assert d["wire"]["open"] is False
+    after = d["wire"]["after"]
+    assert dict(after["settings"])["Receiver wiring"].startswith("RX GPIO1, TX GPIO2, receiver COM1 (the defaults).")
+    assert ["info", "Saved: RX GPIO17, TX GPIO18, receiver COM2. Takes effect after the next restart."] in after["msgs"]
+    # Running on a saved wiring: the dialog starts from it; choosing the defaults sends null (the build's), and says so.
+    assert dict(moved["settings"])["Receiver wiring"] == ("RX GPIO17, TX GPIO18, receiver COM2. Change only on a board "
+                                                          "wired differently.")
+    assert [o[0] for o in moved["wire"]["lists"][2] if o[2]] == ["COM2"]
+    assert moved["wire"]["puts"] == [["/api/system", {"wiring": None}]]
+    assert ["info", "Saved: back to the defaults (RX GPIO1, TX GPIO2, receiver COM1). Takes effect after the next "
+                    "restart."] in moved["wire"]["after"]["msgs"]
+    # Saved back to the defaults before a restart (the dialog starts from them); a saved wiring the board no longer
+    # takes, with its reason.
+    assert ["info", "Saved: back to the defaults (RX GPIO1, TX GPIO2, receiver COM1). Takes effect after the next "
+                    "restart."] in back["msgs"]
+    assert [[o[0] for o in lst if o[2]] for lst in back["wire"]["lists"]] == [["GPIO1 (default)"], ["GPIO2 (default)"],
+                                                                             ["COM1 (default)"]]
+    assert ["warn", "The saved wiring (RX GPIO26, TX GPIO2, receiver COM1) is not used: GPIO26 is used by flash/PSRAM. "
+                    "Edit it, or save the defaults."] in broken["msgs"]
+    assert ["info", "Saved: RX GPIO17, TX GPIO18, receiver COM2. Takes effect after the next restart."] in rows_only["msgs"]
+
 
 SIG = {"best_sys": "galileo", "best_bands": 4, "e6_lost": False, "epoch_age_ms": 420, "rtcm1230_supported": True,
        "epochs": 900, "epoch_gaps": 0, "epoch_jumps": 0, "messages": [],

@@ -8,12 +8,15 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 
 - Receiver: the signal checks side by side on one banner; a tidier sky key; "Reset
   location" (was Survey again); the OpenStreetMap link beside "Hide the map".
-- Settings, Updates: "Revert version" names the version it starts.
 - Receiver settings: no "(recommended)" tags; the station-restart option reworded.
 - Status, Onocoy: today's online share is the headline, the offline time left a row.
 - Onocoy setup: the username says it is the reference station credential.
 - Receiver firmware: UM982 Build 23575 (February 2026) is in the release for receivers on
   older builds (receiver flashing is still off: stations download and check it only).
+- Settings, Danger zone: "Receiver wiring" sets the ESP32 pins and receiver port for a
+  board you wired yourself (from the next start; updates and a factory reset keep it);
+  "Revert firmware" moved here from Updates and names the version it starts.
+- Buttons no longer end in "…".
 
 ## v0.1.3
 

@@ -456,6 +456,9 @@ def main() -> int:
     ap.add_argument("--respond-sd", type=float, default=None, metavar="M",
                     help="the height standard deviation the responder reports with that solution (default 2.1 m; "
                          "a poor sky's solution reports more)")
+    ap.add_argument("--respond-port", type=int, default=1, choices=(1, 2, 3), metavar="N",
+                    help="the responder's port on the link: COM1 (1, the dev board), COM2 or COM3 (a board wired so; "
+                         "the station's receiver wiring must say the same)")
     ap.add_argument("--respond-text-every", type=float, default=None, metavar="S",
                     help="the responder also sends a satellite-in-view sentence listing no satellites every S seconds, "
                          "nobody asking (the receiver's GPGSV output without an antenna)")
@@ -492,14 +495,15 @@ def main() -> int:
             responder = Um982Responder(group=parse_group(args.respond_group),
                                        reject=[parse_group(g) for g in args.respond_reject], restart_s=restart_s,
                                        own=own, separation=args.respond_geoid, text_every_s=args.respond_text_every,
-                                       sd_hgt=2.1 if args.respond_sd is None else args.respond_sd)
+                                       sd_hgt=2.1 if args.respond_sd is None else args.respond_sd,
+                                       port=args.respond_port)
         except ValueError as e:
             ap.error(f"--respond-group/--respond-reject: {e}")
     elif (args.respond_reject or args.respond_group != "4,5" or args.respond_restart is not None
           or args.respond_position is not None or args.respond_geoid != 0.0 or args.respond_text_every is not None
-          or args.respond_sd is not None):
+          or args.respond_sd is not None or args.respond_port != 1):
         ap.error("--respond-group, --respond-reject, --respond-restart, --respond-position, --respond-geoid, "
-                 "--respond-sd and --respond-text-every need --respond")
+                 "--respond-sd, --respond-port and --respond-text-every need --respond")
     elif args.input == "none":
         ap.error("the input \"none\" (no RTCM) needs --respond: nothing would arrive at all")
     try:

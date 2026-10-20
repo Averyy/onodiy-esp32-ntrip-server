@@ -512,7 +512,8 @@ object as sections (section 7), so the UI keeps one model. Admin form:
                "glonass": true,
                "rtcm1230_supported": true, "journal": "none",
                "uart_closed": false, "rx_maintenance": false, "maintenance_left_s": 0, "maintenance_chosen_s": 0,
-               "next_detect_in_s": null, "first_apply_held": false},
+               "next_detect_in_s": null, "first_apply_held": false,
+               "link": {"rx_gpio": 1, "tx_gpio": 2, "port": 1}},
   "casters": [
     {"slot": 0, "name": "Onocoy", "empty": false, "enabled": true, "protected": true, "host": "servers.onocoy.com",
      "state": "streaming", "reason": "none", "state_age_s": 3600, "connected_s": 3600,
@@ -561,6 +562,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
+| `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with a mountpoint and the console's username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
@@ -1386,8 +1388,9 @@ profile came back after it. `check_running`: a package check runs (builds
 without flashing). `flash_available` is `station_flash_available()`: `false`
 in builds without receiver flashing (`CONFIG_UM98X_FLASH_ENABLE` off), then
 `flash_reason` is `not_enabled_in_build` and the UI says that receiver
-firmware updates are not enabled in this build yet; packages can still be
-uploaded and checked.
+firmware updates are not enabled in this build yet; `false` too with the
+receiver wired by another port than COM1 (`flash_reason` `receiver_port`);
+packages can still be uploaded and checked.
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
 (only `clear` there), `settings_unavailable`, `receiver_maintenance` (retry
@@ -1970,15 +1973,44 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
 {"hostname": "onodiy", "hostname_active": "onodiy", "public_status": false,
  "setup_done": true, "settings_available": true,
  "version": "v0.3.0", "project": "onodiy-esp32-ntrip-server", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
- "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8}}
+ "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8},
+ "wiring": {"rx_gpio": 1, "tx_gpio": 2, "port": 1,
+            "saved": {"rx_gpio": 17, "tx_gpio": 18, "port": 2, "problem": null},
+            "default": {"rx_gpio": 1, "tx_gpio": 2, "port": 1},
+            "pins": [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47, 48]}}
 ```
+
+`wiring` is how the receiver is wired to the ESP32: its top-level fields the
+wiring this start uses (the ESP32's RX GPIO, wired to the receiver's TXD; its
+TX GPIO, to the receiver's RXD; the receiver port, `1` = COM1 ... `3` =
+COM3). `saved` is the one saved on the station (settings `gnss/wiring`),
+`null` when none is (the build's applies); it takes effect at the next start,
+and app updates and a factory reset keep it. Its `problem` says why the
+board does not use it (a later build reserving one of its pins; the build's
+is used then), `null` when it is usable. `default` is the build's
+(`CONFIG_BOARD_GNSS_*`). `pins` are the GPIOs the link may use on this board:
+ones the ESP32-S3 has that the flash and PSRAM, native USB, the console, the
+strapping pins (0, 3, 45, 46), the button, the status LED, the receiver
+reset and the SD card do not use.
 
 ### `PUT /api/system` (adm)
 
 `{"hostname": "roof-station", "public_status": true}`, both optional.
 `hostname` 1-32 of `[A-Za-z0-9-]`, not starting or ending with `-`; it takes
-effect at the next boot (`"reboot_required": true`). `200` with the system
-object. Errors: `400 invalid_field`, `409 settings_unavailable`.
+effect at the next boot (`"reboot_required": true`).
+
+`"wiring": {"rx_gpio": 17, "tx_gpio": 18, "port": 2}` saves the receiver
+wiring for the next start; `"wiring": null`, or the build's own, erases the
+saved one (the build's applies). `rx_gpio` and `tx_gpio` 0-48 and
+different, both in `pins`; `port` 1-3 (receiver firmware updates need
+COM1: `flash_reason` `receiver_port`). `"reboot_required": true` when the
+next start uses another wiring than this one.
+
+`200` with the system object. Errors: `400 invalid_field` (`field`
+`wiring.rx_gpio`, `wiring.tx_gpio`, `wiring.port`, or `wiring` with the
+reason as the message, e.g. "GPIO26 is used by flash/PSRAM."), `409
+journal_open` (a wiring while a receiver update journal is open: it ends on
+the wiring it began with), `409 settings_unavailable`.
 
 ---
 
@@ -2020,7 +2052,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
 | `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: the rest of the trial (confirmation plus crash watch; for a reinstall of the running image the confirmation only) |
-| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; the reason is `not_enabled_in_build` when it is `false`, else `null` |
+| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
 ### `GET /api/update` (adm)
@@ -2068,7 +2100,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
-| `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason is `not_enabled_in_build` when it is `false`, else `null` |
+| `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason (`not_enabled_in_build`, `receiver_port`) when it is `false`, else `null` |
 
 **Result codes** (`last_result.result`, final `progress` messages): `ok`,
 `not_available_yet`, `refused` (the state changed between click and start),
@@ -2672,8 +2704,8 @@ update, an app image write or the app's verify window holds an inhibit.
 `{"confirm": true}`. Erases the user settings (Wi-Fi, admin password,
 casters, receiver profile and locked position, update repository, web
 settings) and reboots into first setup with an open setup AP. Kept: the
-receiver update journal, the last receiver identity, app trial and
-rollback records, boot history, availability ledger. `202 {"accepted":
+receiver wiring, the receiver update journal, the last receiver identity,
+app trial and rollback records, boot history, availability ledger. `202 {"accepted":
 true}`. Errors: `409 journal_open` (a receiver update runs; allowed while it
 waits for the user), `409 reboot_inhibited`, `409 settings_unavailable`,
 `400 confirm_required`.

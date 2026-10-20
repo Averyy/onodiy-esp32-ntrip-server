@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
-"""A scripted UM982 on COM1, for the replay in QEMU (test tooling).
+"""A scripted UM982 on COM1 (or the `port` the station is wired to), for the replay in QEMU (test tooling).
 
 Um982Responder answers the commands a station's receiver session sends,
 with the reply formats of benchlib.unicore (the public reply samples, the
@@ -50,6 +50,12 @@ it was not tried), then prints the restart banner and comes back with what
 was saved (signal group, base mode, outputs, COM1 speed). Build 25164 takes
 8.0-9.2 s to its banner; the default here is shorter, to keep the tests
 quick.
+With `port` 2 or 3 the station is wired to that port instead: COM1 above
+stands for it (its UNLOG, RTCMxxxx, GPGSV, CONFIG COMn and the restart
+banner); the same commands for another port are answered OK and change
+nothing here, as a receiver's other ports are not on the link. The dump
+lists all three ports (the others at 115200).
+
 Nothing here touches a real receiver: the station's commands arrive over the
 replay's local TCP connection.
 
@@ -78,6 +84,7 @@ from .unicore import (
     own_position_line, refusal_text, restarting_line, version_line,
 )
 
+PORTS = ("COM1", "COM2", "COM3")
 ACCEPTED_GROUPS = ((4, 5), (3, 6), (5, 0), (7, 0))
 ACK_DELAY_S = 0.03
 DATA_DELAY_S = 0.06
@@ -139,7 +146,10 @@ class Um982Responder:
     def __init__(self, group: tuple[int, int] = (4, 5), firmware: str = "R4.10Build25164",
                  reject: tuple[tuple[int, int], ...] | list = (), restart_s: float = 3.0, model: str = "UM982",
                  baud: int = 115200, clock=time.monotonic, own: tuple[float, float, float] | None = None,
-                 separation: float = 0.0, text_every_s: float | None = None, sd_hgt: float = 2.1):
+                 separation: float = 0.0, text_every_s: float | None = None, sd_hgt: float = 2.1, port: int = 1):
+        if port not in (1, 2, 3):
+            raise ValueError(f"port {port}: the receiver has COM1, COM2 and COM3")
+        self.port = f"COM{port}"   # the port on the link
         self.clock = clock
         self.text_every_s = float(text_every_s) if text_every_s else None   # an unasked line this often
         self.next_text = clock() + self.text_every_s if self.text_every_s else 0.0
@@ -194,7 +204,7 @@ class Um982Responder:
     def _tick(self, now: float) -> None:
         if self.banner_pending and now >= self.restart_until:
             self.banner_pending = False
-            self.outbox.append((now, (banner_line("COM1") + "\r\n").encode()))
+            self.outbox.append((now, (banner_line(self.port) + "\r\n").encode()))
         if self.text_every_s and now >= self.next_text:
             if now >= self.restart_until:
                 self.outbox.append((now, (NO_SKY_GSV + "\r\n").encode()))
@@ -328,18 +338,22 @@ class Um982Responder:
         if up == "VERSIONA":
             self._ack(cmd, now)
             self._say(now, DATA_DELAY_S, version_line(self.model, self.firmware))
-        elif up == "UNLOG COM1":
+        elif up == "UNLOG " + self.port:
             self.output = False
             self.station_out.clear()
             self._ack(cmd, now)
-        elif up == "UNLOG COM1 GPGSV" or (len(words) == 3 and words[0] == "GPGSV" and words[1] == "COM1"):
+        elif (len(words) == 3 and words[0] == "UNLOG" and words[2] == "GPGSV" and words[1] in PORTS) or \
+                (len(words) == 3 and words[0] == "GPGSV" and words[1] in PORTS):
             self._ack(cmd, now)
+        elif len(words) >= 2 and words[1] in PORTS and words[1] != self.port and \
+                (words[0] == "UNLOG" or (words[0].startswith("RTCM") and words[0][4:].isdigit())):
+            self._ack(cmd, now)   # another port's output: not on the link
         elif up == "CONFIG":
             self._ack(cmd, now)
             m, s = self.group
             self._say(now, DATA_DELAY_S,
                       config_line("SIGNALGROUP", f"CONFIG SIGNALGROUP {m} {s}"),
-                      config_line("COM1", f"CONFIG COM1 {self.baud}"),
+                      *(config_line(c, f"CONFIG {c} {self.baud if c == self.port else 115200}") for c in PORTS),
                       config_line("MMP", "CONFIG MMP ENABLE"),
                       config_line("RTCMB1CB2A", f"CONFIG RTCMB1CB2A {self.b1c}"),
                       config_line("MASK", "CONFIG MASK 5.0"),
@@ -374,7 +388,7 @@ class Um982Responder:
         elif words[:2] == ["MODE", "BASE"]:
             self.mode = up
             self._ack(cmd, now)
-        elif len(words) == 3 and words[0].startswith("RTCM") and words[0][4:].isdigit() and words[1] == "COM1":
+        elif len(words) == 3 and words[0].startswith("RTCM") and words[0][4:].isdigit() and words[1] == self.port:
             mtype = int(words[0][4:])
             try:
                 period = float(words[2])
@@ -387,9 +401,11 @@ class Um982Responder:
                     self.station_out.pop(mtype, None)
             self.output = True
             self._ack(cmd, now)
-        elif len(words) == 3 and words[:2] == ["CONFIG", "COM1"] and words[2].isdigit():
+        elif len(words) == 3 and words[:2] == ["CONFIG", self.port] and words[2].isdigit():
             self.baud = int(words[2])
             self._ack(cmd, now)
+        elif len(words) == 3 and words[0] == "CONFIG" and words[1] in PORTS and words[2].isdigit():
+            self._ack(cmd, now)   # another port's speed: not the link's
         elif words[:2] == ["CONFIG", "RTCMB1CB2A"] and len(words) == 3:
             self.b1c = words[2]
             self._ack(cmd, now)

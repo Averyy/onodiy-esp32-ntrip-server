@@ -36,11 +36,16 @@ const FLASH_ACTIONS = [
     'The session is forgotten and its package released. The receiver may not run valid firmware afterwards.'],
 ];
 
-const NOT_ENABLED = 'Receiver firmware updates are not enabled in this build yet.';
+/* Why receiver firmware updates are off: this build, or a receiver wired by another port than COM1. */
+function notEnabled() {
+  const u = S.status && S.status.update;
+  return u && u.gnss_flash_reason === 'receiver_port' ? 'Receiver firmware updates work only with the receiver wired by its COM1.' :
+    'Receiver firmware updates are not enabled in this build yet.';
+}
 const TRANSFER_FAILED = 'A transfer failed; the update goes on (keep the station powered)';
-const NOT_YET_DOWNLOADED = 'Receiver package downloaded and verified. ' + NOT_ENABLED +
+const notYetDownloaded = () => 'Receiver package downloaded and verified. ' + notEnabled() +
   ' The station now checks the package against every rule; nothing is sent to the receiver.';
-const CHECK_STARTED = NOT_ENABLED + ' The station checks the package against every rule, then releases it; nothing is sent to the receiver.';
+const checkStarted = () => notEnabled() + ' The station checks the package against every rule, then releases it; nothing is sent to the receiver.';
 
 /* Outcome of a receiver session or package check: success and checked are good,
  * a refused package or an unexpected build bad, everything else needs a look. */
@@ -58,7 +63,7 @@ function outcomeText(m) {
     case 'success':
       return 'Updated: the receiver runs ' + fw + '.' + (m.reapply_ok === false ? ' The station profile did not come back; check the Receiver page.' : '');
     case 'checked':
-      return 'The package passes every rule. ' + NOT_ENABLED + ' It was released; nothing was sent to the receiver.';
+      return 'The package passes every rule. ' + notEnabled() + ' It was released; nothing was sent to the receiver.';
     case 'rejected':
       return 'Package refused' + (m.failed_rule ? ' by rule ' + m.failed_rule + (m.cross_layout ? ' (other partition layout)' : '') : '') +
         (m.reason ? ': ' + m.reason : '') + '. Nothing was sent to the receiver.';
@@ -263,7 +268,7 @@ function receiverWarnings(flashAvailable) {
     h('ul', null,
       h('li', null, 'Do not power off the station or plug anything into the receiver\'s USB port.'),
       h('li', null, 'The station profile is applied to the receiver again afterwards.')),
-    flashAvailable ? null : msg('warn', NOT_ENABLED + ' The station verifies the package and checks it against every rule, then releases it. ' +
+    flashAvailable ? null : msg('warn', notEnabled() + ' The station verifies the package and checks it against every rule, then releases it. ' +
       'Nothing is sent to the receiver.'),
   ];
 }
@@ -308,7 +313,8 @@ const updatesPart = {
       check: progressWidget(), app_update: progressWidget(), app_upload: progressWidget(),
       gnss_update: progressWidget(), gnss_flash: progressWidget(), gnss_upload: progressWidget(), gnss_check: progressWidget(),
     };
-    const headBox = h('div'), appBox = h('div'), gnssBox = h('div'), maintBox = h('div'), rbBox = h('div');
+    const headBox = h('div'), appBox = h('div'), gnssBox = h('div'), maintBox = h('div'), rbBox = h('div'), rolledBox = h('div');
+    const rbErr = errBox();
     const sessionCard = h('section', { class: 'card wide tight-kv', hidden: true });
     const stagedBox = h('div', { class: 'sect' });
     const appErr = errBox(), gnssErr = errBox(), sessionErr = errBox(), maintErr = errBox();
@@ -384,17 +390,20 @@ const updatesPart = {
         P.app_update.el, appErr);
       /* The version the station would start: the other app slot's, else (unreadable) the one before this. */
       const to = a.rollback_version || 'the version installed before ' + a.running;
-      const rb = a.rollback_available ? btn('Revert…', async () => {
+      const rb = a.rollback_available ? btn('Revert', async () => {
         const ok = await dialog({ title: 'Revert to ' + to + '?', ok: 'Revert', okKind: 'danger solid',
           body: h('p', null, 'The station restarts into ' + to + '. ' + a.running +
             ' is not offered again; you can still install it from a file.') });
         if (!ok) return;
-        const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), appErr);
+        const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), rbErr);
         if (r !== undefined) showRestarting('Reverting to ' + to);
-      }, 'small danger') : null;
-      mount(rbBox, rb ? settingRow('Revert version', 'Revert to ' + to + '.', rb) : null,
-        (a.rolled_back || []).length ? h('p', { class: 'muted small' }, 'Rolled back here, not offered again: ' + a.rolled_back.join(', ') + '.') : null);
-      rbBox.hidden = !rbBox.firstChild;
+      }, 'danger') : null;
+      /* The revert row is a row of the Danger zone (Settings shows it there); the versions rolled back stay here. */
+      mount(rbBox, rb ? settingRow('Revert firmware', 'Revert to ' + to + '.', rb) : null, rb ? rbErr : null);
+      rbBox.hidden = !rb;
+      mount(rolledBox, (a.rolled_back || []).length ?
+        h('p', { class: 'muted small' }, 'Rolled back here, not offered again: ' + a.rolled_back.join(', ') + '.') : null);
+      rolledBox.hidden = !rolledBox.firstChild;
     }
 
     /* ---- Receiver (offered package) ---- */
@@ -423,7 +432,7 @@ const updatesPart = {
     function renderGnss() {
       const g = u.gnss || {};
       const blocked = g.blocked && g.blocked !== 'none';
-      const upd = g.available ? btn(g.flash_available ? 'Update receiver…' : 'Download and verify…', () => updateReceiver(upd), appMain ? '' : 'primary',
+      const upd = g.available ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd), appMain ? '' : 'primary',
         { disabled: blocked || (rflow && rflow.state === 'download') }) : null;
       const lr = u.last_result;
       const last = flash && flash.last;
@@ -528,7 +537,7 @@ const updatesPart = {
         pr && pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
         f.receiver_text ? [h('h3', { class: 'sub' }, 'What the receiver sent'), h('pre', { class: 'log short' }, f.receiver_text)] : null,
         f.last && f.last.ended_unix && f.journal === 'none' ? msg(outcomeTone(f.last.outcome), outcomeText(f.last)) : null,
-        f.flash_available ? null : msg('', NOT_ENABLED + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
+        f.flash_available ? null : msg('', notEnabled() + ' Retrying and restarting the receiver from here need a build with receiver flashing; clearing works.'),
         sessionErr,
         h('div', { class: 'form-actions' }, buttons.slice().reverse()),
         notNow.length ? h('ul', { class: 'muted small' }, notNow) : null);
@@ -675,7 +684,7 @@ const updatesPart = {
         }
       };
       const err = errBox();
-      const go = btn(staged.flash_available ? 'Start the receiver update…' : 'Continue…', async () => {
+      const go = btn(staged.flash_available ? 'Start the receiver update' : 'Continue', async () => {
         fExp.error(null);
         const v = exp.value.trim();
         const m = /Build(\d+)/.exec(v);
@@ -705,7 +714,7 @@ const updatesPart = {
           staged = null;
           if (r && r.check_only) {
             /* No receiver flashing in this build: the station checks the package and releases it. */
-            rflow = { state: 'check', upload: true, tone: 'warn', text: CHECK_STARTED };
+            rflow = { state: 'check', upload: true, tone: 'warn', text: checkStarted() };
             P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
             renderStaged(msg('info', 'The package check started. Its result shows above.'));
           } else {
@@ -738,7 +747,7 @@ const updatesPart = {
         downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
         fExp.el,
         shaOk.el,
-        staged.flash_available ? null : msg('warn', NOT_ENABLED + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
+        staged.flash_available ? null : msg('warn', notEnabled() + ' Continuing checks the package against every rule and releases it; nothing is sent to the receiver.'),
         err,
         h('div', { class: 'form-actions' }, cancel, go));
       tick();
@@ -753,7 +762,7 @@ const updatesPart = {
         h('div', null, settingRow('Receiver package (.pkg)', 'Checked first. Nothing reaches the receiver until you confirm.', pkgPick.b),
           pkgPick.input, P.gnss_upload.el, pkgErr, stagedBox),
         maintBox,
-        rbBox));
+        rolledBox));
     const updCard = h('section', { class: 'card' }, headBox, h('div', { class: 'rows' }, appBox, gnssBox, manualBox));
 
     /* ---- Loading and live progress ---- */
@@ -781,7 +790,7 @@ const updatesPart = {
       }
       if (u.state === 'downloading_app') P.app_update.set({ job: 'app_update', phase: 'downloading', pct: u.progress_pct, done: false });
       if (flash && flash.check_running && !rflow) {
-        rflow = { state: 'check', tone: 'warn', text: CHECK_STARTED };
+        rflow = { state: 'check', tone: 'warn', text: checkStarted() };
         P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
       }
       if (flash && flash.journal === 'running' && flash.progress && !rflow) {
@@ -811,7 +820,7 @@ const updatesPart = {
           rflow = { state: 'download' };
         } else if (m.result === 'not_available_yet') {
           /* No receiver flashing in this build: the package check follows. */
-          rflow = { state: 'check', tone: 'warn', text: NOT_YET_DOWNLOADED };
+          rflow = { state: 'check', tone: 'warn', text: notYetDownloaded() };
         } else if (m.result === 'ok') {
           rflow = { state: 'install' };
         } else {
@@ -852,6 +861,8 @@ const updatesPart = {
     return {
       ready: ready,
       cards: { updates: updCard, session: sessionCard },
+      /* The revert row, for the Danger zone. */
+      revert: rbBox,
       update: renderMaint,
       destroy() {
         stop();

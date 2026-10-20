@@ -624,6 +624,79 @@ TEST_CASE("plan: satellite-in-view output for the live view, never saved", "[um9
     TEST_ASSERT_EQUAL_size_t(0, um98x_sat_view_command(true, 5, cmd, 4));
 }
 
+TEST_CASE("plan: on a receiver wired by its COM2, every port the station names is COM2", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[512];
+    static um98x_preview_step_t prev[UM98X_PREVIEW_MAX];
+    char sat_on[UM98X_CMD_MAX];
+    char sat_off[UM98X_CMD_MAX];
+    survey_profile(&p);
+    matching_readback(&p, &rb);
+    /* Everything is built on COM2, the port goes back to COM1, then the checks (a failed one cannot leak COM2). */
+    um98x_link_port_set(2);
+    uint8_t port = um98x_link_port();
+    const char *name = um98x_link_port_name();
+    const char *unlog = um98x_cmd_unlog();
+    bool built = um98x_plan_build(&p, &rb, 115200, false, &plan);
+    plan_text(&p, &plan, text, sizeof(text));
+    size_t n = um98x_plan_preview(&p, 115200, prev, UM98X_PREVIEW_MAX);
+    size_t on = um98x_sat_view_command(true, 5, sat_on, sizeof(sat_on));
+    size_t off = um98x_sat_view_command(false, 0, sat_off, sizeof(sat_off));
+    um98x_link_port_set(3);
+    const char *unlog3 = um98x_cmd_unlog();
+    um98x_link_port_set(0);   /* outside 1-3: ignored */
+    um98x_link_port_set(4);
+    uint8_t kept = um98x_link_port();
+    um98x_link_port_set(1);
+
+    TEST_ASSERT_EQUAL_UINT8(2, port);
+    TEST_ASSERT_EQUAL_STRING("COM2", name);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM2", unlog);
+    TEST_ASSERT_TRUE(built);
+    TEST_ASSERT_EQUAL_INT(1, occurrences(text, "CONFIG COM2 460800"));
+    TEST_ASSERT_EQUAL_INT(1, occurrences(text, "RTCM1005 COM2 1"));
+    TEST_ASSERT_EQUAL_INT(1, occurrences(text, "GPGSV COM2 10"));
+    TEST_ASSERT_EQUAL_INT(0, occurrences(text, "COM1"));
+    TEST_ASSERT_GREATER_THAN_size_t(0, n);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM2", prev[0].text);
+    for (size_t i = 0; i < n; i++) {
+        TEST_ASSERT_NULL_MESSAGE(strstr(prev[i].text, "COM1"), prev[i].text);
+    }
+    TEST_ASSERT_NOT_EQUAL(0, on);
+    TEST_ASSERT_EQUAL_STRING("GPGSV COM2 5", sat_on);
+    TEST_ASSERT_NOT_EQUAL(0, off);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM2 GPGSV", sat_off);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM3", unlog3);
+    TEST_ASSERT_EQUAL_UINT8(3, kept);
+    TEST_ASSERT_EQUAL_STRING("UNLOG COM1", um98x_cmd_unlog());
+}
+
+TEST_CASE("plan: the applied record names the port: COM1's is the profile's hash, as stored before", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    survey_profile(&p);
+    uint32_t plain = um98x_profile_hash(&p);
+    uint32_t on1 = um98x_applied_hash(&p);
+    um98x_link_port_set(2);
+    uint32_t on2 = um98x_applied_hash(&p);
+    um98x_link_port_set(3);
+    uint32_t on3 = um98x_applied_hash(&p);
+    um98x_base_profile_t bad = p;
+    bad.station_id = UM98X_STATION_ID_MAX + 1u;
+    uint32_t invalid = um98x_applied_hash(&bad);
+    um98x_link_port_set(1);
+    TEST_ASSERT_NOT_EQUAL(0, plain);
+    TEST_ASSERT_EQUAL_HEX32(plain, on1);   /* a station on COM1 keeps its record: no new configuration */
+    TEST_ASSERT_NOT_EQUAL(plain, on2);     /* rewired to COM2: configured again */
+    TEST_ASSERT_NOT_EQUAL(plain, on3);
+    TEST_ASSERT_NOT_EQUAL(on2, on3);
+    TEST_ASSERT_NOT_EQUAL(0, on2);
+    TEST_ASSERT_EQUAL_HEX32(0, invalid);
+}
+
 /* ---- apply preview ------------------------------------------------------------------- */
 
 static um98x_preview_step_t s_prev[UM98X_PREVIEW_MAX];

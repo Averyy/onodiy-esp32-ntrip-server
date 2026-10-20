@@ -54,7 +54,7 @@ extern "C" {
 #define SETTINGS_NS_GNSS            "gnss"
 #define SETTINGS_KEY_GNSS_BAUD      "baud"        /**< u32, device state: link baud rate last detected/set */
 #define SETTINGS_KEY_GNSS_PROFILE   "profile"     /**< blob: um98x_profile_encode() */
-#define SETTINGS_KEY_GNSS_APPLIED   "applied_hash" /**< u32, device state: um98x_profile_hash() of the profile last applied */
+#define SETTINGS_KEY_GNSS_APPLIED   "applied_hash" /**< u32, device state: um98x_ctl_applied_hash() of the profile last applied: its um98x_profile_hash() on COM1, mixed with the port on COM2/COM3 */
 #define SETTINGS_KEY_GNSS_APPLIED_FW "applied_fw" /**< str (<= 47 chars, like every receiver firmware string), device state: receiver firmware at the last successful apply (written with applied_hash in one batch) */
 #define SETTINGS_KEY_GNSS_RTCM1230_OK "rtcm1230_ok" /**< u8, device state: the receiver accepted (1) or rejected (0) the RTCM1230 output at the last successful apply (same batch as applied_hash; missing = not applied) */
 #define SETTINGS_KEY_GNSS_AUTOCFG   "autocfg"     /**< u8: apply the profile when the receiver drifts from it; 0 = alert only and the health ladder's reconfigure step is refused (a receiver update always re-applies) */
@@ -68,6 +68,7 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_SG_TEST   "sg_test"     /**< blob, device state: the signal-group comparison's record (sg_test_core.h, versioned), written at each transition, every 5 min while measuring, every 10 min while deciding and before a planned restart; the last test's record stays (its results are shown after a restart); erased by factory reset */
 #define SETTINGS_KEY_GNSS_MAINT     "maint"       /**< blob, device state: receiver maintenance's stored copy while it is on (station_core.h stn_maint_store_*, versioned: the image stamp, the time left at most, the chosen duration, the end by the clock), so that a reset by the ESP32's EN pin, which loses the RTC memory, resumes it; written at entry, at each extension and every minute, erased when it ends; erased by factory reset */
 #define SETTINGS_KEY_GNSS_HOLD      "hold"      /**< u8, device state: 1 = this device's first receiver configuration is held (only queries reach the receiver until the user applies); written once by a build with CONFIG_STATION_HOLD_FIRST_APPLY on a device whose profile was never applied (with gnss/autocfg = 0, and gnss/recovery = 2 if unset, in one batch); erased by the first successful apply, by gnss/autocfg turned on, by factory reset */
+#define SETTINGS_KEY_GNSS_WIRING    "wiring"      /**< blob (a setting): how the receiver is wired, board_wiring_encode() (v1 {u8 version = 1, u8 rx GPIO, u8 tx GPIO, u8 port 1-3}); missing = the build's pins and port; read once at start (board_init), written only by a user save (PUT /api/system), erased when the build's own is saved; survives factory reset (it describes the hardware) */
 
 /* ---- "cst0".."cst7": one namespace per caster slot ------------------------ */
 #define SETTINGS_NS_CASTER_FMT      "cst%u"

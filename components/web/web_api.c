@@ -37,6 +37,7 @@
 #include "sdkconfig.h"
 #include "settings.h"
 #include "station.h"
+#include "board.h"
 #include "um98x_ctl.h"
 #include "um98x_flash.h"
 #include "um98x_profile.h"
@@ -224,6 +225,8 @@ void web_snap_status(web_status_snap_t *s)
     s->protected_down_today_s = ledger_protected_down_today_s();
     s->ledger_budget_left_s = ledger_protected_budget_left_s();
     s->flash_available = WEB_FLASH_AVAILABLE;
+    s->flash_reason = WEB_FLASH_REASON;
+    board_wiring_active(&s->link);
 }
 
 uint32_t web_budget_now(void)
@@ -1043,6 +1046,7 @@ static void flash_ctx(const station_status_t *st, web_flash_ctx_t *c)
     c->receiver_in_loader = (st->alerts & STATION_ALERT_RECEIVER_IN_LOADER) != 0;
     c->station_running = !safe;
     c->flash_available = WEB_FLASH_AVAILABLE;
+    c->flash_reason = WEB_FLASH_REASON;
     c->maintenance = st->rx_maintenance;
 }
 
@@ -1618,6 +1622,12 @@ static esp_err_t send_system(httpd_req_t *req, int reboot_required)
     char idf[33];
     strlcpy(project, app->project_name, sizeof(project));
     strlcpy(idf, app->idf_ver, sizeof(idf));
+    static int8_t pins[48];   /* server task only */
+    size_t n_pins = board_link_pins(pins, sizeof(pins));
+    board_wiring_t saved;
+    bool have_saved = station_wiring_saved(&saved);
+    char saved_why[64] = "";
+    bool saved_ok = have_saved && board_wiring_check(&saved, saved_why, sizeof(saved_why));
     web_system_snap_t s = {
         .hostname = stored,
         .hostname_active = web_hostname_active(),
@@ -1633,7 +1643,14 @@ static esp_err_t send_system(httpd_req_t *req, int reboot_required)
         .flash_mb = flash / (1024u * 1024u),
         .psram_mb = (uint32_t)(esp_psram_get_size() / (1024u * 1024u)),
         .reboot_required = reboot_required,
+        .wiring_saved = have_saved,
+        .saved = saved,
+        .saved_problem = have_saved && !saved_ok ? saved_why : NULL,
+        .link_pins = pins,
+        .link_pins_count = n_pins,
     };
+    board_wiring_active(&s.wiring);
+    board_wiring_default(&s.wiring_default);
     web_resp_t resp;
     resp_begin(&resp, req, 200);
     web_build_system(&resp.w, &s);
@@ -1655,13 +1672,42 @@ static esp_err_t h_system_put(web_req_t *r)
     if (!settings_ok()) {
         return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
     }
+    board_wiring_t wiring;
+    if (in.have_wiring) {
+        if (in.wiring_default) {
+            board_wiring_default(&wiring);
+        } else {
+            wiring = (board_wiring_t){ .rx_gpio = in.rx_gpio, .tx_gpio = in.tx_gpio, .port = in.port };
+            static char why[64];   /* server task only */
+            if (!board_wiring_check(&wiring, why, sizeof(why))) {
+                return web_send_error(r->req, WEB_ERR_INVALID_FIELD, why, "wiring", UINT32_MAX, NULL, NULL);
+            }
+        }
+        /* An open receiver update journal is finished over the wiring it began on. */
+        station_snapshot(&s_st);
+        if (web_journal_view(&s_st, lifecycle_in_safe_mode()) != WEB_JOURNAL_NONE) {
+            return web_send_err(r->req, WEB_ERR_JOURNAL_OPEN);
+        }
+    }
     int reboot = -1;
+    if (in.have_wiring) {
+        esp_err_t err = station_wiring_save(in.wiring_default ? NULL : &wiring);
+        if (err != ESP_OK) {
+            return web_send_internal(r->req, err);
+        }
+        board_wiring_t active;
+        board_wiring_active(&active);
+        bool differs = !board_wiring_same(&active, &wiring);
+        ESP_LOGI(TAG, "receiver wiring saved by the user: RX GPIO%d, TX GPIO%d, COM%u%s", wiring.rx_gpio, wiring.tx_gpio,
+                 (unsigned)wiring.port, differs ? " (from the next start)" : "");
+        reboot = differs ? 1 : 0;
+    }
     if (in.have_hostname) {
         esp_err_t err = settings_set_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, in.hostname);
         if (err != ESP_OK) {
             return web_send_internal(r->req, err);
         }
-        reboot = strcasecmp(in.hostname, web_hostname_active()) != 0 ? 1 : 0;
+        reboot = (reboot == 1 || strcasecmp(in.hostname, web_hostname_active()) != 0) ? 1 : 0;
     }
     if (in.have_public_status) {
         esp_err_t err = settings_set_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, in.public_status ? 1 : 0);
@@ -1705,6 +1751,7 @@ static esp_err_t h_update_get(web_req_t *r)
         .signed_manifests = fw_update_signature_required(),
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
+        .flash_reason = WEB_FLASH_REASON,
         .rolled_back = (const char (*)[32])rolled_back,
         .rolled_back_count = n_rolled_back,
     };
@@ -1913,6 +1960,7 @@ static esp_err_t send_staged(httpd_req_t *req, const um98x_flash_pkg_facts_t *fa
         .expected_downtime_s = station_expected_flash_downtime_s(facts->size),
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
+        .flash_reason = WEB_FLASH_REASON,
     };
     web_resp_t resp;
     resp_begin(&resp, req, 200);

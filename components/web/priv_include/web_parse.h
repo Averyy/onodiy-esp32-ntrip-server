@@ -197,6 +197,11 @@ typedef struct {
     const char *hostname;
     bool have_public_status;
     bool public_status;
+    bool have_wiring;
+    bool wiring_default;           /**< "wiring": null, the build's pins and port */
+    int8_t rx_gpio;                /**< 0-48 (the board checks which it may use) */
+    int8_t tx_gpio;
+    uint8_t port;                  /**< 1-3 */
 } web_system_put_t;
 
 /** PUT /api/system. */

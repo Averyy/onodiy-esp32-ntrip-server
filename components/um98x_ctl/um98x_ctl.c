@@ -280,7 +280,7 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
         ESP_LOGW(TAG, "applied state not saved: %s", esp_err_to_name(err));
         return false;
     }
-    err = settings_batch_set_u32(b, SETTINGS_KEY_GNSS_APPLIED, um98x_profile_hash(p));
+    err = settings_batch_set_u32(b, SETTINGS_KEY_GNSS_APPLIED, um98x_applied_hash(p));
     if (err == ESP_OK) {
         err = settings_batch_set_str(b, SETTINGS_KEY_GNSS_APPLIED_FW, r->firmware);
     }
@@ -363,6 +363,16 @@ esp_err_t um98x_ctl_init(void)
     portEXIT_CRITICAL(&s_lock);
     s_inited = true;
     return ESP_OK;
+}
+
+void um98x_ctl_set_port(uint8_t port)
+{
+    um98x_link_port_set(port);
+}
+
+uint32_t um98x_ctl_applied_hash(const um98x_base_profile_t *p)
+{
+    return um98x_applied_hash(p);
 }
 
 bool um98x_ctl_on_line(const char *line, size_t len, void *ctx)

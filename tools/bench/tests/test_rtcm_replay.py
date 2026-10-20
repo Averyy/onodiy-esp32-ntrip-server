@@ -938,3 +938,37 @@ def test_cli_text_every_and_no_rtcm_options():
         assert out.returncode == 2 and "--respond-text-every must be" in out.stderr
     out = run("none")
     assert out.returncode == 2 and "needs --respond" in out.stderr
+
+
+def test_responder_on_com2_answers_for_its_own_port_only():
+    """Wired by COM2 (--respond-port 2): its UNLOG, RTCMxxxx, CONFIG COM2 and the restart banner are COM2's; the same
+    commands for COM1 are answered OK and change nothing on the link; the dump lists every port."""
+    clk = FakeClock()
+    r = Um982Responder(clock=clk, port=2)
+
+    def dump() -> dict:
+        r.feed(b"CONFIG\r\n")
+        clk.t += 0.2
+        return unicore.parse_config(lines_of(r.due()))
+
+    cfg = dump()
+    assert cfg["COM1"] == ["CONFIG COM1 115200"] and cfg["COM2"] == ["CONFIG COM2 115200"]
+    assert cfg["COM3"] == ["CONFIG COM3 115200"]
+    for cmd in (b"UNLOG COM1", b"RTCM1077 COM1 1", b"CONFIG COM1 460800"):
+        r.feed(cmd + b"\r\n")
+        clk.t += 0.1
+        assert lines_of(r.due()) == [unicore.ack_line(cmd.decode())]
+    assert r.output and dump()["COM2"] == ["CONFIG COM2 115200"]
+    r.feed(b"UNLOG COM2\r\n")
+    clk.t += 0.1
+    r.due()
+    assert not r.output
+    r.feed(b"RTCM1077 COM2 1\r\nCONFIG COM2 460800\r\n")
+    clk.t += 0.2
+    r.due()
+    assert r.output and dump()["COM2"] == ["CONFIG COM2 460800"]
+    r.feed(b"SAVECONFIG\r\nRESET\r\n")
+    clk.t += 3.6
+    assert unicore.banner_line("COM2") in lines_of(r.due())
+    with pytest.raises(ValueError):
+        Um982Responder(clock=clk, port=4)

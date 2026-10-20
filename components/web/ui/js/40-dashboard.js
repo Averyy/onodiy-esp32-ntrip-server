@@ -485,7 +485,7 @@ function publicDashboard(s, st, sig) {
 /*
  * "Check again" (POST /api/gnss/detect) on pages rebuilt every refresh
  * (patchDetect()): no listener of its own, so patch() keeps it and the
- * focus; the root handles its click (detectClicks). It reads "Searching…"
+ * focus; the root handles its click (detectClicks). It reads "Searching"
  * until the station says it searches; then it goes, and the focus moves to
  * the line that says so.
  */
@@ -498,7 +498,7 @@ function detectButton(a) {
   /* aria-disabled, not disabled: a disabled button would drop the keyboard focus. */
   const waiting = detectWaiting();
   return h('button', { type: 'button', class: 'btn small', 'data-act': 'detect', 'aria-disabled': waiting ? 'true' : null },
-    waiting ? 'Searching…' : 'Check again');
+    waiting ? 'Searching' : 'Check again');
 }
 
 /**

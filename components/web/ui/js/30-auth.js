@@ -273,7 +273,7 @@ function wifiPicker(wifi, opts) {
       r.saved ? h('span', { class: 'meta' }, 'Saved') : r.secured ? null : h('span', { class: 'meta' }, 'Open'),
       r.saved ? null : rssiView(r.rssi, true));
     }), h('button', { type: 'button', class: 'net' + (selected && selected.other ? ' sel' : ''),
-      onclick: () => pick({ other: true }) }, h('span', { class: 'ssid' }, 'Other network…')));
+      onclick: () => pick({ other: true }) }, h('span', { class: 'ssid' }, 'Other network')));
     otherField.el.hidden = !(selected && selected.other);
     pwField.el.hidden = !selected || (!selected.other && !selected.secured);
     /* What an empty field means depends on the choice. */

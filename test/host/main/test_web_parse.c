@@ -492,6 +492,44 @@ TEST_CASE("Wi-Fi and system edits", "[web_parse]")
     TEST_ASSERT_FALSE(web_parse_system_put(root, &s, &b));
     TEST_ASSERT_EQUAL_STRING("hostname", b.field);
     cJSON_Delete(root);
+    /* The receiver wiring: pins and port, or null for the build's. Which pins the board allows is its own check. */
+    root = body("{\"wiring\":{\"rx_gpio\":17,\"tx_gpio\":18,\"port\":2}}");
+    TEST_ASSERT_TRUE(web_parse_system_put(root, &s, &b));
+    TEST_ASSERT_TRUE(s.have_wiring && !s.wiring_default && !s.have_hostname);
+    TEST_ASSERT_EQUAL(17, s.rx_gpio);
+    TEST_ASSERT_EQUAL(18, s.tx_gpio);
+    TEST_ASSERT_EQUAL(2, s.port);
+    cJSON_Delete(root);
+    root = body("{\"wiring\":null}");
+    TEST_ASSERT_TRUE(web_parse_system_put(root, &s, &b));
+    TEST_ASSERT_TRUE(s.have_wiring && s.wiring_default);
+    cJSON_Delete(root);
+    root = body("{\"public_status\":false}");
+    TEST_ASSERT_TRUE(web_parse_system_put(root, &s, &b));
+    TEST_ASSERT_FALSE(s.have_wiring);
+    cJSON_Delete(root);
+    static const struct {
+        const char *json;
+        const char *field;
+    } bad_wiring[] = {
+        { "{\"wiring\":5}", "wiring" },
+        { "{\"wiring\":{\"tx_gpio\":2,\"port\":1}}", "wiring.rx_gpio" },
+        { "{\"wiring\":{\"rx_gpio\":49,\"tx_gpio\":2,\"port\":1}}", "wiring.rx_gpio" },
+        { "{\"wiring\":{\"rx_gpio\":1,\"tx_gpio\":-1,\"port\":1}}", "wiring.tx_gpio" },
+        { "{\"wiring\":{\"rx_gpio\":1,\"tx_gpio\":2.5,\"port\":1}}", "wiring.tx_gpio" },
+        { "{\"wiring\":{\"rx_gpio\":1,\"tx_gpio\":2,\"port\":4}}", "wiring.port" },
+        { "{\"wiring\":{\"rx_gpio\":1,\"tx_gpio\":2,\"port\":\"COM1\"}}", "wiring.port" },
+    };
+    for (size_t i = 0; i < sizeof(bad_wiring) / sizeof(bad_wiring[0]); i++) {
+        root = body(bad_wiring[i].json);
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_system_put(root, &s, &b), bad_wiring[i].json);
+        TEST_ASSERT_EQUAL_STRING(bad_wiring[i].field, b.field);
+        if (i > 0) {   /* the pins and the port say their rule */
+            TEST_ASSERT_EQUAL_STRING(strcmp(b.field, "wiring.port") == 0 ? "1, 2 or 3 (COM1 to COM3)" : "a GPIO number, 0-48",
+                                     b.rule);
+        }
+        cJSON_Delete(root);
+    }
 
     const char *tag = NULL;
     esp_log_level_t level = ESP_LOG_NONE;

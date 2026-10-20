@@ -758,7 +758,7 @@ static um98x_res_t signal_group(session_t *s)
 
     /* The restart brought the saved outputs back: quiet the port again,
      * then the read-back must show the new signal group. */
-    if (step(s, UM98X_TXN_COMMAND, UM98X_CMD_UNLOG_COM1, false, true, NULL) != UM98X_OK) {
+    if (step(s, UM98X_TXN_COMMAND, um98x_cmd_unlog(), false, true, NULL) != UM98X_OK) {
         return UM98X_E_FAILED;
     }
     if (read_back(s) != UM98X_OK) {
@@ -816,7 +816,7 @@ static um98x_res_t baud_change(session_t *s)
     const um98x_port_t *pt = ex->port;
     uint32_t old = pt->get_baud(pt->ctx);
     char cmd[UM98X_CMD_MAX];
-    snprintf(cmd, sizeof(cmd), "CONFIG COM1 %u", (unsigned)s->p->com1_baud);
+    snprintf(cmd, sizeof(cmd), "CONFIG %s %u", um98x_link_port_name(), (unsigned)s->p->com1_baud);
 
     for (unsigned attempt = 0; attempt < UM98X_BAUD_ATTEMPTS; attempt++) {
         pace(ex);
@@ -848,7 +848,7 @@ static um98x_res_t baud_change(session_t *s)
 
     /* Back to the old baud, sent at the new one. */
     char back[UM98X_CMD_MAX];
-    snprintf(back, sizeof(back), "CONFIG COM1 %u", (unsigned)old);
+    snprintf(back, sizeof(back), "CONFIG %s %u", um98x_link_port_name(), (unsigned)old);
     if (pt->get_baud(pt->ctx) != s->p->com1_baud) {
         (void)pt->set_baud(pt->ctx, s->p->com1_baud);
     }
@@ -958,7 +958,7 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
     bool force_mode = opts != NULL && opts->force_mode;
 
     /* Quiet port first (the station's caster pause covers the gap). */
-    if (step(s, UM98X_TXN_COMMAND, UM98X_CMD_UNLOG_COM1, false, true, NULL) != UM98X_OK) {
+    if (step(s, UM98X_TXN_COMMAND, um98x_cmd_unlog(), false, true, NULL) != UM98X_OK) {
         return UM98X_E_FAILED;
     }
     s->accepted = true;   /* the output is silenced now */

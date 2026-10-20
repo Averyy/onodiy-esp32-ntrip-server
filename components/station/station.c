@@ -804,7 +804,8 @@ static void load_stored_identity(void)
 }
 
 /* Static part of the applied check: live firmware == gnss/applied_fw,
- * gnss/applied_hash == the profile's hash, and the 1230 result stored
+ * gnss/applied_hash == the profile's hash on the link's port (a receiver
+ * rewired to another port is configured again), and the 1230 result stored
  * (missing = never applied). */
 static bool applied_static_ok(const um98x_info_t *info)
 {
@@ -812,7 +813,7 @@ static bool applied_static_ok(const um98x_info_t *info)
     char fw[sizeof(info->firmware)];
     uint8_t v = 0;
     if (settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED, &hash) != ESP_OK ||
-        hash != um98x_profile_hash(&s_profile)) {
+        hash != um98x_ctl_applied_hash(&s_profile)) {
         return false;
     }
     if (settings_get_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_APPLIED_FW, fw, sizeof(fw)) != ESP_OK ||
@@ -3398,6 +3399,7 @@ esp_err_t station_init(void)
         return err;
     }
     um98x_ctl_set_restart_cb(on_receiver_restart, NULL);
+    um98x_ctl_set_port((uint8_t)board_get()->gnss_port);   /* the wiring this start uses (board_init ran) */
     load_profile();
     load_stored_identity();
     if (s_sgt_mx == NULL) {
@@ -3962,7 +3964,42 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
 
 bool station_flash_available(void)
 {
-    return um98x_flash_enabled();
+    return station_flash_reason() == NULL;
+}
+
+bool station_wiring_saved(board_wiring_t *out)
+{
+    uint8_t blob[16];
+    size_t len = sizeof(blob);
+    if (settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, blob, &len) != ESP_OK) {
+        return false;
+    }
+    return board_wiring_decode(blob, len, out);
+}
+
+esp_err_t station_wiring_save(const board_wiring_t *w)
+{
+    board_wiring_t def;
+    board_wiring_default(&def);
+    if (w == NULL || board_wiring_same(w, &def)) {
+        esp_err_t err = settings_erase_key(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING);
+        return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+    }
+    char why[64];
+    if (!board_wiring_check(w, why, sizeof(why))) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint8_t blob[BOARD_WIRING_BLOB_LEN];
+    size_t len = board_wiring_encode(w, blob, sizeof(blob));
+    return settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, blob, len);
+}
+
+const char *station_flash_reason(void)
+{
+    if (!um98x_flash_enabled()) {
+        return "not_enabled_in_build";
+    }
+    return board_get()->gnss_port == 1 ? NULL : "receiver_port";
 }
 
 esp_err_t station_request_package_check(const station_flash_request_t *req)

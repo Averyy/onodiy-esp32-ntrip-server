@@ -174,6 +174,8 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, "UM982"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, "R4.10Build18975"));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB, job, sizeof(job)));
+    const uint8_t wiring[4] = { 1, 17, 18, 2 };   /* how the board is wired: kept, like the receiver's identity */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, wiring, sizeof(wiring)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_TRIAL, trial, sizeof(trial)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_BAD_VER, bad, sizeof(bad)));
     TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, boots, sizeof(boots)));
@@ -183,7 +185,8 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
 
     static const char *const sys[] = { SETTINGS_KEY_SCHEMA, NULL };
     static const char *const none[] = { NULL };
-    static const char *const gnss[] = { SETTINGS_KEY_GNSS_MODEL, SETTINGS_KEY_GNSS_FW, SETTINGS_KEY_GNSS_FLASH_JOB, NULL };
+    static const char *const gnss[] = { SETTINGS_KEY_GNSS_MODEL, SETTINGS_KEY_GNSS_FW, SETTINGS_KEY_GNSS_FLASH_JOB,
+                                        SETTINGS_KEY_GNSS_WIRING, NULL };
     static const char *const ota[] = { SETTINGS_KEY_OTA_TRIAL, SETTINGS_KEY_OTA_BAD_VER, NULL };
     static const char *const life[] = { SETTINGS_KEY_BOOT_HISTORY, NULL };
     static const char *const ledger[] = { SETTINGS_KEY_LEDGER_ALIVE, NULL };
@@ -203,6 +206,10 @@ TEST_CASE("factory reset keeps exactly the device state", "[settings]")
     TEST_ASSERT_EQUAL(ESP_OK, settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB, buf, &len));
     TEST_ASSERT_EQUAL_size_t(sizeof(job), len);
     TEST_ASSERT_EQUAL_MEMORY(job, buf, sizeof(job));
+    len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, buf, &len));
+    TEST_ASSERT_EQUAL_size_t(sizeof(wiring), len);
+    TEST_ASSERT_EQUAL_MEMORY(wiring, buf, sizeof(wiring));
     len = sizeof(buf);
     TEST_ASSERT_EQUAL(ESP_OK, settings_get_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_TRIAL, buf, &len));
     TEST_ASSERT_EQUAL_MEMORY(trial, buf, sizeof(trial));

@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "um98x_plan.h"
 #include "um98x_reply.h"
 #include "um98x_test_vectors.h"
 #include "unity.h"
@@ -189,6 +190,18 @@ TEST_CASE("reply: dump items fold into the read-back", "[um98x_reply]")
     um98x_config_item(&rb, "COM1", 4, com1, strlen(com1));
     TEST_ASSERT_TRUE(rb.com1_baud_known);
     TEST_ASSERT_EQUAL_UINT32(460800, rb.com1_baud);
+    /* Wired by COM2: that port's baud is the link's, COM1's is someone else's. */
+    static const char com2[] = "CONFIG COM2 230400";
+    um98x_config_readback_t other;
+    memset(&other, 0, sizeof(other));
+    um98x_link_port_set(2);
+    um98x_config_item(&other, "COM1", 4, com1, strlen(com1));
+    bool com1_read = other.com1_baud_known;
+    um98x_config_item(&other, "COM2", 4, com2, strlen(com2));
+    um98x_link_port_set(1);
+    TEST_ASSERT_FALSE(com1_read);
+    TEST_ASSERT_TRUE(other.com1_baud_known);
+    TEST_ASSERT_EQUAL_UINT32(230400, other.com1_baud);
 
     /* Case-insensitive; a single signal-group value reads as slave 0. */
     static const char sg1[] = "config signalgroup 7";

@@ -6,6 +6,8 @@
 
 #include <string.h>
 
+#include "um98x_plan.h"
+
 #define ACK_PREFIX     "$command,"
 #define CONFIG_PREFIX  "$CONFIG,"
 #define BANNER_PREFIX  "$devicename,"
@@ -479,7 +481,7 @@ void um98x_config_item(um98x_config_readback_t *rb, const char *item, size_t ite
         rb->items++;
     }
     bool sg = same_ci(item, item_len, "SIGNALGROUP", 11);
-    bool com1 = same_ci(item, item_len, "COM1", 4);
+    bool com1 = same_ci(item, item_len, um98x_link_port_name(), 4);   /* the link's port (COM1 on the dev board) */
     bool b1c = same_ci(item, item_len, "RTCMB1CB2A", 10);
     bool mmp = same_ci(item, item_len, "MMP", 3);
     bool mask = same_ci(item, item_len, "MASK", 4);

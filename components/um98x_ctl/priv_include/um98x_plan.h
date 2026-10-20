@@ -6,6 +6,10 @@
  * the profile and the receiver's read-back to the ordered list of
  * configuring commands, sent only where something differs.
  *
+ * COM1 below stands for the receiver port the station is wired to
+ * (um98x_link_port(): COM1 on the dev board, COM2 or COM3 on a board wired
+ * so); every command that names a port names that one.
+ *
  * Session order (the executor runs it): CR LF; UNLOG COM1 (quiet port);
  * CONFIG and MODE read-back; then this plan (with the signal-group query,
  * ANT1GROUPA, between step 1 and step 2, sent in every session):
@@ -29,7 +33,7 @@
  *                                            (non-fatal)
  *   8. SAVECONFIG                            the only save of the session
  *
- * Never sent: anything for COM2/COM3 (the user's ports), the vendor RTCM
+ * Never sent: anything for the receiver's other ports (the user's), the vendor RTCM
  * encryption settings, the elevation mask and multipath mitigation (read
  * back and shown only), FRESET, comma-separated command forms. Commands are
  * the manual's space-separated upper-case form.
@@ -60,7 +64,6 @@
 extern "C" {
 #endif
 
-#define UM98X_CMD_UNLOG_COM1 "UNLOG COM1"
 #define UM98X_CMD_CONFIG     "CONFIG"
 #define UM98X_CMD_MODE       "MODE"
 #define UM98X_CMD_VERSION    "VERSIONA"
@@ -68,6 +71,29 @@ extern "C" {
 #define UM98X_CMD_RESET      "RESET"
 /** Signal-group query, main antenna input: one-shot, never with a rate (um98x_bands.h). */
 #define UM98X_CMD_GROUPS     "ANT1GROUPA"
+
+/**
+ * The receiver port the link is wired to, 1 (COM1) to 3 (COM3): set once at
+ * start, before the first session (um98x_ctl_set_port); COM1 until then. A
+ * value outside 1-3 is ignored.
+ */
+void um98x_link_port_set(uint8_t port);
+uint8_t um98x_link_port(void);
+
+/** "COM1" ... "COM3": the link's port as commands and the configuration dump name it. */
+const char *um98x_link_port_name(void);
+
+/** "UNLOG COM<n>": every output of the link's port off (the quiet port). */
+const char *um98x_cmd_unlog(void);
+
+/**
+ * What the "applied" record stores (settings gnss/applied_hash) for `p` on
+ * the link's port: the profile's hash (um98x_profile_hash) on COM1, as it was
+ * stored before the port was a choice; on COM2 or COM3 that hash mixed with
+ * the port, so a receiver wired to another port since its last configuration
+ * (its outputs are on the old one) is configured again. 0 if `p` is invalid.
+ */
+uint32_t um98x_applied_hash(const um98x_base_profile_t *p);
 
 /** The only receiver model this layer configures (exact match). */
 #define UM98X_SUPPORTED_MODEL "UM982"

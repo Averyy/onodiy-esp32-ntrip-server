@@ -125,10 +125,10 @@ function alertText(a, rcv) {
   const t = table[a.id];
   let title = t ? t[0] : a.id, text = t ? t[1] : '';
   if (a.id === 'config_failed') text = configFailedText(a.auto_retry, a.retry_in_s);
-  if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a);
-  if (a.source === 'station' && a.id === 'fixed_far') text = fixedFarText(a);
   /* "The receiver answers" only while receiver.responding says so (the Receiver page's "Answers" row says the same). */
   const r = rcv || ((typeof S !== 'undefined' && S.status) || {}).receiver || {};
+  if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a, r.link);
+  if (a.source === 'station' && a.id === 'fixed_far') text = fixedFarText(a);
   if (a.source !== 'station' && a.id === 'no_rtcm' && r.responding !== false) text = 'The receiver answers. ' + text;
   return [title, text];
 }
@@ -281,7 +281,7 @@ function stationState(s, admin) {
     if (nr || state === 'no_receiver') {
       if (!admin) return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', HERO_STATE_LINE.no_receiver);
       const a = nr || { next_detect_in_s: rcv.next_detect_in_s };
-      return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', noReceiverLead(a),
+      return pick('no_receiver', HERO_TITLE.no_receiver, 'bad', noReceiverLead(a, rcv.link),
         { actions: [{ act: 'detect', alert: a, label: 'Check again' }], alertId: nr ? 'no_receiver' : null, search: nextSearchText(a) });
     }
     if (ladder && (ladder.id === 'receiver_power' || ladder.id === 'receiver_silent')) {

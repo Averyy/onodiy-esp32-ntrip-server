@@ -273,6 +273,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "board_wiring.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "gnss_types.h"
@@ -695,8 +696,29 @@ void station_first_apply_hold_refresh(void);
  */
 esp_err_t station_request_flash(const station_flash_request_t *req);
 
-/** Receiver flashing is built in (CONFIG_UM98X_FLASH_ENABLE). */
+/**
+ * Receiver flashing is built in (CONFIG_UM98X_FLASH_ENABLE) and the link is
+ * wired to the receiver's COM1: the loader steps name COM1, and no other port
+ * is tested.
+ */
 bool station_flash_available(void);
+
+/** Why station_flash_available() is false: "not_enabled_in_build" or "receiver_port"; NULL when it is true. */
+const char *station_flash_reason(void);
+
+/**
+ * The receiver wiring saved on the station (settings gnss/wiring, unchecked):
+ * false when none is saved or it cannot be read (the build's applies). The
+ * app gives it to board_use_wiring() at start.
+ */
+bool station_wiring_saved(board_wiring_t *out);
+
+/**
+ * Save the receiver wiring for the next start (kept by app updates and a
+ * factory reset). The build's own, or NULL, erases the saved one. Checked
+ * with board_wiring_check() first: ESP_ERR_INVALID_ARG when it fails.
+ */
+esp_err_t station_wiring_save(const board_wiring_t *w);
 
 /**
  * Check the staged package against every pre-flight rule without flashing

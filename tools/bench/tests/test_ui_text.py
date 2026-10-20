@@ -101,6 +101,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  posChip: a => (Array.isArray(a) ? positionChip(a[0], a[1]) : positionChip(a)),\n' +
   '  fixPending: a => fixPendingText(a[0], a[1], a[2]), configWords: a => configWords(a[0], a[1]), profileTaken: g => profileTaken(g),\n' +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
+  '  noRx: a => [noReceiverText(a[0], a[1]), noReceiverLead(a[0], a[1]), alertText(a[0], { link: a[1] })[1]],\n' +
+  '  notEnabled: st => { S.status = st; const r = notEnabled(); S.status = null; return r; },\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -2178,3 +2180,29 @@ def test_use_the_current_position_only_when_it_copies_another_position():
                   ("arpCopy", {"position": {"locked": False}, "arp": {"valid": False}}),
                   ("arpCopy", {})])
     assert out == [False, False, True, True, False, False]
+
+
+def test_no_receiver_texts_name_the_wiring_in_use():
+    """No receiver: the alert names the receiver port and the ESP32 pins this start uses (the status's receiver.link)
+    and where they are changed; the Status page's line names the port only. Before the first status, the dev board's."""
+    link = {"rx_gpio": 17, "tx_gpio": 18, "port": 2}
+    mine, dev = run_ui([("noRx", [NO_RX, link]), ("noRx", [NO_RX, None])])
+    assert mine[0] == ("Nothing arrives from the receiver. Check its power and the cable from its COM2 to the station "
+                       "(receiver TX to GPIO17, RX to GPIO18). Wired otherwise? Settings \u2192 Receiver wiring. "
+                       "Next search in 24s.")
+    assert mine[1] == "Nothing arrives from the receiver. Check its power and the COM2 cable."
+    assert mine[2] == mine[0]
+    assert dev[1] == "Nothing arrives from the receiver. Check its power and the COM1 cable."
+    assert "(receiver TX to GPIO1, RX to GPIO2)" in dev[0]
+    hero = heroes(status(receiver={"state": "no_receiver", "rtcm_age_ms": None, "link": link}, alerts=[NO_RX]))[0]
+    assert hero["line"] == "Nothing arrives from the receiver. Check its power and the COM2 cable."
+
+
+def test_receiver_updates_off_says_why():
+    """Receiver firmware updates off: a build without them, or (in a build with them) a receiver wired by another port
+    than COM1, which the station's update status names (gnss_flash_reason)."""
+    build, port, none = run_ui([("notEnabled", status(update={"gnss_flash_reason": "not_enabled_in_build"})),
+                                ("notEnabled", status(update={"gnss_flash_reason": "receiver_port"})),
+                                ("notEnabled", None)])
+    assert build == none == "Receiver firmware updates are not enabled in this build yet."
+    assert port == "Receiver firmware updates work only with the receiver wired by its COM1."

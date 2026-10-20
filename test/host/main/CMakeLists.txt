@@ -158,6 +158,7 @@ idf_component_register(
         "${_fw}/health/priv_include"
         "${_fw}/diag/priv_include"
         "${_fw}/board/priv_include"
+        "${_fw}/board/include"
         "${_fw}/ledger/priv_include"
         "${_fw}/web/priv_include"
         "${_fw}/station/include"

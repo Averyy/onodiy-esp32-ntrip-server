@@ -881,6 +881,32 @@ bool web_parse_system_put(const cJSON *root, web_system_put_t *out, web_bad_t *b
         return invalid(bad, "public_status");
     }
     out->have_public_status = m == M_OK;
+    const cJSON *w = get(root, "wiring");
+    if (w != NULL) {
+        out->have_wiring = true;
+        if (cJSON_IsNull(w)) {
+            out->wiring_default = true;
+            return true;
+        }
+        if (!cJSON_IsObject(w)) {
+            return invalid(bad, "wiring");
+        }
+        int64_t rx;
+        int64_t tx;
+        int64_t port;
+        if (get_int(w, "rx_gpio", 0, 48, &rx) != M_OK) {
+            return invalid_rule(bad, "wiring.rx_gpio", "a GPIO number, 0-48");
+        }
+        if (get_int(w, "tx_gpio", 0, 48, &tx) != M_OK) {
+            return invalid_rule(bad, "wiring.tx_gpio", "a GPIO number, 0-48");
+        }
+        if (get_int(w, "port", 1, 3, &port) != M_OK) {
+            return invalid_rule(bad, "wiring.port", "1, 2 or 3 (COM1 to COM3)");
+        }
+        out->rx_gpio = (int8_t)rx;
+        out->tx_gpio = (int8_t)tx;
+        out->port = (uint8_t)port;
+    }
     return true;
 }
 

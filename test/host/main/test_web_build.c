@@ -619,6 +619,14 @@ TEST_CASE("flash view and progress: counters, the last session, and why flashing
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "flash_available")));
     TEST_ASSERT_EQUAL_STRING("not_enabled_in_build", at(root, "flash_reason")->valuestring);
     cJSON_Delete(root);
+    /* A build with flashing on a receiver wired by another port than COM1: the station's reason. */
+    c.flash_reason = "receiver_port";
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL_STRING("receiver_port", at(root, "flash_reason")->valuestring);
+    cJSON_Delete(root);
+    c.flash_reason = NULL;
 
     st.flash_last.outcome = STATION_FLASH_OUT_NONE;
     st.flash.journal_state = 0;
@@ -2725,4 +2733,77 @@ TEST_CASE("local caster states and end reasons have API names", "[web_build]")
     /* Stored in the journal (rover_disconnect bits 8-15): the numbers keep their meaning. */
     TEST_ASSERT_EQUAL(4, LOCAL_CASTER_END_SETTINGS);
     TEST_ASSERT_EQUAL(6, LOCAL_CASTER_END_RESTART);
+}
+
+TEST_CASE("system: the receiver wiring this start uses, the saved one, the build's and the pins to choose from", "[web_build]")
+{
+    static const int8_t pins[] = { 1, 2, 4, 17, 18 };
+    web_system_snap_t s = {
+        .hostname = "",
+        .hostname_active = "onodiy",
+        .version = "v0.3.0",
+        .project = "onodiy-esp32-ntrip-server",
+        .idf = "v6.1",
+        .chip_model = "esp32s3",
+        .reboot_required = -1,
+        .wiring = { .rx_gpio = 1, .tx_gpio = 2, .port = 1 },
+        .wiring_default = { .rx_gpio = 1, .tx_gpio = 2, .port = 1 },
+        .wiring_saved = true,
+        .saved = { .rx_gpio = 17, .tx_gpio = 18, .port = 2 },
+        .link_pins = pins,
+        .link_pins_count = sizeof(pins),
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_system(&w, &s);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *wi = at(root, "wiring");
+    TEST_ASSERT_EQUAL(1, at(wi, "rx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(2, at(wi, "tx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(1, at(wi, "port")->valueint);
+    const cJSON *saved = at(wi, "saved");
+    TEST_ASSERT_EQUAL(17, at(saved, "rx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(18, at(saved, "tx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(2, at(saved, "port")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(saved, "problem")));
+    TEST_ASSERT_EQUAL(1, at(at(wi, "default"), "rx_gpio")->valueint);
+    const cJSON *list = at(wi, "pins");
+    TEST_ASSERT_EQUAL(5, cJSON_GetArraySize(list));
+    TEST_ASSERT_EQUAL(18, cJSON_GetArrayItem(list, 4)->valueint);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "reboot_required"));
+    cJSON_Delete(root);
+
+    /* None saved: null. One the board no longer accepts: its reason. */
+    s.wiring_saved = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_system(&w, &s);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "wiring"), "saved")));
+    cJSON_Delete(root);
+    s.wiring_saved = true;
+    s.saved_problem = "GPIO26 is used by flash/PSRAM.";
+    s.reboot_required = 1;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_system(&w, &s);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL_STRING("GPIO26 is used by flash/PSRAM.", at(at(at(root, "wiring"), "saved"), "problem")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "reboot_required")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("status: the receiver's link, its pins and port, in the admin form only", "[web_build]")
+{
+    fixture();
+    s_snap.link = (board_wiring_t){ .rx_gpio = 17, .tx_gpio = 18, .port = 2 };
+    cJSON *root = build_status(false);
+    const cJSON *link = at(at(root, "receiver"), "link");
+    TEST_ASSERT_EQUAL(17, at(link, "rx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(18, at(link, "tx_gpio")->valueint);
+    TEST_ASSERT_EQUAL(2, at(link, "port")->valueint);
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "receiver"), "link"));
+    cJSON_Delete(root);
 }

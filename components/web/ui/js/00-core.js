@@ -691,6 +691,7 @@ const FIELD_LABEL = {
   ssid: 'Network name', ap_password: 'Access point password', hostname: 'Station name', duration_s: 'Duration',
   minutes: 'Duration', pem: 'CA certificate', new: 'New password', current: 'Current password',
   expected_fw: 'Expected firmware', station_id: 'Station ID', com1_baud: 'Receiver link speed',
+  wiring: 'Receiver wiring', 'wiring.rx_gpio': 'ESP32 RX pin', 'wiring.tx_gpio': 'ESP32 TX pin', 'wiring.port': 'Receiver port',
   survey_in_s: 'Survey-in time', lat_deg: 'Latitude', lon_deg: 'Longitude', height_m: 'Height',
   signal_group_master: 'Signal group (main antenna)', signal_group_slave: 'Signal group (second antenna)',
   antenna_model: 'Antenna model', antenna_serial: 'Antenna serial number', antenna_setup_id: 'Antenna setup ID',

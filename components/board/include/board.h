@@ -12,6 +12,9 @@
 
 #include <stdbool.h>
 
+#include <stddef.h>
+
+#include "board_wiring.h"
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -22,8 +25,9 @@ extern "C" {
 typedef struct {
     const char *name;          /**< Human-readable board name */
     int gnss_uart_num;         /**< UART controller for the GNSS link (never 0: console) */
-    int gnss_rx_gpio;          /**< ESP32 RX  <- receiver COM1 TXD */
-    int gnss_tx_gpio;          /**< ESP32 TX  -> receiver COM1 RXD */
+    int gnss_rx_gpio;          /**< ESP32 RX  <- the receiver's TXD */
+    int gnss_tx_gpio;          /**< ESP32 TX  -> the receiver's RXD */
+    int gnss_port;             /**< the receiver port at their other end: 1 = COM1 ... 3 = COM3 */
     int gnss_reset_gpio;       /**< Receiver reset line, or -1 */
     int button_gpio;           /**< Recovery (BOOT) button, active low, or -1 */
     int status_led_gpio;       /**< Status LED, or -1 */
@@ -60,6 +64,35 @@ const board_desc_t *board_get(void);
  * Kconfig fails loudly instead of corrupting PSRAM.
  */
 bool board_is_valid(void);
+
+/*
+ * The receiver wiring. The build's (Kconfig) is the default; one saved on the
+ * station (settings gnss/wiring, read and written by the station component)
+ * replaces it from the next start, and stays through app updates and a
+ * factory reset.
+ */
+
+/**
+ * The saved wiring, given before board_init() (the app does at start). Used
+ * when it passes board_wiring_check(), else the build's (logged). NULL: none.
+ */
+void board_use_wiring(const board_wiring_t *w);
+
+/** The wiring this start uses. */
+void board_wiring_active(board_wiring_t *out);
+
+/** The build's own. */
+void board_wiring_default(board_wiring_t *out);
+
+/**
+ * Whether `w` can be used on this board: pins board_pin_for_link() that the
+ * button, LED, receiver reset and SD card do not use, and a port of 1-3.
+ * False with a sentence for the user in `why`.
+ */
+bool board_wiring_check(const board_wiring_t *w, char *why, size_t cap);
+
+/** The pins the receiver link may use on this board, ascending (at most `cap`). @return their count. */
+size_t board_link_pins(int8_t *out, size_t cap);
 
 #ifdef __cplusplus
 }

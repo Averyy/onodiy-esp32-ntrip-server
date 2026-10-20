@@ -85,7 +85,9 @@ function onocoyStreams(st) {
 }
 
 const systemPart = {
-  create(arg) {
+  /* opts.revert: the Updates card's revert row, a row of the Danger zone. */
+  create(arg, opts) {
+    opts = opts || {};
     let wifi = null, sys = null, stopJoin = null;
     let wifiAt = 0;   /* when `wifi` arrived */
     let joinDirty = false, devDirty = false;
@@ -430,7 +432,79 @@ const systemPart = {
       mount(pwBox, settingRow('Reset admin password', recoveryHint(), open), form);
     }
 
-    /* ---- The Danger zone: restart, safe mode, the admin password, factory reset ---- */
+    /* ---- The receiver wiring, a row of the Danger zone: the pins and port, edited in a dialog ---- */
+    const wiringBox = h('div');
+    function renderWiring() {
+      const w = sys && sys.wiring;
+      if (!w) {
+        mount(wiringBox);
+        return;
+      }
+      const def = w.default || w;
+      const saved = w.saved;
+      const isDefault = sameWiring(w, def);
+      const edit = btn('Edit pins', () => editWiring(edit));
+      /* What the next start uses, when that is not what runs now. */
+      let note = null;
+      if (saved && saved.problem) {
+        note = msg('warn', 'The saved wiring (' + wiringText(saved) + ') is not used: ' + saved.problem + ' Edit it, or save the defaults.');
+      } else if (!sameWiring(saved || def, w)) {
+        note = msg('info', 'Saved: ' + (saved ? wiringText(saved) : 'back to the defaults (' + wiringText(def) + ')') +
+          '. Takes effect after the next restart.');
+      }
+      mount(wiringBox, settingRow('Receiver wiring', wiringText(w) + (isDefault ? ' (the defaults).' : '.') +
+        ' Change only on a board wired differently.', edit), note);
+    }
+
+    async function editWiring(button) {
+      const w = sys.wiring;
+      const def = w.default || w;
+      /* What the next start uses: the saved wiring, else the defaults. */
+      const cur = w.saved && !w.saved.problem ? w.saved : def;
+      const pins = w.pins.slice();
+      for (const g of [cur.rx_gpio, cur.tx_gpio]) {
+        if (pins.indexOf(g) < 0) pins.push(g);   /* a build's own pin outside the list stays selectable */
+      }
+      pins.sort((a, b) => a - b);
+      const pinOptions = d => pins.map(g => [g, 'GPIO' + g + (g === d ? ' (default)' : '')]);
+      const rx = selectInput(pinOptions(def.rx_gpio), cur.rx_gpio);
+      const tx = selectInput(pinOptions(def.tx_gpio), cur.tx_gpio);
+      const port = selectInput([1, 2, 3].map(n => [n, 'COM' + n + (n === def.port ? ' (default)' : '')]), cur.port);
+      /* One pin cannot be both: the other list greys out the pin a list holds. */
+      const exclude = () => {
+        for (const o of tx.options) o.disabled = o.value === rx.value;
+        for (const o of rx.options) o.disabled = o.value === tx.value;
+      };
+      rx.addEventListener('change', exclude);
+      tx.addEventListener('change', exclude);
+      exclude();
+      const body = [
+        h('p', null, 'Pick the ESP32 pins wired to the receiver and the receiver port they reach. Takes effect after the next restart; ' +
+          'updates and a factory reset keep it.'),
+        h('div', { class: 'cols c3' },
+          field('ESP32 RX pin', rx, 'Wired to the receiver\'s TXD.').el,
+          field('ESP32 TX pin', tx, 'Wired to the receiver\'s RXD.').el,
+          field('Receiver port', port, 'Receiver firmware updates need COM1.').el),
+        h('p', { class: 'muted small' }, 'A wrong pin only cuts the link to the receiver: this page keeps working, and you can change it back here.'),
+      ];
+      let saved = null;
+      const ok = await dialog({
+        title: 'Receiver wiring',
+        ok: 'Save',
+        body: body,
+        onOk: async () => {
+          const next = { rx_gpio: Number(rx.value), tx_gpio: Number(tx.value), port: Number(port.value) };
+          saved = await api('PUT', '/api/system', { wiring: sameWiring(next, def) ? null : next });
+        },
+      });
+      if (!ok || !saved) return;
+      sys = saved;
+      renderWiring();
+      toast(saved.reboot_required ? 'Saved. Restart the station to use the new wiring.' : 'Saved.', 'ok');
+      button.focus();
+    }
+
+    /* ---- The Danger zone: restart, safe mode, the admin password, revert, the receiver wiring, factory reset ---- */
     const maintCard = h('section', { class: 'card wide', hidden: true });
     function renderMaint() {
       const err = errBox();
@@ -444,7 +518,7 @@ const systemPart = {
         if (r !== undefined) showRestarting();
       });
       const leaveSafe = btn('Leave safe mode', () => leaveSafeMode(leaveSafe, err), 'primary');
-      const reset = btn('Factory reset…', async () => {
+      const reset = btn('Factory reset', async () => {
         const apName = wifi && wifi.ap && wifi.ap.ssid ? wifi.ap.ssid : 'the setup hotspot';
         const ok = await dialog({
           title: 'Factory reset?',
@@ -453,7 +527,8 @@ const systemPart = {
           typed: 'RESET',
           body: [
             h('p', null, 'Erased: Wi-Fi, the admin password, all servers, the receiver profile and locked position, update and page settings.'),
-            h('p', { class: 'muted' }, 'Kept: the event journal, the start history, the availability record and a receiver update in progress.'),
+            h('p', { class: 'muted' }, 'Kept: the receiver wiring, the event journal, the start history, the availability record and a ' +
+              'receiver update in progress.'),
             msg('warn', 'Then the station opens its setup hotspot (' + apName + ') without a password for first setup: join it and open ' +
               'http://192.168.4.1/.'),
           ],
@@ -470,6 +545,7 @@ const systemPart = {
           (sm.crashes || 'repeated') + ' crashes.' + (sm.retry_in_s ? ' The station tries normal operation again in ' + inMinutes(sm.retry_in_s) + '.' : '')),
         h('div', { class: 'form-actions' }, leaveSafe)) : null,
         h('div', { class: 'rows' }, h('div', null, settingRow('Restart the station', 'Servers reconnect within about a minute.', restart)), pwBox,
+          opts.revert || null, wiringBox,
           h('div', null, settingRow('Factory reset', 'Erases every setting and starts first setup again.', reset))),
         err);
     }
@@ -480,6 +556,7 @@ const systemPart = {
       showWifi(r[0]);
       if (!devDirty) renderDevice();
       renderMaint();
+      renderWiring();
     }
 
     mount(wifiBody, h('p', { class: 'loading' }, 'Loading…'));
@@ -535,7 +612,7 @@ Views.settings = {
   title: 'Settings',
   admin: true,
   create(el, arg) {
-    const s = systemPart.create(arg), u = updatesPart.create(arg);
+    const u = updatesPart.create(arg), s = systemPart.create(arg, { revert: u.revert });
     const c = Object.assign({}, s.cards, u.cards);
     /* The receiver's settings live on the Receiver page: this card opens them. */
     const rxCard = h('section', { class: 'card wide' },

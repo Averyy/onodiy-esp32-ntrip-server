@@ -136,6 +136,20 @@ const char *web_flash_action_why(const web_flash_ctx_t *c, web_flash_action_t a,
 
 /* ---- shared pieces --------------------------------------------------------------------- */
 
+/* A receiver wiring: its two ESP32 pins and the receiver's port (1 = COM1). */
+static void wiring_fields(wj_t *w, const board_wiring_t *b)
+{
+    wj_uint(w, "rx_gpio", (uint64_t)b->rx_gpio);
+    wj_uint(w, "tx_gpio", (uint64_t)b->tx_gpio);
+    wj_uint(w, "port", b->port);
+}
+
+/* Why receiver flashing is not available: the station's reason, else a build without it. */
+static const char *flash_reason(const char *why)
+{
+    return why != NULL ? why : "not_enabled_in_build";
+}
+
 static void err_name(wj_t *w, const char *key, esp_err_t err)
 {
     if (err == ESP_OK) {
@@ -517,6 +531,9 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wj_u32_or_null(w, "next_detect_in_s", st->next_detect_in_s);
         wj_bool(w, "first_apply_held", st->first_apply_held);
         signal_test_brief(w, &st->sg_test);
+        wj_obj_open(w, "link");
+        wiring_fields(w, &s->link);
+        wj_obj_close(w);
     }
     wj_obj_close(w);
 }
@@ -626,7 +643,7 @@ static void sec_update(wj_t *w, const web_status_snap_t *s)
     wj_str(w, "gnss_blocked_reason", web_gnss_block_name(f->gnss_blocked));
     wj_uint(w, "gnss_blocked_left_s", f->gnss_blocked_left_s);
     wj_bool(w, "gnss_flash_available", s->flash_available);
-    wj_str(w, "gnss_flash_reason", s->flash_available ? NULL : "not_enabled_in_build");
+    wj_str(w, "gnss_flash_reason", s->flash_available ? NULL : flash_reason(s->flash_reason));
     wj_bool(w, "checking", f->state == FW_UPDATE_CHECKING);
     wj_unix(w, "last_check_unix", f->last_check_unix);
     wj_obj_close(w);
@@ -1421,7 +1438,7 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
     }
     wj_bool(w, "check_running", st->pkg_check_running);
     wj_bool(w, "flash_available", ctx->flash_available);
-    wj_str(w, "flash_reason", ctx->flash_available ? NULL : "not_enabled_in_build");
+    wj_str(w, "flash_reason", ctx->flash_available ? NULL : flash_reason(ctx->flash_reason));
     wj_obj_close(w);
 }
 
@@ -1926,6 +1943,25 @@ void web_build_system(wj_t *w, const web_system_snap_t *s)
     wj_uint(w, "flash_mb", s->flash_mb);
     wj_uint(w, "psram_mb", s->psram_mb);
     wj_obj_close(w);
+    wj_obj_open(w, "wiring");
+    wiring_fields(w, &s->wiring);
+    if (s->wiring_saved) {
+        wj_obj_open(w, "saved");
+        wiring_fields(w, &s->saved);
+        wj_str_or_null(w, "problem", s->saved_problem);
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "saved");
+    }
+    wj_obj_open(w, "default");
+    wiring_fields(w, &s->wiring_default);
+    wj_obj_close(w);
+    wj_arr_open(w, "pins");
+    for (size_t i = 0; i < s->link_pins_count; i++) {
+        wj_uint(w, NULL, (uint64_t)s->link_pins[i]);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
     if (s->reboot_required >= 0) {
         wj_bool(w, "reboot_required", s->reboot_required != 0);
     }
@@ -2076,7 +2112,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     }
     wj_u32_or_null(w, "budget_left_s", u->budget_left_s);
     wj_bool(w, "flash_available", u->flash_available);
-    wj_str(w, "flash_reason", u->flash_available ? NULL : "not_enabled_in_build");
+    wj_str(w, "flash_reason", u->flash_available ? NULL : flash_reason(u->flash_reason));
     wj_obj_close(w);
     wj_obj_close(w);
 }
@@ -2113,7 +2149,7 @@ void web_build_staged(wj_t *w, const web_staged_snap_t *s)
     wj_uint(w, "expected_downtime_s", s->expected_downtime_s);
     wj_u32_or_null(w, "budget_left_s", s->budget_left_s);
     wj_bool(w, "flash_available", s->flash_available);
-    wj_str(w, "flash_reason", s->flash_available ? NULL : "not_enabled_in_build");
+    wj_str(w, "flash_reason", s->flash_available ? NULL : flash_reason(s->flash_reason));
     wj_obj_close(w);
 }
 

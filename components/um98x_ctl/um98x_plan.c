@@ -14,6 +14,43 @@
  * manual writes it. */
 #define SAT_VIEW_PERIOD_S 10u
 
+/* The receiver port the link is wired to (index 0 = COM1). */
+static uint8_t s_port = 1u;
+static const char *const PORT_NAME[] = { "COM1", "COM2", "COM3" };
+static const char *const UNLOG[] = { "UNLOG COM1", "UNLOG COM2", "UNLOG COM3" };
+
+void um98x_link_port_set(uint8_t port)
+{
+    if (port >= 1u && port <= 3u) {
+        s_port = port;
+    }
+}
+
+uint8_t um98x_link_port(void)
+{
+    return s_port;
+}
+
+const char *um98x_link_port_name(void)
+{
+    return PORT_NAME[s_port - 1u];
+}
+
+const char *um98x_cmd_unlog(void)
+{
+    return UNLOG[s_port - 1u];
+}
+
+uint32_t um98x_applied_hash(const um98x_base_profile_t *p)
+{
+    uint32_t h = um98x_profile_hash(p);
+    if (h == 0 || s_port == 1u) {
+        return h;
+    }
+    h ^= 0x9E3779B9u * s_port;   /* the golden-ratio constant spreads the port over every bit */
+    return h != 0 ? h : 1u;
+}
+
 bool um98x_model_supported(const char *model)
 {
     return model != NULL && strcmp(model, UM98X_SUPPORTED_MODEL) == 0;
@@ -120,15 +157,15 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
                      (unsigned)p->signal_group_slave);
         break;
     case UM98X_STEP_BAUD:
-        n = snprintf(buf, cap, "CONFIG COM1 %u", (unsigned)p->com1_baud);
+        n = snprintf(buf, cap, "CONFIG %s %u", um98x_link_port_name(), (unsigned)p->com1_baud);
         break;
     case UM98X_STEP_MODE:
         return um98x_mode_command(p, buf, cap);
     case UM98X_STEP_RTCM:
-        n = snprintf(buf, cap, "RTCM%u COM1 %u", (unsigned)s->msg, (unsigned)s->period_s);
+        n = snprintf(buf, cap, "RTCM%u %s %u", (unsigned)s->msg, um98x_link_port_name(), (unsigned)s->period_s);
         break;
     case UM98X_STEP_SAT_VIEW:
-        n = snprintf(buf, cap, "GPGSV COM1 %u", SAT_VIEW_PERIOD_S);
+        n = snprintf(buf, cap, "GPGSV %s %u", um98x_link_port_name(), SAT_VIEW_PERIOD_S);
         break;
     case UM98X_STEP_SAVE:
         n = snprintf(buf, cap, "%s", UM98X_CMD_SAVE);
@@ -190,7 +227,7 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
     if (out == NULL || !um98x_profile_valid(p)) {
         return 0;
     }
-    bool ok = preview_add(out, cap, &n, UM98X_CMD_UNLOG_COM1, UM98X_PREVIEW_WRITE, UM98X_PREVIEW_ALWAYS, false) &&
+    bool ok = preview_add(out, cap, &n, um98x_cmd_unlog(), UM98X_PREVIEW_WRITE, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_VERSION, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_MODE, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
@@ -231,9 +268,9 @@ size_t um98x_sat_view_command(bool on, uint16_t period_s, char *buf, size_t cap)
         if (period_s == 0 || period_s > UM98X_SAT_VIEW_PERIOD_MAX) {
             return 0;
         }
-        n = snprintf(buf, cap, "GPGSV COM1 %u", (unsigned)period_s);
+        n = snprintf(buf, cap, "GPGSV %s %u", um98x_link_port_name(), (unsigned)period_s);
     } else {
-        n = snprintf(buf, cap, "UNLOG COM1 GPGSV");
+        n = snprintf(buf, cap, "UNLOG %s GPGSV", um98x_link_port_name());
     }
     if (n < 0 || (size_t)n >= cap) {
         buf[0] = '\0';

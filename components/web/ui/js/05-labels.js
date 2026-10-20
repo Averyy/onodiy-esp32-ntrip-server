@@ -417,19 +417,37 @@ function inMinutes(s) {
   return s < 60 ? fmt.dur(s) : fmt.dur(Math.ceil(s / 60) * 60);
 }
 
-/** The no-receiver alert in words: what to check, and when the station looks again. */
-function noReceiverText(a) {
+/* ---- The receiver wiring (GET /api/system wiring, the status's receiver.link) ---- */
+
+/** The link's pins and port this start uses (the status's receiver.link; the dev board's before the first status). */
+function receiverLink() {
+  const l = S.status && S.status.receiver && S.status.receiver.link;
+  return l || { rx_gpio: 1, tx_gpio: 2, port: 1 };
+}
+
+function sameWiring(a, b) {
+  return !!a && !!b && a.rx_gpio === b.rx_gpio && a.tx_gpio === b.tx_gpio && a.port === b.port;
+}
+
+/** "RX GPIO1, TX GPIO2, receiver COM1". */
+function wiringText(w) {
+  return 'RX GPIO' + w.rx_gpio + ', TX GPIO' + w.tx_gpio + ', receiver COM' + w.port;
+}
+
+/** The no-receiver alert in words: what to check, and when the station looks again. link: the status's receiver.link. */
+function noReceiverText(a, link) {
   const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
     a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
   if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
-  return 'Nothing arrives from the receiver. Check its power and the cable from its COM1 to the station ' +
-    '(receiver TX to GPIO1, RX to GPIO2).' + next;
+  const l = link || receiverLink();
+  return 'Nothing arrives from the receiver. Check its power and the cable from its COM' + l.port + ' to the station ' +
+    '(receiver TX to GPIO' + l.rx_gpio + ', RX to GPIO' + l.tx_gpio + '). Wired otherwise? Settings → Receiver wiring.' + next;
 }
 
 /* The Status page's no-receiver line (the pins are in the Receiver page's panel). */
-function noReceiverLead(a) {
+function noReceiverLead(a, link) {
   if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.';
-  return 'Nothing arrives from the receiver. Check its power and the COM1 cable.';
+  return 'Nothing arrives from the receiver. Check its power and the COM' + (link || receiverLink()).port + ' cable.';
 }
 
 /* "next search in 23 s", or null. */

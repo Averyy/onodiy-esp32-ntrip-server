@@ -126,6 +126,20 @@ extern "C" {
 esp_err_t um98x_ctl_init(void);
 
 /**
+ * The receiver port the station's link is wired to, 1 (COM1) to 3 (COM3):
+ * every command that sets an output or the port's baud names it. Set once at
+ * start, before the first session; COM1 until then.
+ */
+void um98x_ctl_set_port(uint8_t port);
+
+/**
+ * The "applied" record's hash for `p` on the link's port (settings
+ * gnss/applied_hash): the profile's hash on COM1, mixed with the port on
+ * COM2 or COM3, so a receiver rewired to another port is configured again.
+ */
+uint32_t um98x_ctl_applied_hash(const um98x_base_profile_t *p);
+
+/**
  * Line sink for gnss_link (called from the GNSS RX task; never blocks, never logs).
  * @return true when the line is a reply to the station's own commands (every
  *         command-layer line but unsolicited restart evidence: an

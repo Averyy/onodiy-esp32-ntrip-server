@@ -693,7 +693,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     signal_group_slave: field('Second antenna', sgs, '0 turns it off.'),
     station_id: field('Station ID', sid, 'In every message. The default comes from this device\'s MAC; change it only if a ' +
       'server asks for a number.'),
-    com1_baud: field('Receiver link speed (COM1)', baud, '460800 (default) brings each epoch out sooner. Ephemeris messages ' +
+    com1_baud: field('Receiver link speed (COM' + receiverLink().port + ')', baud, '460800 (default) brings each epoch out sooner. Ephemeris messages ' +
       'need 460800 or more.'),
     rtcm: { el: h('div'), input: null, error: null },
     antenna_model: field('Antenna model (IGS name)', antModel, ['Only for an antenna in the IGS list: name and radome as listed. ' +

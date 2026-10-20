@@ -13,11 +13,13 @@
 
 static const char *TAG = "board";
 
-static const board_desc_t s_board = {
+/* The receiver link's pins and port come from the saved wiring when it passes the check (board_init). */
+static board_desc_t s_board = {
     .name = "UM982 + ESP32-S3-WROOM-1 N16R8",
     .gnss_uart_num = CONFIG_BOARD_GNSS_UART_NUM,
     .gnss_rx_gpio = CONFIG_BOARD_GNSS_RX_GPIO,
     .gnss_tx_gpio = CONFIG_BOARD_GNSS_TX_GPIO,
+    .gnss_port = CONFIG_BOARD_GNSS_PORT,
     .gnss_reset_gpio = CONFIG_BOARD_GNSS_RESET_GPIO,
     .button_gpio = CONFIG_BOARD_BUTTON_GPIO,
     .status_led_gpio = CONFIG_BOARD_STATUS_LED_GPIO,
@@ -37,6 +39,8 @@ static const board_desc_t s_board = {
 };
 
 static bool s_valid;
+static bool s_have_saved;    /* board_use_wiring() gave one */
+static board_wiring_t s_saved;
 
 const board_desc_t *board_get(void)
 {
@@ -73,11 +77,100 @@ static esp_err_t check_pin(const char *what, int gpio, bool output, bool optiona
     return ESP_OK;
 }
 
+/* The board's pins besides the receiver link's (for the wiring check). */
+static size_t other_pins(board_pin_use_t *out)
+{
+    const board_desc_t *b = &s_board;
+    size_t n = 0;
+    out[n++] = (board_pin_use_t){ "button", b->button_gpio };
+    out[n++] = (board_pin_use_t){ "status LED", b->status_led_gpio };
+    out[n++] = (board_pin_use_t){ "receiver reset", b->gnss_reset_gpio };
+    out[n++] = (board_pin_use_t){ "SD MISO", b->sd_miso_gpio };
+    out[n++] = (board_pin_use_t){ "SD MOSI", b->sd_mosi_gpio };
+    out[n++] = (board_pin_use_t){ "SD SCK", b->sd_sck_gpio };
+    out[n++] = (board_pin_use_t){ "SD CS", b->sd_cs_gpio };
+    return n;
+}
+
+#define OTHER_PINS_MAX 7u
+
+bool board_wiring_check(const board_wiring_t *w, char *why, size_t cap)
+{
+    board_pin_use_t uses[OTHER_PINS_MAX];
+    size_t n = other_pins(uses);
+    return !board_wiring_problem(w, uses, n, why, cap);
+}
+
+void board_wiring_default(board_wiring_t *out)
+{
+    out->rx_gpio = (int8_t)CONFIG_BOARD_GNSS_RX_GPIO;
+    out->tx_gpio = (int8_t)CONFIG_BOARD_GNSS_TX_GPIO;
+    out->port = (uint8_t)CONFIG_BOARD_GNSS_PORT;
+}
+
+void board_wiring_active(board_wiring_t *out)
+{
+    out->rx_gpio = (int8_t)s_board.gnss_rx_gpio;
+    out->tx_gpio = (int8_t)s_board.gnss_tx_gpio;
+    out->port = (uint8_t)s_board.gnss_port;
+}
+
+void board_use_wiring(const board_wiring_t *w)
+{
+    if (s_valid) {
+        ESP_LOGW(TAG, "receiver wiring given after the pins were checked: used from the next start");
+        return;
+    }
+    s_have_saved = w != NULL;
+    if (w != NULL) {
+        s_saved = *w;
+    }
+}
+
+size_t board_link_pins(int8_t *out, size_t cap)
+{
+    board_pin_use_t uses[OTHER_PINS_MAX];
+    size_t n_uses = other_pins(uses);
+    size_t n = 0;
+    for (int g = 0; g <= 48 && n < cap; g++) {
+        bool taken = false;
+        for (size_t i = 0; i < n_uses; i++) {
+            taken = taken || uses[i].gpio == g;
+        }
+        if (board_pin_for_link(g) && !taken) {
+            out[n++] = (int8_t)g;
+        }
+    }
+    return n;
+}
+
+/* The saved wiring replaces the build's when it passes the check; one that
+ * does not (a later build may reserve one of its pins) is left stored and
+ * shown, and the build's is used. */
+static void take_saved_wiring(void)
+{
+    if (!s_have_saved) {
+        return;
+    }
+    const board_wiring_t w = s_saved;
+    char why[64];
+    if (!board_wiring_check(&w, why, sizeof(why))) {
+        ESP_LOGW(TAG, "saved receiver wiring (RX GPIO%d, TX GPIO%d, COM%u) not used: %s Using the build's.", w.rx_gpio,
+                 w.tx_gpio, (unsigned)w.port, why);
+        return;
+    }
+    s_board.gnss_rx_gpio = w.rx_gpio;
+    s_board.gnss_tx_gpio = w.tx_gpio;
+    s_board.gnss_port = w.port;
+    ESP_LOGI(TAG, "saved receiver wiring: RX GPIO%d, TX GPIO%d, COM%u", w.rx_gpio, w.tx_gpio, (unsigned)w.port);
+}
+
 esp_err_t board_init(void)
 {
     if (s_valid) {
         return ESP_OK;   /* an early boot step may have validated the pins already */
     }
+    take_saved_wiring();
     const board_desc_t *b = &s_board;
     const struct {
         const char *what;
@@ -130,7 +223,7 @@ esp_err_t board_init(void)
      * is confirmed on hardware. Neither is known to be wired on the dev board. */
 
     s_valid = true;
-    ESP_LOGI(TAG, "%s: GNSS on UART%d (RX GPIO%d, TX GPIO%d)", b->name, b->gnss_uart_num,
-             b->gnss_rx_gpio, b->gnss_tx_gpio);
+    ESP_LOGI(TAG, "%s: GNSS on UART%d (RX GPIO%d, TX GPIO%d) to the receiver's COM%d", b->name, b->gnss_uart_num,
+             b->gnss_rx_gpio, b->gnss_tx_gpio, b->gnss_port);
     return ESP_OK;
 }

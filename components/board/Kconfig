@@ -26,6 +26,19 @@ menu "Station: board and pins"
             GPIO the ESP32 sends commands on. Wired to the receiver's COM1 RXD
             on the UM982 + ESP32-S3 dev board.
 
+    config BOARD_GNSS_PORT
+        int "Receiver port the ESP32 is wired to (1 = COM1)"
+        range 1 3
+        default 1
+        help
+            The receiver port at the other end of the GNSS link: 1 for COM1
+            (the UM982 + ESP32-S3 dev board), 2 or 3 for a board wired to
+            COM2 or COM3. Receiver firmware updates need COM1.
+
+            These pins and this port are the build's defaults: a wiring saved
+            on the station (Settings, Danger zone) replaces them at the next
+            start and is kept by updates and a factory reset.
+
     config BOARD_GNSS_RESET_GPIO
         int "GPIO driving the receiver reset line (-1 = not wired)"
         range -1 48

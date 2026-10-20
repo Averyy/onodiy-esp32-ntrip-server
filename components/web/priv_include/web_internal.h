@@ -41,6 +41,8 @@ extern "C" {
  * update flow checks the package and stops before the flash, and says so.
  */
 #define WEB_FLASH_AVAILABLE station_flash_available()
+/** Why not (station_flash_reason): "not_enabled_in_build", "receiver_port" (the link is not on the receiver's COM1). */
+#define WEB_FLASH_REASON station_flash_reason()
 
 /** Onocoy's TLS port for source connections (public Onocoy documentation). */
 #define WEB_ONOCOY_TLS_PORT 2121u

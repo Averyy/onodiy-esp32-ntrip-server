@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "board_wiring.h"
 #include "diag.h"
 #include "fw_update.h"
 #include "gnss_link.h"
@@ -90,6 +91,7 @@ typedef struct {
     bool receiver_in_loader;
     bool station_running;      /**< station initialised and started (not safe mode, no failed init) */
     bool flash_available;      /**< receiver flashing is built */
+    const char *flash_reason;  /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     bool maintenance;          /**< receiver maintenance: nothing is sent to the receiver */
 } web_flash_ctx_t;
 
@@ -140,6 +142,8 @@ typedef struct {
     uint32_t protected_down_today_s;
     uint32_t ledger_budget_left_s;
     bool flash_available;
+    const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
+    board_wiring_t link;           /**< the receiver wiring this start uses (receiver.link) */
 } web_status_snap_t;
 
 /** Sections of the status object, in the order they are written. */
@@ -331,6 +335,13 @@ typedef struct {
     uint32_t flash_mb;
     uint32_t psram_mb;
     int reboot_required;           /**< -1 = leave the field out */
+    board_wiring_t wiring;         /**< the receiver wiring this start uses */
+    board_wiring_t wiring_default; /**< the build's */
+    bool wiring_saved;             /**< one is saved */
+    board_wiring_t saved;
+    const char *saved_problem;     /**< why the saved one is not usable, NULL = it is */
+    const int8_t *link_pins;       /**< the pins the link may use, ascending */
+    size_t link_pins_count;
 } web_system_snap_t;
 
 /** GET/PUT /api/system. */
@@ -355,6 +366,7 @@ typedef struct {
     bool signed_manifests;         /**< the build accepts signed manifests only */
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
+    const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     const char (*rolled_back)[32]; /**< fw_update_get_rolled_back(), newest first */
     size_t rolled_back_count;
     uint32_t app_max_bytes;        /**< size of the app slot an upload or install writes (0 = unknown: null) */
@@ -380,6 +392,7 @@ typedef struct {
     uint32_t expected_downtime_s;
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
+    const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
 } web_staged_snap_t;
 
 /** POST/GET /api/upload/gnss. */

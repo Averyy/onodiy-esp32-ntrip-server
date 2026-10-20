@@ -285,6 +285,11 @@ void app_main(void)
             ESP_LOGE(TAG, "settings unusable (%s): running on defaults", esp_err_to_name(err));
         }
     }
+    /* The receiver wiring saved on the station, before any step checks the pins (board_init). */
+    board_wiring_t wiring;
+    if (station_wiring_saved(&wiring)) {
+        board_use_wiring(&wiring);
+    }
 
     /* Before anything reads the boot accounting, the safe-mode decision or an
      * RTC block: RTC state from before another app image's run is set aside

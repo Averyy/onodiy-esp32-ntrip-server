@@ -55,7 +55,8 @@ idf_component_register(
         local_caster
         station
         health
-        fw_update)
+        fw_update
+        board)
 
 # Browser UI (ui/): tools/ui_bundle.py checks the page, the scripts and the
 # styles (structure, and what the Content-Security-Policy would block), joins

@@ -1403,7 +1403,7 @@ function eventCard() {
     await fill();
     render();
   }, err));
-  const wipe = btn('Clear journal…', async () => {
+  const wipe = btn('Clear journal', async () => {
     const ok = await dialog({ title: 'Clear the event journal?', ok: 'Clear journal', okKind: 'danger solid',
       body: [h('p', null, 'Every recorded event is deleted. The start history, the last 30 days and the logs are kept.'),
         h('p', { class: 'muted' }, 'The power-loss alert forgets earlier power cuts.')] });
