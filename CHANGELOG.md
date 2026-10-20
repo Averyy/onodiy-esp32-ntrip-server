@@ -4,6 +4,15 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Receiver: the signal checks side by side on one banner; a tidier sky key; "Reset
+  location" (was Survey again); the OpenStreetMap link beside "Hide the map".
+- Settings, Updates: "Revert version" names the version it starts.
+- Receiver settings: no "(recommended)" tags; the station-restart option reworded.
+- Status, Onocoy: today's online share is the headline, the offline time left a row.
+- Onocoy setup: the username says it is the reference station credential.
+
 ## v0.1.3
 
 - Receiver data no longer lost while the Logs page reads the firmware's task list (it
