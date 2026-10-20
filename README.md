@@ -23,17 +23,16 @@ affiliated with or endorsed by Onocoy.
 
 ## Hardware
 
-![The UM982 + ESP32-S3 board seen from the front: a black circuit board with the silver Unicore UM982 module left of centre, the ESP32-S3-WROOM-1 module on the right, a USB-C port on the top edge and another on the bottom edge, two gold SMA antenna sockets sticking out of the left end, and rows of unpopulated header holes along the top and bottom edges](docs/images/board-front.jpg)
+![The UM982 + ESP32-S3 board seen from the front: a black circuit board with the silver Unicore UM982 module left of centre, the ESP32-S3 module on the right with a small Wi-Fi antenna connector at its edge, a USB-C port on the top edge and another on the bottom edge, two gold SMA antenna sockets sticking out of the left end, and pin headers along the top and bottom edges](docs/images/board.png)
 
-*Front of the board: Unicore UM982 receiver (left of centre), ESP32-S3-WROOM-1 module (right), USB-C to the receiver's COM2 (top edge), USB-C printed `ESP32S3` for the ESP32-S3 (bottom edge), and the SMA antenna sockets `M` (lower) and `S` (upper) on the left.*
+*The board, here with the external Wi-Fi antenna connector: Unicore UM982 receiver (left of centre), ESP32-S3 module (right), USB-C to the receiver's COM2 (top edge), USB-C printed `ESP32S3` for the ESP32-S3 (bottom edge), and the SMA antenna sockets `M` (lower) and `S` (upper) on the left.*
 
 - **The board:** ESP32-S3-WROOM-1 N16R8 (16 MB flash, 8 MB PSRAM) and a Unicore UM982
   all-band receiver. The ESP32 talks to the receiver's COM1.
-- **Weak Wi-Fi where the antenna goes?** What looks like the same board is also sold with
-  an external Wi-Fi antenna: the "Um982 Wifi Ipex" option of
-  [this listing](https://www.aliexpress.com/item/1005013018359434.html). An external
-  antenna reaches much farther than the module's built-in one. Not tested with this
-  firmware yet.
+- **Weak Wi-Fi where the antenna goes?** The same board is also sold with an external
+  Wi-Fi antenna (the ESP32-S3-WROOM-1U module and its antenna connector): the "Um982 Wifi
+  Ipex" option of [this listing](https://www.aliexpress.com/item/1005013018359434.html).
+  An external antenna reaches much farther than the module's built-in one.
 - **Antenna:** a multi-band GNSS antenna on the lower SMA socket, marked `M`. Connect
   or disconnect it only with the power off: the socket carries the antenna's power.
 - **Power:** a plain 5 V USB-A charger and an A-to-C cable into the USB-C printed
