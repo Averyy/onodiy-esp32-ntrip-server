@@ -75,6 +75,13 @@ void mon_add(mon_core_t *m, const monitor_sample_t *s)
     m->have_last = true;
 }
 
+void mon_forget_server(mon_core_t *m)
+{
+    for (size_t i = 0; i < m->n; i++) {
+        memset(&m->ring[i].server, 0, sizeof(m->ring[i].server));
+    }
+}
+
 typedef struct {
     uint32_t sent, ok;
     uint64_t sum_ms;

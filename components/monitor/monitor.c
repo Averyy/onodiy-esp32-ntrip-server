@@ -7,6 +7,9 @@
  * copy it: the Status page's once-a-second status costs no summing), all
  * under one mutex (the series copy is too long for a spinlock).
  *
+ * The server figures are one server's: when another is pinged (Onocoy
+ * turned off, so the first enabled slot instead), the ones before go.
+ *
  * Pings go out on one raw ICMP socket, open for the task's life: what it
  * was handed between samples (late replies, other ICMP) is read off before
  * each request. lwIP hands raw sockets copies, so ICMP still works as
@@ -210,9 +213,12 @@ static void monitor_task(void *arg)
         s.mem_free = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
         xSemaphoreTake(s_mux, portMAX_DELAY);
-        mon_add(&s_core, &s);
         char keep[sizeof(s_summary.server_name)];
         strlcpy(keep, s.server != MONITOR_PING_NONE ? name : s_summary.server_name, sizeof(keep));
+        if (s_summary.server_name[0] != '\0' && strcmp(keep, s_summary.server_name) != 0) {
+            mon_forget_server(&s_core);   /* another server: its figures are its own, not the one's before */
+        }
+        mon_add(&s_core, &s);
         mon_summary(&s_core, &s_summary);
         strlcpy(s_summary.server_name, keep, sizeof(s_summary.server_name));
         s_summary.running = true;

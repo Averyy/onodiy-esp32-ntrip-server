@@ -29,6 +29,9 @@ void mon_init(mon_core_t *m, monitor_bucket_t *ring, size_t cap);
 /** Add a sample to the current bucket; a full one gives way to a new one first. */
 void mon_add(mon_core_t *m, const monitor_sample_t *s);
 
+/** Another server is pinged: the server figures of every bucket go (the router's and the rest stay). */
+void mon_forget_server(mon_core_t *m);
+
 /** The summary over the ring (the server's name and `running` are the caller's). */
 void mon_summary(const mon_core_t *m, monitor_status_t *out);
 

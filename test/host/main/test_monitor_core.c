@@ -146,3 +146,25 @@ TEST_CASE("monitor: past 24 h the oldest bucket gives way", "[monitor]")
     TEST_ASSERT_EQUAL_UINT32(kept, st.router.sent);
     TEST_ASSERT_EQUAL_UINT32(kept * MONITOR_SAMPLE_S, st.span_s);
 }
+
+TEST_CASE("monitor: another server's figures replace the one's before, the rest stay", "[monitor]")
+{
+    mon_init(&m, s_ring, MONITOR_BUCKETS);
+    for (int i = 0; i < 12; i++) {
+        monitor_sample_t s = sample(3, 120, -70, 10, 100000);
+        mon_add(&m, &s);
+    }
+    mon_forget_server(&m);
+    monitor_sample_t s = sample(3, 40, -70, 10, 100000);
+    mon_add(&m, &s);
+    monitor_status_t st;
+    mon_summary(&m, &st);
+    TEST_ASSERT_EQUAL_UINT32(1, st.server.sent);
+    TEST_ASSERT_EQUAL_UINT32(40, st.server.avg_ms);
+    TEST_ASSERT_EQUAL_UINT32(40, st.server.max_ms);
+    TEST_ASSERT_EQUAL_UINT32(13, st.router.sent);              /* the router's stay */
+    TEST_ASSERT_EQUAL_UINT32(13 * MONITOR_SAMPLE_S, st.span_s);
+    size_t n = mon_series(&m, s_out, MONITOR_BUCKETS);
+    TEST_ASSERT_EQUAL_UINT16(0, s_out[0].server.sent);
+    TEST_ASSERT_EQUAL_UINT16(1, s_out[n - 1].server.sent);
+}
