@@ -30,6 +30,7 @@
 #include "ledger.h"
 #include "lifecycle.h"
 #include "local_caster.h"
+#include "monitor.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -228,6 +229,7 @@ void web_snap_status(web_status_snap_t *s)
     s->flash_reason = WEB_FLASH_REASON;
     board_wiring_active(&s->link);
     s->link_off = board_link_off_reason();
+    monitor_get_status(&s->mon);   /* a copy of the summary the monitor keeps: no summing here */
 }
 
 uint32_t web_budget_now(void)
@@ -2182,6 +2184,19 @@ static esp_err_t h_health(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+/* GET /api/monitor: the 24 h of the Status page's figures, one bucket per MONITOR_BUCKET_S. */
+EXT_RAM_BSS_ATTR static monitor_bucket_t s_mon_series[MONITOR_BUCKETS];
+
+static esp_err_t h_monitor(web_req_t *r)
+{
+    size_t n = 0;
+    monitor_get_series(s_mon_series, MONITOR_BUCKETS, &n);
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_monitor_series(&resp.w, s_mon_series, n);
+    return web_resp_end(&resp);
+}
+
 static esp_err_t h_availability(web_req_t *r)
 {
     bool have_cfg = load_configs();
@@ -2531,6 +2546,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/upload/gnss/confirm", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_upload_gnss_confirm),
     ROUTE("/api/health", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_health),
     ROUTE("/api/availability", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_availability),
+    ROUTE("/api/monitor", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_monitor),
     ROUTE("/api/diag/tasks", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_tasks),
     ROUTE("/api/diag/flash-capture", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_capture),
     ROUTE("/api/diag/frame-times", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_frame_times),

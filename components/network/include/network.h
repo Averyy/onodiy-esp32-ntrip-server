@@ -361,6 +361,12 @@ esp_err_t network_get_status(network_status_t *out);
 bool network_is_online(void);
 
 /**
+ * The router: the station interface's IPv4 gateway, network byte order.
+ * False while offline or without one.
+ */
+bool network_get_gateway(uint32_t *addr);
+
+/**
  * New station credentials, applied about a second later (so an HTTP reply
  * can go out first). With credentials already stored (and different) they
  * are stored as pending and tried: an IP within 90 s makes them the

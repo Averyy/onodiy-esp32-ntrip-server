@@ -394,6 +394,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/health` | adm | Health, loss counters, boots, core dump summary | health, gnss_link, rtcm_hub, lifecycle, diag |
 | POST | `/api/health/power-lost/dismiss` | adm | Dismiss the "power was lost" alert | health, settings `life/pwr_ack` |
 | GET | `/api/availability` | adm | Per-day availability, budget | ledger, ntrip_server |
+| GET | `/api/monitor` | adm | The Status page's 24 h: pings, Wi-Fi signal, CPU, memory | monitor |
 | GET | `/api/diag/tasks` | adm | Task statistics | `diag_task_stats` |
 | GET | `/api/diag/flash-capture` | adm | Receiver byte capture download (bench builds) | `um98x_flash_capture_read` |
 | GET | `/api/diag/frame-times` | adm | Receiver link frame and drain-pass times, CSV (bench builds) | `gnss_link_bench_timing_csv` |
@@ -535,7 +536,13 @@ object as sections (section 7), so the UI keeps one model. Admin form:
              "gnss_available": true, "gnss_build": 19152, "gnss_version": "R4.10Build19152",
              "gnss_blocked_reason": "none", "gnss_blocked_left_s": 0,
              "gnss_flash_available": false, "gnss_flash_reason": "not_enabled_in_build",
-             "checking": false, "last_check_unix": 1760080000}
+             "checking": false, "last_check_unix": 1760080000},
+  "monitor": {"running": true, "sample_s": 30, "span_s": 86400,
+              "router": {"state": "ok", "ms": 3, "avg_ms": 4, "max_ms": 80, "sent": 2880, "lost": 0},
+              "server": {"name": "Onocoy", "state": "ok", "ms": 117, "avg_ms": 118, "max_ms": 410, "sent": 2880,
+                         "lost": 2},
+              "rssi": {"now": -79, "avg": -78, "min": -84}, "cpu": {"now": 12, "avg": 10, "max": 40},
+              "memory": {"free": 120000, "min": 98000}}
 }
 ```
 
@@ -580,6 +587,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, outside a ladder episode, while the receiver answers (as `reboot_hold`), and when `recovery_mode` is not `full` |
 | `health.reboot_cap_limit` | which limit of the cap sets `reboot_cap_wait_s`: `hour` (the last ladder restart was less than 60 min ago) or `day` (3 in the last 24 h); the later one when both hold; `null` when `reboot_cap_wait_s` is `null` |
 | `update` | the banner (section 12); admin form only |
+| `monitor` | the station's performance for the Status page (`monitor.h`); admin form only. A sample every `sample_s` (30 s); the section changes once a sample. `running`: sampling runs (not in safe mode). `span_s`: the time the 24 h figures cover (since the restart, at most 24 h). `router`: a ping to the router (the IPv4 gateway); `server`: one to the Onocoy slot's address while it is on and connected, else the first enabled slot's (the address that slot's own lookup found), `name` that slot's (`""` before the first). Each: the latest `state` (`ok`, `lost`: no reply within 2 s, `none`: no target, such as offline, which is no sample), `ms` with `ok`; over the 24 h `sent` (samples with a target), `lost`, and `avg_ms`, `max_ms` over the replies (`null` without one). `rssi` (dBm): the latest (`null` while not associated), the 24 h average and the weakest. `cpu` (%): the busier core's load over the latest sample, the 24 h average and peak. `memory` (bytes): free internal memory now, the lowest sample in the 24 h. `null` where nothing is known yet |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
 read from settings, every caster `disabled`, and `local_caster`
@@ -2511,6 +2519,28 @@ and the console's username and password) are as in the caster status, and so is
 `graced_uptime_so_far_permille`. Every figure but `down_today_s` is `null`
 while the slot is off or not set up, or while the day's figures are not
 known yet.
+
+### `GET /api/monitor` (adm)
+
+The Status page's Performance card over the last 24 h, in buckets of
+`bucket_s` (300 s, ten samples of `sample_s`), oldest first, the current
+(unfinished) bucket last; at most 288 (24 h), fewer since a restart (the
+history is in RAM). Each figure is an array with one element per bucket,
+`null` where the bucket has none:
+
+```json
+{"sample_s": 30, "bucket_s": 300, "buckets": 2, "samples": [10, 3],
+ "router_avg": [4, 3], "router_max": [9, 3], "router_lost": [0, 0],
+ "server_avg": [118, 117], "server_max": [140, 120], "server_lost": [1, 0],
+ "rssi_avg": [-79, -78], "cpu_avg": [11, 9], "cpu_max": [30, 12], "mem_min": [97000, 98200]}
+```
+
+`*_avg` and `*_max` in ms over the bucket's replies, `*_lost` the pings
+without a reply (`null`: no ping had a target); `rssi_avg` dBm; `cpu_avg`
+and `cpu_max` the busier core's load in %; `mem_min` the lowest free
+internal memory sampled, bytes. The UI reads it every 5 min while the page
+is shown (its buckets close every 5 min); the latest values are in the
+status (`monitor`).
 
 ### `GET /api/diag/tasks`
 

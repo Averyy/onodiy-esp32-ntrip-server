@@ -23,6 +23,7 @@
 #include "ledger.h"
 #include "lifecycle.h"
 #include "local_caster.h"
+#include "monitor.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -145,6 +146,7 @@ typedef struct {
     const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     board_wiring_t link;           /**< the receiver wiring this start uses (receiver.link) */
     const char *link_off;          /**< why the link stays closed (board_link_off_reason), NULL = it opens */
+    monitor_status_t mon;          /**< the latest sample and the running 24 h (monitor) */
 } web_status_snap_t;
 
 /** Sections of the status object, in the order they are written. */
@@ -158,6 +160,7 @@ typedef enum {
     WEB_SEC_AVAILABILITY,
     WEB_SEC_UPDATE,
     WEB_SEC_LOCAL_CASTER,
+    WEB_SEC_MONITOR,
     WEB_SEC_COUNT,
 } web_section_t;
 
@@ -173,6 +176,13 @@ bool web_obs_satellites(const gnss_obs_summary_t *o, uint16_t *out);
 
 /** True if the section is part of the public form (safe_mode there: `active` only). */
 bool web_section_public(web_section_t sec);
+
+/**
+ * GET /api/monitor: the buckets oldest first (the current one last), each
+ * figure as an array with one element per bucket (null where the bucket has
+ * none).
+ */
+void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n);
 
 /** The whole status object (admin or public form). */
 void web_build_status(wj_t *w, const web_status_snap_t *s, bool pub);

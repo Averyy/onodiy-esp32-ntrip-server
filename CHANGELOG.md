@@ -14,6 +14,10 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - NTRIP: a slot given another server (deleted, or edited to another host) starts its
   figures over: online and offline today, the availability history, bytes, connects
   and the last reply no longer carry over from the server before.
+- Status: a Performance card. Ping times to your router and to Onocoy (or the first
+  server that is on), the Wi-Fi signal, CPU load and free memory: the latest reading
+  (every 30s), the last 24h's average and worst, and a line over that time. Two small
+  pings every 30s; the history stays in memory, so a restart starts it again.
 
 ## v0.1.4
 

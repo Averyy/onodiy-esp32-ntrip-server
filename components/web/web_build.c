@@ -283,6 +283,7 @@ static const char *const s_section_names[WEB_SEC_COUNT] = {
     [WEB_SEC_AVAILABILITY] = "availability",
     [WEB_SEC_UPDATE] = "update",
     [WEB_SEC_LOCAL_CASTER] = "local_caster",
+    [WEB_SEC_MONITOR] = "monitor",
 };
 
 const char *web_section_name(web_section_t sec)
@@ -663,6 +664,114 @@ static void sec_local_caster(wj_t *w, const web_status_snap_t *s)
     wj_obj_close(w);
 }
 
+/* ---- monitor ---------------------------------------------------------------------------- */
+
+static const char *monitor_ping_name(monitor_ping_t p)
+{
+    switch (p) {
+    case MONITOR_PING_OK:
+        return "ok";
+    case MONITOR_PING_LOST:
+        return "lost";
+    default:
+        return "none";
+    }
+}
+
+/* A ping: the latest (its state, its time with a reply) and the running 24 h (null without a reply). */
+static void monitor_ping(wj_t *w, const char *key, const char *name, bool have, monitor_ping_t p, uint16_t ms,
+                         const monitor_ping_sum_t *sum)
+{
+    wj_obj_open(w, key);
+    if (name != NULL) {
+        wj_str(w, "name", name);
+    }
+    monitor_ping_t now = have ? p : MONITOR_PING_NONE;
+    wj_str(w, "state", monitor_ping_name(now));
+    wj_u32_or_null(w, "ms", now == MONITOR_PING_OK ? ms : UINT32_MAX);
+    bool replies = sum->sent > sum->lost;
+    wj_u32_or_null(w, "avg_ms", replies ? sum->avg_ms : UINT32_MAX);
+    wj_u32_or_null(w, "max_ms", replies ? sum->max_ms : UINT32_MAX);
+    wj_uint(w, "sent", sum->sent);
+    wj_uint(w, "lost", sum->lost);
+    wj_obj_close(w);
+}
+
+/* The latest sample and the running 24 h; it changes once a sample (MONITOR_SAMPLE_S). */
+static void sec_monitor(wj_t *w, const web_status_snap_t *s)
+{
+    const monitor_status_t *m = &s->mon;
+    const monitor_sample_t *l = &m->last;
+    bool have = m->have_last;
+    wj_obj_open(w, "monitor");
+    wj_bool(w, "running", m->running);
+    wj_uint(w, "sample_s", MONITOR_SAMPLE_S);
+    wj_uint(w, "span_s", m->span_s);
+    monitor_ping(w, "router", NULL, have, l->router, l->router_ms, &m->router);
+    monitor_ping(w, "server", m->server_name, have, l->server, l->server_ms, &m->server);
+    wj_obj_open(w, "rssi");
+    if (have && l->rssi_known) {
+        wj_int(w, "now", l->rssi);
+    } else {
+        wj_null(w, "now");
+    }
+    if (m->rssi_known) {
+        wj_int(w, "avg", m->rssi_avg);
+        wj_int(w, "min", m->rssi_min);
+    } else {
+        wj_null(w, "avg");
+        wj_null(w, "min");
+    }
+    wj_obj_close(w);
+    wj_obj_open(w, "cpu");
+    wj_u32_or_null(w, "now", have && l->cpu_known ? l->cpu_pct : UINT32_MAX);
+    wj_u32_or_null(w, "avg", m->cpu_known ? m->cpu_avg : UINT32_MAX);
+    wj_u32_or_null(w, "max", m->cpu_known ? m->cpu_max : UINT32_MAX);
+    wj_obj_close(w);
+    wj_obj_open(w, "memory");
+    wj_u32_or_null(w, "free", have && l->mem_free != 0 ? l->mem_free : UINT32_MAX);
+    wj_u32_or_null(w, "min", m->mem_known ? m->mem_min : UINT32_MAX);
+    wj_obj_close(w);
+    wj_obj_close(w);
+}
+
+/* One figure of every bucket as an array (null where `has` says the bucket has none). */
+#define SERIES(w, key, b, n, has, val)              \
+    do {                                            \
+        wj_arr_open((w), (key));                    \
+        for (size_t i_ = 0; i_ < (n); i_++) {       \
+            const monitor_bucket_t *x = &(b)[i_];   \
+            if (has) {                              \
+                wj_int((w), NULL, (int64_t)(val));  \
+            } else {                                \
+                wj_null((w), NULL);                 \
+            }                                       \
+        }                                           \
+        wj_arr_close(w);                            \
+    } while (0)
+
+void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n)
+{
+    wj_obj_open(w, NULL);
+    wj_uint(w, "sample_s", MONITOR_SAMPLE_S);
+    wj_uint(w, "bucket_s", MONITOR_BUCKET_S);
+    wj_uint(w, "buckets", n);
+    SERIES(w, "samples", b, n, true, x->samples);
+    SERIES(w, "router_avg", b, n, x->router.ok > 0, (x->router.sum_ms + x->router.ok / 2u) / x->router.ok);
+    SERIES(w, "router_max", b, n, x->router.ok > 0, x->router.max_ms);
+    SERIES(w, "router_lost", b, n, x->router.sent > 0, x->router.sent - x->router.ok);
+    SERIES(w, "server_avg", b, n, x->server.ok > 0, (x->server.sum_ms + x->server.ok / 2u) / x->server.ok);
+    SERIES(w, "server_max", b, n, x->server.ok > 0, x->server.max_ms);
+    SERIES(w, "server_lost", b, n, x->server.sent > 0, x->server.sent - x->server.ok);
+    SERIES(w, "rssi_avg", b, n, x->rssi_n > 0, (x->rssi_sum * 2 - (int32_t)x->rssi_n) / (2 * (int32_t)x->rssi_n));
+    SERIES(w, "cpu_avg", b, n, x->cpu_n > 0, (x->cpu_sum + x->cpu_n / 2u) / x->cpu_n);
+    SERIES(w, "cpu_max", b, n, x->cpu_n > 0, x->cpu_max);
+    SERIES(w, "mem_min", b, n, x->mem_min != UINT32_MAX, x->mem_min);
+    wj_obj_close(w);
+}
+
+#undef SERIES
+
 void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, bool pub)
 {
     if (pub && !web_section_public(sec)) {
@@ -695,6 +804,9 @@ void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, b
         break;
     case WEB_SEC_LOCAL_CASTER:
         sec_local_caster(w, s);
+        break;
+    case WEB_SEC_MONITOR:
+        sec_monitor(w, s);
         break;
     default:
         break;
@@ -768,6 +880,7 @@ void web_build_status(wj_t *w, const web_status_snap_t *s, bool pub)
     web_build_section(w, s, WEB_SEC_ALERTS, pub);
     web_build_section(w, s, WEB_SEC_AVAILABILITY, pub);
     web_build_section(w, s, WEB_SEC_UPDATE, pub);
+    web_build_section(w, s, WEB_SEC_MONITOR, pub);
     wj_obj_close(w);
 }
 

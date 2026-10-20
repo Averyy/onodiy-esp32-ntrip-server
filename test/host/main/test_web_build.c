@@ -2814,3 +2814,85 @@ TEST_CASE("status: the receiver's link, its pins and port, in the admin form onl
     TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "receiver"), "link"));
     cJSON_Delete(root);
 }
+
+TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is known", "[web_build]")
+{
+    fixture();
+    char frag[1024];
+    wj_t w;
+    /* Not running yet (safe mode, or before its first sample). */
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_MONITOR, false);
+    TEST_ASSERT_EQUAL_STRING(
+        "\"monitor\":{\"running\":false,\"sample_s\":30,\"span_s\":0,"
+        "\"router\":{\"state\":\"none\",\"ms\":null,\"avg_ms\":null,\"max_ms\":null,\"sent\":0,\"lost\":0},"
+        "\"server\":{\"name\":\"\",\"state\":\"none\",\"ms\":null,\"avg_ms\":null,\"max_ms\":null,\"sent\":0,\"lost\":0},"
+        "\"rssi\":{\"now\":null,\"avg\":null,\"min\":null},\"cpu\":{\"now\":null,\"avg\":null,\"max\":null},"
+        "\"memory\":{\"free\":null,\"min\":null}}",
+        wj_text(&w));
+
+    monitor_status_t *m = &s_snap.mon;
+    m->running = true;
+    m->have_last = true;
+    m->span_s = 7200;
+    m->last.router = MONITOR_PING_OK;
+    m->last.router_ms = 3;
+    m->last.server = MONITOR_PING_LOST;
+    m->last.rssi_known = true;
+    m->last.rssi = -79;
+    m->last.cpu_known = true;
+    m->last.cpu_pct = 12;
+    m->last.mem_free = 120000;
+    strcpy(m->server_name, "Onocoy");
+    m->router = (monitor_ping_sum_t){ .sent = 240, .lost = 0, .avg_ms = 4, .max_ms = 80 };
+    m->server = (monitor_ping_sum_t){ .sent = 240, .lost = 2, .avg_ms = 117, .max_ms = 410 };
+    m->rssi_known = true;
+    m->rssi_avg = -78;
+    m->rssi_min = -84;
+    m->cpu_known = true;
+    m->cpu_avg = 10;
+    m->cpu_max = 40;
+    m->mem_known = true;
+    m->mem_min = 98000;
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_MONITOR, false);
+    TEST_ASSERT_EQUAL_STRING(
+        "\"monitor\":{\"running\":true,\"sample_s\":30,\"span_s\":7200,"
+        "\"router\":{\"state\":\"ok\",\"ms\":3,\"avg_ms\":4,\"max_ms\":80,\"sent\":240,\"lost\":0},"
+        "\"server\":{\"name\":\"Onocoy\",\"state\":\"lost\",\"ms\":null,\"avg_ms\":117,\"max_ms\":410,\"sent\":240,\"lost\":2},"
+        "\"rssi\":{\"now\":-79,\"avg\":-78,\"min\":-84},\"cpu\":{\"now\":12,\"avg\":10,\"max\":40},"
+        "\"memory\":{\"free\":120000,\"min\":98000}}",
+        wj_text(&w));
+    TEST_ASSERT_TRUE(strlen(wj_text(&w)) < 640);   /* well inside a status section's room (web_ws.c SEC_TEXT_MAX) */
+
+    /* Admin only. */
+    wj_init_members(&w, frag, sizeof(frag));
+    web_build_section(&w, &s_snap, WEB_SEC_MONITOR, true);
+    TEST_ASSERT_EQUAL_STRING("", wj_text(&w));
+}
+
+TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none", "[web_build]")
+{
+    monitor_bucket_t b[2];
+    memset(b, 0, sizeof(b));
+    b[0].samples = 10;
+    b[0].router = (monitor_ping_acc_t){ .sent = 10, .ok = 9, .sum_ms = 40, .max_ms = 9 };
+    b[0].rssi_n = 2;
+    b[0].rssi_sum = -157;   /* -78.5: -79 */
+    b[0].rssi_min = -80;
+    b[0].cpu_n = 10;
+    b[0].cpu_sum = 105;
+    b[0].cpu_max = 30;
+    b[0].mem_min = 97000;
+    b[1].samples = 1;       /* the current bucket: offline, nothing but memory */
+    b[1].mem_min = UINT32_MAX;
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_monitor_series(&w, b, 2);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"sample_s\":30,\"bucket_s\":300,\"buckets\":2,\"samples\":[10,1],"
+        "\"router_avg\":[4,null],\"router_max\":[9,null],\"router_lost\":[1,null],"
+        "\"server_avg\":[null,null],\"server_max\":[null,null],\"server_lost\":[null,null],"
+        "\"rssi_avg\":[-79,null],\"cpu_avg\":[11,null],\"cpu_max\":[30,null],\"mem_min\":[97000,null]}",
+        wj_text(&w));
+}

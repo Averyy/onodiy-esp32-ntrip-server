@@ -3506,6 +3506,17 @@ bool network_is_online(void)
     return online;
 }
 
+bool network_get_gateway(uint32_t *addr)
+{
+    esp_netif_ip_info_t info;
+    if (addr == NULL || s_sta == NULL || !network_is_online() || esp_netif_get_ip_info(s_sta, &info) != ESP_OK ||
+        info.gw.addr == 0) {
+        return false;
+    }
+    *addr = info.gw.addr;
+    return true;
+}
+
 /* Hand credentials to the net task, applied APPLY_DELAY_MS from now (under s_lock). */
 static void queue_apply_locked(const char *ssid, const char *pass, bool trial)
 {

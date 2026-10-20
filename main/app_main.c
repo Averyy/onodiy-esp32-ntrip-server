@@ -58,6 +58,7 @@
 #include "ledger.h"
 #include "lifecycle.h"
 #include "local_caster.h"
+#include "monitor.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -141,7 +142,8 @@ static const boot_step_t s_init_steps[] = {
 };
 
 /* Start: spawn tasks. Network and web first so the UI is reachable early;
- * health last so it starts watching a fully started system. The update
+ * health last so it starts watching a fully started system (only the
+ * monitor's sampling for the Status page comes after it). The update
  * check and user-initiated app installs keep running in safe mode so a fix
  * can arrive; receiver flashing stays off there because the station does
  * not run, and that includes finishing an interrupted receiver flash: it
@@ -156,6 +158,7 @@ static const boot_step_t s_start_steps[] = {
     { "local_caster", local_caster_start, true  },
     { "fw_update",    fw_update_start,    false },
     { "health",       health_start,       false },
+    { "monitor",      monitor_start,      true  }, /* the Status page's ping, signal, CPU and memory figures */
 };
 
 /*

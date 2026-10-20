@@ -53,6 +53,7 @@ idf_component_register(
         network
         ntrip_server
         local_caster
+        monitor
         station
         health
         fw_update

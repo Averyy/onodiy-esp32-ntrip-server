@@ -17,6 +17,7 @@ idf_component_register(
         lifecycle
         ledger
         health
+        monitor
         gnss_link
         gnss_obs
         rtcm_hub

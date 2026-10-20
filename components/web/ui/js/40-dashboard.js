@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Status page: a summary that is always whole. The top card (title, one
- * line, its buttons, "Also:" lines), then five cards in the same places
+ * line, its buttons, "Also:" lines), then six cards in the same places
  * whatever the state: Sky across the page, Receiver and Station, then
- * Onocoy and NTRIP. Each
+ * Onocoy and NTRIP, then Performance across the page. Each
  * card says its few facts once and has one link out, in its head, to the
  * page that manages them; nothing is edited here. All of it from
  * stationState() (15-state.js), so no card contradicts another.
@@ -36,6 +36,14 @@ Views.dashboard = {
       live = await api('GET', '/api/gnss/live');
       render();
     }) : null;
+    /* The Performance card's lines (GET /api/monitor, admin only): its buckets close every 5 min, so read every 5 min;
+     * once more when the first reading came after an empty answer (the page opened right after a restart). */
+    let mon = null, monAgain = false;
+    const loadMon = async () => {
+      mon = await api('GET', '/api/monitor');
+      render();
+    };
+    const stopMon = isAdmin() ? poller(300000, loadMon) : null;
     /* Open servers that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on servers change; the
      * top card says it in an "Also:" line. */
     let openSlots = [], openKey = '';
@@ -68,7 +76,11 @@ Views.dashboard = {
           if (key) loadOpen();
         }
       }
-      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live) : publicDashboard(s, st, sig));
+      if (admin && mon && !mon.buckets && s.monitor && s.monitor.span_s && !monAgain) {
+        monAgain = true;
+        loadMon().catch(() => {});
+      }
+      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live, mon) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
     dismissPowerClicks(el, render);
@@ -81,6 +93,7 @@ Views.dashboard = {
         gone = true;
         if (stopSig) stopSig();
         if (stopLive) stopLive();
+        if (stopMon) stopMon();
       },
     };
   },
@@ -426,6 +439,88 @@ function stationCard(s, st) {
     kv([['Wi-Fi', wifiView(s.network || {})], ['Running for', fmt.dur(s.uptime_s)], ['Firmware', dotted(fw.parts)]]));
 }
 
+/*
+ * Performance: the router's and the server's ping times, the Wi-Fi signal,
+ * CPU and free memory, each its latest reading (status `monitor`, a new one
+ * every 30 s), its last 24 h in words, and a line over the same time (GET
+ * /api/monitor, 5-min buckets, read by the page every 5 min while it is
+ * shown): the newest at the right edge, red marks where a ping got no reply.
+ */
+const MON_DAY_S = 86400;
+
+/* A line over the time the figures cover (the card's "Last ..."; at most 24 h): values oldest first (null = none) from
+ * the left edge to the right; scaled to lo..hi (default: the values' own range; zero: from 0; span: at least this much
+ * range, so a small jitter stays a flat line). A lone value is a dot. */
+function sparkline(vals, label, o) {
+  const H = 32, n = vals.length, W = Math.max(n - 1, 1);
+  const x = i => (n === 1 ? W : i);
+  const known = vals.filter(v => v !== null && v !== undefined);
+  let lo = o.lo !== undefined ? o.lo : known.length ? Math.min(...known) : 0;
+  const hi0 = o.hi !== undefined ? o.hi : known.length ? Math.max(...known) : 1;
+  if (o.zero) lo = Math.min(lo, 0);
+  const hi = Math.max(hi0, lo + (o.span || 1));
+  const y = v => (H - 3 - (v - lo) / (hi - lo) * (H - 6)).toFixed(1);
+  const has = i => i >= 0 && i < n && vals[i] !== null && vals[i] !== undefined;
+  let d = '';
+  for (let i = 0; i < n; i++) {
+    if (!has(i)) continue;
+    d += (has(i - 1) ? 'L' : 'M') + x(i) + ' ' + y(vals[i]);
+    if (!has(i - 1) && !has(i + 1)) d += 'h0';
+  }
+  let loss = '';
+  (o.lost || []).forEach((k, i) => {
+    if (k) loss += 'M' + x(i) + ' 0V' + H;
+  });
+  return svg('svg', { class: 'spark', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img',
+    'aria-label': label },
+  svg('path', { class: 'spark-base', d: 'M0 ' + (H - 0.5) + 'H' + W }),
+  loss ? svg('path', { class: 'spark-loss', d: loss }) : null,
+  d ? svg('path', { class: 'spark-line', d: d }) : null);
+}
+
+const pingMs = v => (v < 1 ? '<1ms' : fmt.ms(v));
+
+function pingNow(p) {
+  if (!p || p.state === 'none') return DASH;
+  return p.state === 'lost' ? h('span', { class: 't-warn' }, 'No reply') : pingMs(p.ms);
+}
+
+function pingDay(p) {
+  if (!p || !p.sent) return 'No readings yet';
+  const lost = p.lost ? p.lost + ' lost (' + (100 * p.lost / p.sent).toFixed(1) + NB + '%)' : 'none lost';
+  if (p.avg_ms === null) return 'No replies · ' + lost;
+  return dotted(['avg ' + pingMs(p.avg_ms), 'worst ' + pingMs(p.max_ms), lost]);
+}
+
+function perfRow(name, now, day, line) {
+  return h('div', { class: 'perf-row' }, h('span', { class: 'perf-name' }, name), h('span', { class: 'perf-now' }, now),
+    h('span', { class: 'perf-day muted' }, day), line);
+}
+
+function perfCard(s, st, mon) {
+  const m = s.monitor;
+  const span = m ? Math.min(m.span_s || 0, MON_DAY_S) : 0;
+  const head = cardHead('Performance', span ? badge(span >= MON_DAY_S - 300 ? 'Last 24h' : 'Last ' + fmt.dur(span), '') : null);
+  const wrap = (...kids) => h('section', { class: 'card wide perf-card' }, head, kids);
+  if (st.key === 'safe_mode') return wrap(mutedLine('Not available in safe mode.'));
+  if (!m || !m.running || !span) return wrap(mutedLine('Waiting for the first reading (every 30s).'));
+  const col = k => (mon && mon[k]) || [];
+  const server = m.server.name ? m.server.name + ' ping' : 'Server ping';
+  const r = m.rssi, c = m.cpu, mem = m.memory;
+  return wrap(h('div', { class: 'perf' },
+    perfRow('Router ping', pingNow(m.router), pingDay(m.router),
+      sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, lost: col('router_lost') })),
+    perfRow(server, pingNow(m.server), pingDay(m.server),
+      sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, lost: col('server_lost') })),
+    perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now) : DASH,
+      r.avg !== null ? dotted(['avg ' + dbmText(r.avg), 'weakest ' + dbmText(r.min)]) : 'No readings yet',
+      sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10 })),
+    perfRow('CPU', fmt.pct(c.now), c.avg !== null ? dotted(['avg ' + fmt.pct(c.avg), 'peak ' + fmt.pct(c.max)]) : 'No readings yet',
+      sparkline(col('cpu_max'), 'CPU peaks over the same time', { lo: 0, hi: 100 })),
+    perfRow('Free memory', fmt.bytes(mem.free), mem.min !== null ? 'lowest ' + fmt.bytes(mem.min) : 'No readings yet',
+      sparkline(col('mem_min'), 'Free memory over the same time', { zero: true }))));
+}
+
 /* Each constellation with satellites: its count, and a dot in its colour under every band it is tracked on (the count
  * on that band in the dot's title), a small grey one under the others. */
 function skyGrid(t) {
@@ -468,9 +563,11 @@ function skyCard(s, st, live) {
       skyGrid(t)));
 }
 
-/* The top card, then five cards in reading order: the sky across the page, the receiver and the station, Onocoy and the NTRIP servers. */
-function adminDashboard(s, st, openSlots, live) {
-  const cards = [skyCard(s, st, live), receiverCard(s, st, live), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true)];
+/* The top card, then six cards in reading order: the sky across the page, the receiver and the station, Onocoy and the
+ * NTRIP servers, the station's performance across the page. */
+function adminDashboard(s, st, openSlots, live, mon) {
+  const cards = [skyCard(s, st, live), receiverCard(s, st, live), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true),
+    perfCard(s, st, mon)];
   const links = cards.map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
   return [heroCard(s, st, heroAlso(s, st, openSlots), links), h('div', { class: 'grid' }, cards)];
 }

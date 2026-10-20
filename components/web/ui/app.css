@@ -909,6 +909,28 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 /* The Status page's Sky card: a small sky plot, the count, and the bands per constellation (stacked on a phone). */
 .sky-glance { display: grid; justify-items: center; align-items: center; gap: 1.25rem; }
 @media (min-width: 720px) { .sky-glance { grid-template-columns: auto auto auto; justify-content: space-around; } }
+
+/* Performance (Status page): per figure its name, the latest reading, its last 24 h in words and its line over the
+ * same time (its baseline separates the figures). On a phone the name and the reading on one line, the words and the
+ * line under them; from 720 px one row each, in columns. The line stretches with its box; its strokes keep their width. */
+.perf { display: grid; gap: 1rem; }
+.perf-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name now" "day day" "spark spark";
+  column-gap: 0.75rem; row-gap: 0.2rem; align-items: baseline; }
+.perf-name { grid-area: name; font-weight: 600; }
+.perf-now { grid-area: now; font-weight: 600; white-space: nowrap; }
+.perf-day { grid-area: day; font-size: 0.9rem; }
+.perf .spark { grid-area: spark; display: block; width: 100%; height: 28px; margin-top: 0.2rem; }
+@media (min-width: 720px) {
+  .perf { grid-template-columns: max-content max-content minmax(0, 1fr) minmax(8rem, 16rem); column-gap: 1.25rem;
+    row-gap: 0.75rem; align-items: center; }
+  .perf-row { display: contents; }
+  .perf-name, .perf-now, .perf-day, .perf .spark { grid-area: auto; }
+  .perf .spark { margin-top: 0; }
+}
+.spark-base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+  vector-effect: non-scaling-stroke; }
+.spark-loss { stroke: var(--bad); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .sky-grid { width: auto; }
 .sky-fig { margin: 0; flex: 0 0 auto; text-align: center; }
 svg.sky.mini { width: 200px; max-width: 100%; }
