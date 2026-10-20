@@ -1206,11 +1206,12 @@ const EV_FILTER = [
 const RESET_KEYS = Object.keys(L.resetReason);
 
 /*
- * The event list's rows, newest first (eventTable): per start a heading
- * that says when and how it started (its boot and session records, and the
- * restart record that announced it), then its other records newest first:
- * a caster's or the Wi-Fi's drop and the return after it as one row (the
- * connection history), repeats collapsed. entries: oldest first; atStart:
+ * The event list's rows, newest first (eventTable), in time order: per start
+ * its other records newest first, then a heading row that says when and how
+ * it started (its boot and session records, and the restart record that
+ * announced it), below what happened after it. A caster's or the Wi-Fi's
+ * drop and the return after it are one row (the connection history), repeats
+ * collapsed. entries: oldest first; atStart:
  * they reach back to the journal's oldest record (else the oldest start may
  * just not be loaded yet); kinds: the filter (null: everything).
  */
@@ -1305,14 +1306,15 @@ function journalItems(entries, atStart, kinds) {
           ' recovery' : loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e) }));
       }
     }
+    let head = null;
     if (!kinds || kinds.indexOf('boot') >= 0 || rows.length) {
       let text = boot ? startSentence(J.resetClassKey[boot.a], sess ? RESET_KEYS[sess.b] : null, J.rebootKey[boot.b]) :
         gi === 0 && !atStart ? 'Start' : 'Start (its first records are gone)';
       if (sess && sess.a >= 0) text += ' (previous uptime ' + fmt.dur(sess.a) + ')';
       /* When it started: its boot record's time, else (its first records gone) the start the others imply. */
       const t = boot ? timeOf(boot) : g.offset;
-      items.push({ head: [t !== null ? whenParts(t, t, !(boot && boot.time_unix), year) : null,
-        g.offset !== null ? text : text + ', time not known yet'] });
+      head = { head: [t !== null ? whenParts(t, t, !(boot && boot.time_unix), year) : null,
+        g.offset !== null ? text : text + ', time not known yet'] };
     }
     for (const r of collapse(rows)) {
       items.push(r);
@@ -1320,6 +1322,7 @@ function journalItems(entries, atStart, kinds) {
         x.when = x.t1 !== null ? whenParts(x.t0, x.t1, x.est, year) : ['', fmt.dur(x.up) + ' after the start'];
       }
     }
+    if (head) items.push(head);
   }
   return items;
 }

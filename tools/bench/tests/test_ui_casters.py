@@ -701,6 +701,11 @@ async function ntripRover(c) {
   const sw = () => (card() ? [...card().walk()].find(e => e.attrs.role === 'switch') : null);
   const r = { cards: pageParts(el).cards, before: card() ? pageParts(card()) : null, cls: card() ? card().className : null,
     sw: sw() ? [sw().getAttribute('aria-checked'), sw().getAttribute('aria-label')] : null };
+  /* The "More servers" card's badge: how many slots are free. */
+  const more = [...visible(el)].find(e => e.tagName === 'SECTION' && [...e.walk()].some(x => x.tagName === 'H2' &&
+    x.textContent === 'More servers'));
+  const badgeEl = more && [...more.walk()].find(x => /\bbadge\b/.test(x.className || ''));
+  r.free = badgeEl ? badgeEl.textContent : null;
   if (c.act === 'switch') sw().fire('click');
   if (c.act === 'edit') [...card().walk()].find(e => e.tagName === 'BUTTON' && e.textContent === 'Edit').fire('click');
   if (c.act === 'reload') {
@@ -2305,7 +2310,8 @@ def test_event_list_says_every_rows_date_in_a_column_of_one_width():
             {"seq": 5, "kind": "wifi_up", "a": 1, "b": 6, "uptime_s": 66, "time_unix": t0 + 6}]
     (r,) = run_editor([{"fn": "event_rows", "recs": recs}])
     assert r["cls"].split() == ["events", "fixed"]
-    head, start, drop, rx = r["rows"]
+    # Newest first and in time order: the start's heading below what happened after it.
+    head, drop, rx, start = r["rows"]
     assert head == ["TH", "when", None, None, "Event"]
     assert start[:2] == ["TH", "when"] and start[3].startswith("about ")
     assert start[4] == "Started after power-on or a reset by its pin"
@@ -2920,9 +2926,23 @@ PAGE_STATUS = st_status(network={"online": True, "ip": "192.168.1.50", "mdns_hos
                         casters=[st_caster(0, "RTK2go", "streaming")])
 
 
-def ntrip_rover(rover: list, act: str | None = None, put: list | None = None, again: list | None = None) -> dict:
-    return run_editor([{"fn": "ntrip_rover", "casters": PAGE_CASTERS, "rover": rover, "act": act, "put": put,
+def ntrip_rover(rover: list, act: str | None = None, put: list | None = None, again: list | None = None,
+                casters: dict | None = None) -> dict:
+    return run_editor([{"fn": "ntrip_rover", "casters": casters or PAGE_CASTERS, "rover": rover, "act": act, "put": put,
                         "again": again, "status": PAGE_STATUS}])[0]
+
+
+def test_more_servers_counts_the_slots_beside_onocoy():
+    """The "More servers" badge counts the free slots out of those Onocoy does not use (4 slots with Onocoy set up:
+    3 for other servers)."""
+    plain = ntrip_rover([200, lcast()])
+    assert plain["free"] == "1 of 2 slots free"
+    ono = {**PAGE_CASTERS, "max_slots": 4, "slots": [
+        {"slot": 0, "config": stored("servers.onocoy.com", "standard", name="Onocoy"), "status": {"state": "streaming"}},
+        {"slot": 1, "config": stored("rtk2go.com", "polite", name="RTK2go"), "status": {"state": "streaming"}},
+        {"slot": 2, "config": stored("", "standard", name="", enabled=False, password_set=False), "status": {"state": "disabled"}},
+        {"slot": 3, "config": stored("", "standard", name="", enabled=False, password_set=False), "status": {"state": "disabled"}}]}
+    assert ntrip_rover([200, lcast()], casters=ono)["free"] == "2 of 3 slots free"
 
 
 def test_rover_card_on_the_ntrip_page():

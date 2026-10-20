@@ -1,24 +1,21 @@
 # Changelog
 
 What each release changes, newest first. A release's notes on GitHub start with its
-section here. Changes since the last release collect under Unreleased; before you tag,
-rename that heading to the new version ([releases](docs/releases.md)).
+section here. Changes since the last release collect under `## Unreleased`; before you
+tag, rename that heading to the new version ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.2
 
 - Settings, Updates: the trial line names its stage and gives the whole trial's time
-  left. The receiver line says "Up to date" when the receiver runs a newer build than the
-  release has.
-- A restart keeps what the last update check found, so the card still knows the latest
-  release after an update or a power cut.
+  left; the receiver line says "Up to date" when the receiver runs a newer build than the
+  release has; a restart no longer forgets the latest release.
+- Status: the Receiver card shows the signal strength (the Sky card already shows the
+  bands).
+- Receiver: the Signals card leads with its checks; the satellite table is half as tall.
+- Logs: the event list is in time order, each start below what happened after it;
+  "Previous uptime"; a UM982's own descriptor no longer shows as differing.
+- NTRIP: "More servers" counts the slots left beside Onocoy.
 - Times read 17s, 4min 10s, 23h 39min.
-- Receiver, Signals: the checks lead the card, the bands one of them, naming every
-  constellation with the most bands. The satellite table is half as tall.
-- Status: the Receiver card shows the signal strength instead of the bands the Sky card
-  already shows.
-- Logs: "Previous uptime"; a UM982's own descriptor no longer shows its firmware and serial
-  as differing.
-- A planned restart turns the receiver port's interrupts off first.
 
 ## v0.1.1
 

@@ -961,9 +961,10 @@ Views.ntrip = {
     function addBody() {
       const free = freeSlots();
       if (editor && free.some(x => x.slot === editing)) return [editor.el];
-      /* Not set up while no server besides Onocoy is; then how many slots are free. */
+      /* Not set up while no server besides Onocoy is; then how many slots are free of those Onocoy does not use. */
+      const ono = data.slots.filter(x => !isFree(x) && x.config && isOnocoySlot(x.config)).length;
       const others = data.slots.filter(x => !isFree(x) && !(x.config && isOnocoySlot(x.config))).length;
-      const head = cardHead('More servers', badge(!others ? 'Not set up' : free.length + ' of ' + data.max_slots + ' slots free', ''));
+      const head = cardHead('More servers', badge(!others ? 'Not set up' : free.length + ' of ' + (data.max_slots - ono) + ' slots free', ''));
       if (!free.length) return [head, h('p', null, 'Every slot is in use. Edit a server to replace it.')];
       return [head, h('p', null, 'Stream to another NTRIP server as well.'),
         h('div', { class: 'form-actions' }, btn('Add a server', () => edit(free[0]), free.length === data.slots.length ? 'primary' : ''))];

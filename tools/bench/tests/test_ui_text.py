@@ -395,8 +395,9 @@ def test_event_list_says_a_move_kept_the_connections():
 
 
 def test_event_journal_one_heading_per_start_and_repeats_folded():
-    """A start is one heading (its boot and session records, and the restart record that announced it, folded in),
-    its other records newest first, 27 recovery steps in a row one row with a toggle; no "#seq" or "≈" in the text."""
+    """A start is one heading (its boot and session records, and the restart record that announced it, folded in)
+    below its other records, newest first, so the list is in time order; 27 recovery steps in a row one row with a
+    toggle; no "#seq" or "≈" in the text."""
     t0 = 1760500000
     first = [jrec(1, "boot", 0, 0, 1), jrec(2, "session", -1, 1, 1)]
     steps = [jrec(3 + i, "ladder_step", 0, (0 << 8) | 2, 60 + i, t0 + 60 + i) for i in range(27)]
@@ -411,6 +412,10 @@ def test_event_journal_one_heading_per_start_and_repeats_folded():
     ])
     heads = [i["head"][1] for i in every if "head" in i]
     assert heads == ["Restarted by you (previous uptime 44s)", "Started after power-on or a reset by its pin"]
+    # In time order: the second start's Wi-Fi drop, that start, the first start's recovery, then the first start.
+    assert [i["head"][1] if "head" in i else i["ev"] for i in every] == [
+        "Wi-Fi dropped", "Restarted by you (previous uptime 44s)", "Receiver recovery",
+        "Started after power-on or a reset by its pin"]
     rows = [i for i in every if "head" not in i]
     # The restart record went into the heading; a recovery step is named after its recovery, the step is the detail.
     assert [r["ev"] for r in rows] == ["Wi-Fi dropped", "Receiver recovery"]
