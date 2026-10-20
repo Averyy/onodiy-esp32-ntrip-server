@@ -898,7 +898,8 @@ for (const c of JSON.parse(casesJson)) {
      * whether it is wide. The top card's buttons as shown [text, href], the caster slots its line names, and every class
      * on the page that gives a colour (a tone, a tone's text, a C/N0 class). */
     const st = ui.stationState(c.status, c.admin);
-    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || [], c.live || null) : ui.publicDashboard(c.status, st, null)).filter(Boolean);
+    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || [], c.live || null, c.mon || null) :
+      ui.publicDashboard(c.status, st, null)).filter(Boolean);
     const all = kids.flatMap(k => [...visible(k)]);
     /* A list's label/value pairs (the top card's facts: each pair in a div of its own). */
     const pairs = v => v.filter(e => e.tagName === 'DL').flatMap(dl => {
@@ -937,6 +938,11 @@ for (const c of JSON.parse(casesJson)) {
         nowrap: v.filter(e => cls(e).indexOf(' nowrap ') >= 0).map(e => e.textContent),
         buttons: v.filter(e => e.tagName === 'BUTTON' || (e.tagName === 'A' && cls(e).indexOf(' btn ') >= 0)).length,
         wide: cls(sec).indexOf(' wide ') >= 0,
+        /* The Performance card: per figure its name, latest reading and 24 h words; its lines (aria-label, viewBox,
+         * each path [class, d]). */
+        perf: v.filter(e => e.className === 'perf-row').map(r => r.kids.slice(0, 3).map(k => k.textContent)),
+        sparks: v.filter(e => e.tagName === 'SVG' && e.attrs.class === 'spark').map(e => ({ label: e.attrs['aria-label'],
+          viewBox: e.attrs.viewBox, paths: e.kids.map(k => [k.attrs.class, k.attrs.d]) })),
         text: sec.textContent };
     }
     const plan = hv.find(e => e.tagName === 'P' && e.className === 'muted small');
@@ -1559,11 +1565,13 @@ MATRIX = {
     "setup_too": over(BASE, casters=[ONO_SETUP, RTK, st_caster(2, "Bench", "auth_failed", reason="auth", next_retry_s=90)],
                       availability={"budget_left_s": None}),
 }
-CARDS = ["Sky", "Receiver", "Station", "Onocoy", "NTRIP"]
+CARDS = ["Sky", "Receiver", "Station", "Onocoy", "NTRIP", "Performance"]
+WIDE_CARDS = ("Sky", "Performance")
 
 
-def dashboards(*statuses, admin: bool = True, open_slots: list | None = None, live: dict | None = None) -> list[dict]:
-    return run_editor([{"fn": "dashboard", "status": s, "admin": admin, "open": open_slots or [], "live": live}
+def dashboards(*statuses, admin: bool = True, open_slots: list | None = None, live: dict | None = None,
+               mon: dict | None = None) -> list[dict]:
+    return run_editor([{"fn": "dashboard", "status": s, "admin": admin, "open": open_slots or [], "live": live, "mon": mon}
                        for s in statuses])
 
 
@@ -1575,16 +1583,17 @@ def rx_rows(o: dict) -> list[str]:
     return [v for _, v in o["cards"]["Receiver"]["rows"]]
 
 
-def test_status_page_always_has_five_cards():
-    """Whatever the state the admin sees the same five cards in the same places (never a card missing): Sky across
-    the page, then Receiver and Station, Onocoy and NTRIP (none of them taking the row). Each has one link, in its
-    head, whose name starts with its visible word, and no button: the top card has the page's buttons."""
+def test_status_page_always_has_six_cards():
+    """Whatever the state the admin sees the same six cards in the same places (never a card missing): Sky across
+    the page, then Receiver and Station, Onocoy and NTRIP (none of them taking the row), then Performance across the
+    page. Each has one link, in its head, whose name starts with its visible word, and no button: the top card has the
+    page's buttons."""
     for name, o in matrix().items():
         assert o["order"] == CARDS, name
         assert o["grid"] == "grid", name
         for title in CARDS:
             card = o["cards"][title]
-            assert card["wide"] == (title == "Sky"), (name, title)
+            assert card["wide"] == (title in WIDE_CARDS), (name, title)
             assert card["buttons"] == 0, (name, title)
             assert len(card["links"]) == 1 and card["links"][0][3] is True, (name, title, card["links"])
             text, _, aria, _ = card["links"][0]
@@ -3138,3 +3147,58 @@ def test_status_ntrip_card_says_your_rover_in_one_line():
                          "local_caster": lc(clients=1)}, admin=False)
     assert pub["cards"]["NTRIP"]["lines"] == ["Onocoy · Streaming"]
 
+
+
+MON = {"running": True, "sample_s": 30, "span_s": 7200,
+       "router": {"state": "ok", "ms": 3, "avg_ms": 4, "max_ms": 80, "sent": 240, "lost": 0},
+       "server": {"name": "Onocoy", "state": "lost", "ms": None, "avg_ms": 117, "max_ms": 410, "sent": 240, "lost": 2},
+       "rssi": {"now": -79, "avg": -78, "min": -84}, "cpu": {"now": 12, "avg": 10, "max": 40},
+       "memory": {"free": 120000, "min": 98000}}
+MON_SERIES = {"sample_s": 30, "bucket_s": 300, "buckets": 5, "samples": [10, 10, 10, 10, 3],
+              "router_avg": [None, 4, 5, None, 2], "router_max": [None, 9, 8, None, 2], "router_lost": [None, 0, 1, None, 0],
+              "server_avg": [118, 117, 120, 119, 117], "server_max": [140, 130, 150, 125, 120], "server_lost": [0, 1, 0, 0, 0],
+              "rssi_avg": [-79, -78, -80, -79, -78], "cpu_avg": [8, 9, 10, 9, 8], "cpu_max": [10, 20, 30, 40, 50],
+              "mem_min": [98000, 98500, 99000, 99000, 98800]}
+
+
+def test_status_performance_card():
+    """The Performance card: per figure its name, its latest reading and the last 24 h in words (a ping without a reply
+    in the warning colour), a chip for the time covered ("Last 2h"; "Last 24h" once a day is covered), one link to the
+    Logs page; a line per figure over that time from the left edge to the right (a gap where a bucket has nothing, a lone
+    value a dot, red marks where a ping got no reply, at least 10 ms of range so a millisecond's jitter stays flat). Before
+    the first reading, and in safe mode, one muted line."""
+    nb = " "
+    (o, day, unnamed, waiting, none) = dashboards(over(BASE, monitor=MON), over(BASE, monitor={**MON, "span_s": 86100}),
+                                                  over(BASE, monitor={**MON, "server": {**MON["server"], "name": ""}}),
+                                                  over(BASE, monitor={**MON, "span_s": 0}), BASE, mon=MON_SERIES)
+    card = o["cards"]["Performance"]
+    assert card["chip"][0] == "Last 2h" and day["cards"]["Performance"]["chip"][0] == "Last 24h"
+    assert card["links"] == [["Details", "#/logs", "Details on the Logs page", True]] and card["buttons"] == 0
+    assert card["perf"] == [
+        ["Router ping", "3ms", "avg 4ms · worst 80ms · none lost"],
+        ["Onocoy ping", "No reply", f"avg 117ms · worst 410ms · 2 lost (0.8{nb}%)"],
+        ["Wi-Fi signal", f" Weak (−79{nb}dBm)", f"avg −78{nb}dBm · weakest −84{nb}dBm"],
+        ["CPU", f"12{nb}%", f"avg 10{nb}% · peak 40{nb}%"],
+        ["Free memory", f"117{nb}KB", f"lowest 96{nb}KB"],
+    ]
+    assert ["warn", "No reply"] in card["tones"]
+    sparks = card["sparks"]
+    assert [s["label"] for s in sparks] == ["Router ping over the same time", "Onocoy ping over the same time",
+                                            "Wi-Fi signal over the same time", "CPU peaks over the same time",
+                                            "Free memory over the same time"]
+    assert all(s["viewBox"] == "0 0 4 32" for s in sparks)
+    # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost a ping; 0..10 ms (its 5 ms would fill it).
+    assert sparks[0]["paths"] == [["spark-base", "M0 31.5H4"], ["spark-loss", "M2 0V32"],
+                                  ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
+    # CPU on 0..100 %.
+    assert sparks[3]["paths"][-1] == ["spark-line", "M0 26.4L1 23.8L2 21.2L3 18.6L4 16.0"]
+    assert unnamed["cards"]["Performance"]["perf"][1][0] == "Server ping"
+    for x in (waiting, none):
+        c = x["cards"]["Performance"]
+        assert c["perf"] == [] and c["notes"] == [["Waiting for the first reading (every 30s).", "muted"]] and c["chip"] is None
+    safe = matrix()["safe"]["cards"]["Performance"]
+    assert safe["notes"] == [["Not available in safe mode.", "muted"]] and safe["perf"] == []
+    # One bucket so far: one dot at the right edge.
+    (one,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "buckets": 1, "router_avg": [4], "router_lost": [0]})
+    assert one["cards"]["Performance"]["sparks"][0]["viewBox"] == "0 0 1 32"
+    assert one["cards"]["Performance"]["sparks"][0]["paths"][-1] == ["spark-line", "M1 18.6h0"]

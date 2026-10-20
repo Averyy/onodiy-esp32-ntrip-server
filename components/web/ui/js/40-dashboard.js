@@ -500,7 +500,8 @@ function perfRow(name, now, day, line) {
 function perfCard(s, st, mon) {
   const m = s.monitor;
   const span = m ? Math.min(m.span_s || 0, MON_DAY_S) : 0;
-  const head = cardHead('Performance', span ? badge(span >= MON_DAY_S - 300 ? 'Last 24h' : 'Last ' + fmt.dur(span), '') : null);
+  const head = cardHead('Performance', span ? badge(span >= MON_DAY_S - 300 ? 'Last 24h' : 'Last ' + fmt.dur(span), '') : null,
+    headLink(st, null, { label: 'Details', name: 'Details on the Logs page', href: '#/logs' }));
   const wrap = (...kids) => h('section', { class: 'card wide perf-card' }, head, kids);
   if (st.key === 'safe_mode') return wrap(mutedLine('Not available in safe mode.'));
   if (!m || !m.running || !span) return wrap(mutedLine('Waiting for the first reading (every 30s).'));
