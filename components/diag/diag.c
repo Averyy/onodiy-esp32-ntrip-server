@@ -17,11 +17,13 @@
 #include "esp_attr.h"
 #include "esp_core_dump.h"
 #include "esp_heap_caps.h"
+#include "esp_ipc.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/freertos_debug.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
@@ -146,6 +148,113 @@ esp_err_t diag_coredump_erase(void)
 static SemaphoreHandle_t s_task_mux;
 static dts_state_t s_dts;           /* under s_task_mux */
 
+/*
+ * Every task's figures, read with no task running on either core and
+ * interrupts on throughout. uxTaskGetSystemState() measures each task's free
+ * stack inside the kernel's critical section: some 2 ms of scanning 70+ KB
+ * with interrupts masked on both cores (the other core spins for the kernel
+ * lock with them masked), longer than UART1's FIFO lasts at 460800 baud
+ * above its 64-byte threshold (1.4 ms): the receiver link lost bytes at
+ * almost every hardware FIFO overflow seen. Here the other core is held in
+ * hold_core() (IPC) and this one's scheduler is suspended, so no task is
+ * created, deleted or freed meanwhile (the pattern of IDF's
+ * esp_backtrace_print_all_tasks), and the stacks are scanned outside the
+ * kernel's lock. The collector runs pinned to core 0 (TASKS_CORE), so the
+ * core it holds is never its own.
+ */
+#define TASKS_CORE        0
+#define TASKS_STACK       3072
+
+typedef struct {
+    TaskStatus_t *st;
+    UBaseType_t room;
+    UBaseType_t got;
+    configRUN_TIME_COUNTER_TYPE total;
+    SemaphoreHandle_t done;
+#if !CONFIG_FREERTOS_UNICORE
+    volatile bool held;            /* the other core is in hold_core() with its scheduler suspended */
+    volatile bool release;
+    volatile bool let_go;          /* hold_core() read `release` and touches the job no more */
+#endif
+} task_job_t;
+
+#if !CONFIG_FREERTOS_UNICORE
+static void hold_core(void *arg)
+{
+    task_job_t *j = arg;
+    vTaskSuspendAll();
+    j->held = true;
+    while (!j->release) {
+    }
+    /* The job lives on the waiting caller's stack, gone once it returns: say so before the last word of it. */
+    j->let_go = true;
+    (void)xTaskResumeAll();
+}
+#endif
+
+static void collect_tasks(void *arg)
+{
+    task_job_t *j = arg;
+    j->got = 0;
+    TaskSnapshot_t *snap = heap_caps_malloc(j->room * sizeof(TaskSnapshot_t), MALLOC_CAP_8BIT);
+#if !CONFIG_FREERTOS_UNICORE
+    if (snap != NULL && esp_ipc_call(TASKS_CORE == 0 ? 1 : 0, hold_core, j) != ESP_OK) {
+        free(snap);
+        snap = NULL;
+    }
+    while (snap != NULL && !j->held) {
+    }
+#endif
+    if (snap != NULL) {
+        vTaskSuspendAll();
+        UBaseType_t got = uxTaskGetSnapshotAll(snap, j->room, NULL);
+        if (got > j->room) {
+            got = j->room;
+        }
+        TaskHandle_t self = xTaskGetCurrentTaskHandle();
+        UBaseType_t n = 0;
+        for (UBaseType_t i = 0; i < got; i++) {
+            TaskHandle_t t = (TaskHandle_t)snap[i].pxTCB;
+            if (t == self) {
+                continue;   /* this collector, gone in a moment */
+            }
+            vTaskGetInfo(t, &j->st[n], pdFALSE, eReady);   /* without the stack scan: that is the long part */
+            j->st[n].usStackHighWaterMark = (configSTACK_DEPTH_TYPE)uxTaskGetStackHighWaterMark(t);
+            n++;
+        }
+        j->total = portGET_RUN_TIME_COUNTER_VALUE();
+        j->got = n;
+        (void)xTaskResumeAll();
+#if !CONFIG_FREERTOS_UNICORE
+        j->release = true;
+        while (!j->let_go) {
+        }
+#endif
+        free(snap);
+    }
+    xSemaphoreGive(j->done);
+    vTaskDelete(NULL);
+}
+
+/* collect_tasks() on core 0, waited for. @return the tasks read, 0 when it could not run. */
+static UBaseType_t task_states(TaskStatus_t *st, UBaseType_t room, configRUN_TIME_COUNTER_TYPE *total)
+{
+    task_job_t j = { .st = st, .room = room };
+    j.done = xSemaphoreCreateBinary();
+    if (j.done == NULL) {
+        return 0;
+    }
+    if (xTaskCreatePinnedToCore(collect_tasks, "diag_tasks", TASKS_STACK, &j, uxTaskPriorityGet(NULL), NULL,
+                                TASKS_CORE) != pdPASS) {
+        vSemaphoreDelete(j.done);
+        return 0;
+    }
+    (void)xSemaphoreTake(j.done, portMAX_DELAY);
+    vSemaphoreDelete(j.done);
+    *total = j.total;
+    return j.got;
+}
+
 esp_err_t diag_task_stats(diag_task_info_t *tasks, size_t *count)
 {
     if (count == NULL || (tasks == NULL && *count > 0)) {
@@ -173,7 +282,12 @@ esp_err_t diag_task_stats(diag_task_info_t *tasks, size_t *count)
     uint8_t *pct = (uint8_t *)(smp + DTS_MAX_TASKS);
 
     configRUN_TIME_COUNTER_TYPE total = 0;
-    UBaseType_t got = uxTaskGetSystemState(st, room, &total);
+    UBaseType_t got = task_states(st, room, &total);
+    if (got == 0) {
+        free(st);
+        free(smp);
+        return ESP_ERR_NO_MEM;
+    }
     size_t m = (got > DTS_MAX_TASKS) ? DTS_MAX_TASKS : got;
     for (size_t i = 0; i < m; i++) {
         smp[i].id = (uint32_t)st[i].xTaskNumber;
