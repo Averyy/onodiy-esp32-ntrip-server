@@ -193,4 +193,5 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE FIXTURE_DIR="${_fixtures}")
 # The receiver package the flasher's rule tests check (a data file; those
 # tests skip themselves when it is missing).
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
-    FL_TEST_PKG_PATH="${CMAKE_CURRENT_LIST_DIR}/../../../firmware/um982/UM982_R4.10Build18975.pkg")
+    FL_TEST_PKG_PATH="${CMAKE_CURRENT_LIST_DIR}/../../../firmware/um982/UM982_R4.10Build18975.pkg"
+    FL_TEST_PKG23575_PATH="${CMAKE_CURRENT_LIST_DIR}/../../../firmware/um982/UM982_R4.10Build23575.pkg")

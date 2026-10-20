@@ -12,6 +12,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Receiver settings: no "(recommended)" tags; the station-restart option reworded.
 - Status, Onocoy: today's online share is the headline, the offline time left a row.
 - Onocoy setup: the username says it is the reference station credential.
+- Receiver firmware: UM982 Build 23575 (February 2026) is in the release for receivers on
+  older builds (receiver flashing is still off: stations download and check it only).
 
 ## v0.1.3
 

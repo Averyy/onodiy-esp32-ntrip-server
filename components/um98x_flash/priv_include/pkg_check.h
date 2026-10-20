@@ -73,7 +73,7 @@ extern "C" {
 #define PKG_BOOTCFG_SIZE     0x9Cu
 #define PKG_MODEL            "UM982"
 #define PKG_LZO_BLOCK_MAX    (256u * 1024u)   /**< largest decompressed block accepted */
-#define PKG_KNOWN_LAYOUTS    2u
+#define PKG_KNOWN_LAYOUTS    3u
 
 /** A known-good partition table: file bytes 0x30..0x77 of the package. */
 typedef struct {

@@ -5,22 +5,26 @@ to the UM982 over UART (XMODEM), and the same files are published as GitHub Rele
 assets so a deployed station can offer them as updates, installed only when the user
 confirms.
 
-## Current package
+## Packages
 
-| | |
-|---|---|
-| File | `UM982_R4.10Build18975.pkg` |
-| Version | R4.10 Build 18975 |
-| Released | 2025-04-30 |
-| Model | UM982 (verified in the package header) |
-| SHA-256 | `9ac25d1d359e5815b13291f61405faef53d71e306a602184546b32584b35ec71` |
+| | Current | Previous |
+|---|---|---|
+| File | `UM982_R4.10Build23575.pkg` | `UM982_R4.10Build18975.pkg` |
+| Version | R4.10 Build 23575 | R4.10 Build 18975 |
+| Built | 2026-02-11 (the package's block date stamps) | 2025-04-09 (released 2025-04-30) |
+| Model | UM982 (verified in the package header) | UM982 (verified in the package header) |
+| SHA-256 | `765a5c3058b43de68c682cd6c2d98dcb7058eec22f05c56a4d82880cdd5f185a` | `9ac25d1d359e5815b13291f61405faef53d71e306a602184546b32584b35ec71` |
 
-Verify with `shasum -a 256 -c SHA256SUMS`.
+Verify with `shasum -a 256 -c SHA256SUMS`. Build 23575 passes every check the flasher
+runs (below) for a receiver on 18975 or 23575, with the same partition layout as 18975;
+it has not been flashed on hardware. Build 18975 stays here because the host tests
+check the flasher against it; a release lists both, and a station is offered the
+highest build above its own.
 
 **Boards ship with newer firmware.** The UM982 + ESP32-S3 board this project targets
 arrived (October 2026) with **R4.10 Build 25164**, compiled 2026-05-21, which is newer
-than the package here. The flasher never installs a build lower than the one
-running, so this package is of no use on such a receiver. A newer package has to come
+than both packages here. The flasher never installs a build lower than the one
+running, so they are of no use on such a receiver. A newer package has to come
 from Unicore's UPrecise tool (see below). Receiver flashing from the station stays in
 bench builds for now and is lower priority than streaming.
 
@@ -80,10 +84,9 @@ confirmed on hardware.
 Unicore distributes UM982 firmware through their UPrecise software (Windows), which
 performs an online update check against Unicore's servers. The receiver has to be
 connected for that check — it signs the request — so pulling the newest build
-requires a physical UM982 on the receiver's USB-C. Build 18975 is the latest version
-we could obtain without a connected receiver. Now that the board is here (with Build
-25164), the next step is to fetch the current package with UPrecise and add it here;
-that has not been done yet.
+requires a physical UM982 on the receiver's USB-C. Build 23575 (added 2026-10-20) is
+the newest package found so far; it is still older than the Build 25164 the board ships
+with, so the next step remains fetching a package of 25164 or later with UPrecise.
 
 ## Source and licensing
 

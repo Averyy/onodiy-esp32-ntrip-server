@@ -474,9 +474,52 @@ TEST_CASE("package rules: one mutated copy per rule fails exactly that rule", "[
         in.receiver_build = 17000;
         TEST_ASSERT_EQUAL_UINT8(12, pkg_check(orig, len, &in, &out));
         TEST_ASSERT_TRUE(out.cross_layout);
+        /* A receiver on 23575, whose table is 18975's: the same layout, not a cross-layout flash. */
+        in = inputs(len);
+        in.receiver_build = 23575;
+        in.package_build = 24000;
+        TEST_ASSERT_EQUAL_UINT8(0, pkg_check(orig, len, &in, &out));
+        TEST_ASSERT_FALSE(out.cross_layout);
     }
     free(p);
     free(orig);
+}
+
+TEST_CASE("package rules: the 23575 package passes all twelve on 18975 and 23575, never over 25164", "[pkg]")
+{
+    FILE *f = fopen(FL_TEST_PKG23575_PATH, "rb");
+    if (f == NULL) {
+        TEST_IGNORE_MESSAGE("firmware/um982 23575 package not found");
+    }
+    fseek(f, 0, SEEK_END);
+    uint32_t len = (uint32_t)ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *p = malloc(len);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT32(len, fread(p, 1, len, f));
+    fclose(f);
+    pkg_facts_t facts;
+    pkg_inspect_mem(p, len, &facts);
+    TEST_ASSERT_TRUE(facts.chain_ok);
+    TEST_ASSERT_EQUAL_STRING("UM982", facts.model);
+    TEST_ASSERT_EQUAL_UINT32(18975, facts.layout_build);                  /* 18975's table (the first with it) */
+    TEST_ASSERT_EQUAL_HEX32(0x26021116u, facts.stamps[4]);                /* built 2026-02-11 */
+    static const uint32_t ok_on[] = { 18975, 23575 };
+    for (size_t i = 0; i < sizeof(ok_on) / sizeof(ok_on[0]); i++) {
+        pkg_check_in_t in = inputs(len);
+        in.receiver_build = ok_on[i];
+        in.package_build = 23575;
+        pkg_check_out_t out;
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, pkg_check(p, len, &in, &out), out.why);
+        TEST_ASSERT_FALSE(out.cross_layout);
+        TEST_ASSERT_EQUAL_UINT32(19u + 49u, out.lzo_blocks);
+    }
+    pkg_check_in_t in = inputs(len);
+    in.receiver_build = 25164;                                            /* what boards ship with: never downgraded */
+    in.package_build = 23575;
+    pkg_check_out_t out;
+    TEST_ASSERT_EQUAL_UINT8(12, pkg_check(p, len, &in, &out));
+    free(p);
 }
 
 /* ---- a synthetic package --------------------------------------------------------- */
@@ -668,4 +711,5 @@ TEST_CASE("package facts: unreadable packages report unknowns", "[pkg]")
     TEST_ASSERT_EQUAL_INT(-1, pkg_layout_for_build(1));
     TEST_ASSERT_EQUAL_INT(0, pkg_layout_for_build(13495));
     TEST_ASSERT_EQUAL_INT(1, pkg_layout_for_build(18975));
+    TEST_ASSERT_EQUAL_INT(2, pkg_layout_for_build(23575));
 }

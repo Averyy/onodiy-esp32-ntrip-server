@@ -26,9 +26,10 @@ static const blk_rule_t k_order[PKG_BLOCKS] = {
     { 6, 0x10000000u, 0xE0u },
 };
 
-/* Known-good partition tables. The 18975 table is read from that package;
- * the 13495 table differs only in the type-4 backup address (PROVISIONAL, to
- * be confirmed on hardware with a 13495 package). */
+/* Known-good partition tables. The 18975 table is read from that package, and
+ * the 23575 package carries the same one; the 13495 table differs only in the
+ * type-4 backup address (PROVISIONAL, to be confirmed on hardware with a 13495
+ * package). Two builds may share a table: rule 12 compares the tables. */
 const pkg_layout_t pkg_known_layouts[PKG_KNOWN_LAYOUTS] = {
     { 13495u,
       { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,
@@ -40,7 +41,20 @@ const pkg_layout_t pkg_known_layouts[PKG_KNOWN_LAYOUTS] = {
         0x00018000u },
       { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x006C0000u, 0x0001F000u, 0x00460000u, 0x0002F000u,
         0x00018000u } },
+    { 23575u,
+      { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,
+        0x00018000u },
+      { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x006C0000u, 0x0001F000u, 0x00460000u, 0x0002F000u,
+        0x00018000u } },
 };
+
+/* Two known tables with the same addresses (builds that share a layout). */
+static bool same_layout(int a, int b)
+{
+    return a >= 0 && b >= 0 &&
+           memcmp(pkg_known_layouts[a].a, pkg_known_layouts[b].a, sizeof(pkg_known_layouts[a].a)) == 0 &&
+           memcmp(pkg_known_layouts[a].b, pkg_known_layouts[b].b, sizeof(pkg_known_layouts[a].b)) == 0;
+}
 
 #define K0_W0      0xB0B10003u
 #define K0_W1      0x00000130u
@@ -486,7 +500,7 @@ uint8_t pkg_check(const uint8_t *pkg, uint32_t len, const pkg_check_in_t *in, pk
     }
     /* Rule 12 (and the cross-layout fact, also shown in recovery). */
     int cur = pkg_layout_for_build(in->receiver_build);
-    out->cross_layout = (cur < 0 || out->facts.layout != (int8_t)cur);
+    out->cross_layout = !same_layout(out->facts.layout, cur);
     if (r == 0 && !in->recovery) {
         if (in->package_build == 0) {
             r = fail(out, 12, "package build unknown");
