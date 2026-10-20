@@ -4,11 +4,12 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.4
 
 - Receiver: the signal checks side by side on one banner; a tidier sky key; "Reset
   location" (was Survey again); the OpenStreetMap link beside "Hide the map".
-- Receiver settings: no "(recommended)" tags; the station-restart option reworded.
+- Receiver settings: the defaults say "(default)" instead of "(recommended)"; the
+  station-restart option reworded.
 - Status, Onocoy: today's online share is the headline, the offline time left a row.
 - Onocoy setup: the username says it is the reference station credential.
 - Receiver firmware: UM982 Build 23575 (February 2026) is in the release for receivers on
