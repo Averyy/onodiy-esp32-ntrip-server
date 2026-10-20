@@ -7,9 +7,9 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
+    paths-ignore: ["README.md", "CONTRIBUTING.md", "docs/**", "gnss-splitter/**", "reference/**"]
   pull_request:
-    paths-ignore: ["README.md", "CONTRIBUTING.md", "SECURITY.md", "docs/**", "gnss-splitter/**", "reference/**"]
+    paths-ignore: ["README.md", "CONTRIBUTING.md", "docs/**", "gnss-splitter/**", "reference/**"]
   # Weekly: the slow jobs (firmware-bench and the two QEMU ones) that a push to main skips.
   schedule:
     - cron: "17 6 * * 1"
