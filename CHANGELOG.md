@@ -11,6 +11,9 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   nothing).
 - NTRIP: Delete in a server's editor (asks first) removes the server and erases its
   settings, password and certificate; the slot is free again.
+- NTRIP: a slot given another server (deleted, or edited to another host) starts its
+  figures over: online and offline today, the availability history, bytes, connects
+  and the last reply no longer carry over from the server before.
 
 ## v0.1.4
 

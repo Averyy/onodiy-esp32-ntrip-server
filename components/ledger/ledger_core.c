@@ -516,6 +516,39 @@ void lc_set_slot(lc_t *c, uint32_t now_ms, size_t slot, bool enabled, bool prote
     }
 }
 
+static void forget_in(lc_day_t *d, size_t slot)
+{
+    d->down_ms[slot] = 0;
+    d->planned_ms[slot] = 0;
+    d->reconnects[slot] = 0;
+    d->up_ms[slot] = 0;
+}
+
+void lc_forget_slot(lc_t *c, uint32_t now_ms, size_t slot)
+{
+    if (slot >= LC_SLOTS) {
+        return;
+    }
+    advance(c, now_ms);
+    uint8_t b = bit(slot);
+    forget_in(&c->today, slot);
+    forget_in(&c->pending, slot);
+    for (size_t i = 0; i < c->hist_n; i++) {
+        forget_in(&c->hist[i], slot);
+    }
+    /* The lost epochs are the protected slot's (one at a time streams to Onocoy). */
+    if (protected_mask(c) & b) {
+        c->today.lost_epochs = 0;
+        c->pending.lost_epochs = 0;
+    }
+    c->prev_expected_mask &= (uint8_t)~b;
+    c->prev_protected_mask &= (uint8_t)~b;
+    c->boot_planned_mask &= (uint8_t)~b;
+    c->today_dirty = true;
+    c->hist_dirty = true;
+    c->store_now = true;
+}
+
 void lc_set_planned(lc_t *c, uint32_t now_ms, bool planned)
 {
     advance(c, now_ms);

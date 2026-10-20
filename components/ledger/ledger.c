@@ -239,6 +239,17 @@ void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool stream
     portEXIT_CRITICAL(&s_lock);
 }
 
+void ledger_forget_slot(size_t slot)
+{
+    if (!s_ready || slot >= LEDGER_MAX_SLOTS) {
+        return;
+    }
+    uint32_t now = now_ms();
+    portENTER_CRITICAL(&s_lock);
+    lc_forget_slot(&s_core, now, slot);
+    portEXIT_CRITICAL(&s_lock);
+}
+
 void ledger_set_planned(bool planned)
 {
     if (!s_ready) {

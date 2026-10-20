@@ -1424,3 +1424,52 @@ TEST_CASE("ledger: lost epochs survive a reset (RTC copy) and a power cut (as la
     blk.version = 4u;
     TEST_ASSERT_FALSE(lc_rtc_valid(&blk));
 }
+
+TEST_CASE("ledger: a slot given another server forgets its figures, the other slots keep theirs", "[ledger]")
+{
+    fresh(T0, 0);
+    lc_set_utc(&c, T0, at(DAY0, H(24) - S(10)), LC_CLOCK_GNSS);
+    lc_set_rtcm_ok(&c, T0, true);
+    lc_set_slot(&c, T0, 0, true, true, true);     /* protected, streaming */
+    lc_set_slot(&c, T0, 1, true, false, false);   /* expected, down */
+    lc_tick(&c, T0 + 25000u);                     /* 10 s yesterday, 15 s today */
+    lc_count_lost_epochs(&c, T0 + 25000u, 3);
+    TEST_ASSERT_EQUAL_size_t(1, c.hist_n);
+    TEST_ASSERT_EQUAL_UINT32(10000, c.hist[0].up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(15000, c.today.up_ms[0]);
+    c.today_dirty = false;
+    c.hist_dirty = false;
+    c.store_now = false;
+
+    lc_forget_slot(&c, T0 + 30000u, 0);           /* the 5 s up to it are accounted first */
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.down_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].up_ms[0]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.lost_epochs);           /* the protected slot's */
+    TEST_ASSERT_EQUAL_UINT32(20000, c.today.down_ms[1]);        /* the other slot's stay */
+    TEST_ASSERT_EQUAL_UINT32(10000, c.hist[0].down_ms[1]);
+    TEST_ASSERT_TRUE(c.today_dirty);
+    TEST_ASSERT_TRUE(c.hist_dirty);
+    TEST_ASSERT_TRUE(c.store_now);
+
+    lc_tick(&c, T0 + 40000u);                     /* counted again from there, as a new slot */
+    TEST_ASSERT_EQUAL_UINT32(10000, c.today.up_ms[0]);
+
+    lc_count_lost_epochs(&c, T0 + 40000u, 2);
+    lc_forget_slot(&c, T0 + 40000u, 1);           /* not protected: the lost epochs stay */
+    TEST_ASSERT_EQUAL_UINT32(2, c.today.lost_epochs);
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.down_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(0, c.hist[0].down_ms[1]);
+    TEST_ASSERT_EQUAL_UINT32(10000, c.today.up_ms[0]);
+
+    /* Before the first clock: the time not given a day yet goes too. */
+    fresh(T0, 0);
+    lc_set_slot(&c, T0, 2, true, false, false);
+    lc_tick(&c, T0 + 7000u);
+    TEST_ASSERT_EQUAL_UINT32(7000, c.pending.down_ms[2]);
+    lc_forget_slot(&c, T0 + 7000u, 2);
+    TEST_ASSERT_EQUAL_UINT32(0, c.pending.down_ms[2]);
+    TEST_ASSERT_TRUE(lc_set_utc(&c, T0 + 7000u, at(DAY0, H(12)), LC_CLOCK_SNTP));
+    TEST_ASSERT_EQUAL_UINT32(0, c.today.down_ms[2]);
+    lc_forget_slot(&c, T0 + 7000u, LC_SLOTS);     /* no such slot: nothing */
+}

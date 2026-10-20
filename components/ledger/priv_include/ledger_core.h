@@ -307,6 +307,16 @@ void lc_tick(lc_t *c, uint32_t now_ms);
 /** Slot state as reported by the caster client. */
 void lc_set_slot(lc_t *c, uint32_t now_ms, size_t slot, bool enabled, bool protected_slot, bool streaming);
 
+/**
+ * Another server in the slot (removed, or pointed at another host): the time
+ * up to now_ms is accounted, then the slot's figures go from today, the
+ * history and the time not yet given a day (online, offline, planned,
+ * reconnects; a protected slot's lost epochs too), and a previous session's
+ * gap not counted yet no longer counts for it. Its current state stays (the
+ * caster client reports the new one). Stored at the next store.
+ */
+void lc_forget_slot(lc_t *c, uint32_t now_ms, size_t slot);
+
 /** Planned receiver work in progress. */
 void lc_set_planned(lc_t *c, uint32_t now_ms, bool planned);
 

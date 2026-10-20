@@ -1672,6 +1672,12 @@ that does not show a field cannot reset it). Output-only fields
   `test_onocoy` and the message `only in bench and QEMU builds`. `false` is
   always accepted.
 - Any save clears a stopped slot's stop and the login guard's counts.
+- Another server (a `host` other than the stored one, case aside; also a
+  removal): the slot's figures start over, as a new slot's: the status
+  counters (connects, failures, bytes, frames and epochs sent, drops, the
+  last caster reply), today's data rate and Onocoy day figures, and the
+  availability ledger's figures for the slot in today and every history day
+  (`/api/availability`). The same host keeps them all.
 
 Validation (`400 invalid_field` with `field`, and the rule in `message`):
 no control characters anywhere; lengths in UTF-8 bytes: `name` <= 23,
@@ -1724,9 +1730,10 @@ Removes the slot's server: the slot is saved empty, as a slot after the
 first is before it is ever set up (`enabled` false, no `name`, `host`,
 `mountpoint`, `username` or `label`, port 2101, NTRIP 2.0, no TLS, the
 standard retry pace, no `dup_stream_ack`), its password is removed and its
-custom CA certificate erased. Any slot can be removed, the Onocoy one too;
-the first-run setup and "Add a server" use an empty slot again. Only that
-slot disconnects. No body. `200` with the slot's `{"slot", "config",
+custom CA certificate erased. Its figures start over, as a new slot's (see
+`PUT`: another server). Any slot can be removed, the Onocoy one too; the
+first-run setup and "Add a server" use an empty slot again. Only that slot
+disconnects. No body. `200` with the slot's `{"slot", "config",
 "status"}` (an empty slot); `409 safe_mode`, `409 settings_unavailable`.
 
 ### `POST /api/casters/{n}/retry` (adm)

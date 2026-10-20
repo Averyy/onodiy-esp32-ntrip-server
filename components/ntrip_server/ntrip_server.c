@@ -53,6 +53,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -259,6 +260,7 @@ typedef struct {
     ntrip_rate_clock_t rate;     /* this boot, today: online as the ledger counts it (the data rate's time base; the day's figures are the ledger's) */
     uint32_t lost_reported;      /* this boot, today: the protected slot's lost epochs handed to the ledger */
     uint64_t dropped_epochs_base;
+    rtcm_hub_consumer_stats_t drop_base; /* the hub's drop counts when this slot's server came in (they only grow) */
     uint32_t last_pub_ms;
     uint32_t max_lag_seen;
     bool ledger_known;
@@ -1285,12 +1287,14 @@ static void publish(slot_t *s, uint32_t now, bool force)
     if (s->consumer != NULL) {
         rtcm_hub_consumer_stats_t cs;
         if (rtcm_hub_get_consumer_stats(s->consumer, &cs) == ESP_OK) {
-            st->frames_dropped = cs.frames_dropped;
-            st->bytes_dropped = cs.bytes_dropped;
-            st->epochs_dropped = cs.epochs_dropped;
-            st->frames_skipped_idle = cs.frames_skipped_idle;
-            st->lag_drops = cs.lag_drops;
-            st->laps = cs.laps;
+            const rtcm_hub_consumer_stats_t *b = &s->drop_base;
+            st->frames_dropped = cs.frames_dropped > b->frames_dropped ? cs.frames_dropped - b->frames_dropped : 0;
+            st->bytes_dropped = cs.bytes_dropped > b->bytes_dropped ? cs.bytes_dropped - b->bytes_dropped : 0;
+            st->epochs_dropped = cs.epochs_dropped > b->epochs_dropped ? cs.epochs_dropped - b->epochs_dropped : 0;
+            st->frames_skipped_idle = cs.frames_skipped_idle > b->frames_skipped_idle ?
+                                      cs.frames_skipped_idle - b->frames_skipped_idle : 0;
+            st->lag_drops = cs.lag_drops > b->lag_drops ? cs.lag_drops - b->lag_drops : 0;
+            st->laps = cs.laps > b->laps ? cs.laps - b->laps : 0;
             st->lag_ms_now = s->open ? cs.lag_ms : 0;
             if (st->lag_ms_now > s->max_lag_seen) {
                 s->max_lag_seen = st->lag_ms_now;
@@ -1577,6 +1581,31 @@ static void end_planned(slot_t *s, uint32_t now, bool clean)
     }
 }
 
+/*
+ * Another server in this slot (removed, or pointed at another host): what the
+ * slot counted for the server before starts over, as for a new slot: the
+ * counters and what the last caster said (the status publish() does not work
+ * out afresh), the hub's drop counts (from here on), today's data rate and
+ * Onocoy day figures, and the availability ledger's figures for the slot.
+ */
+static void new_server(slot_t *s, uint32_t now)
+{
+    memset(&s->st, 0, sizeof(s->st));
+    rtcm_hub_consumer_stats_t cs;
+    if (s->consumer != NULL && rtcm_hub_get_consumer_stats(s->consumer, &cs) == ESP_OK) {
+        s->drop_base = cs;
+        s->dropped_epochs_base = cs.epochs_dropped;
+    }
+    s->max_lag_seen = 0;
+    ntrip_rate_clock_init(&s->rate, now);
+    s->lost_reported = 0;
+    s->exp_day = -1;
+    s->exp_from_sod = UINT32_MAX;
+    s->counted_known = true;   /* an Onocoy server counts from when it is set up, not from 00:00 */
+    s->was_counted = false;
+    ledger_forget_slot(s->idx);
+}
+
 static void handle_commands(slot_t *s, uint32_t now)
 {
     uint32_t cmd = take_cmd(s);
@@ -1588,6 +1617,10 @@ static void handle_commands(slot_t *s, uint32_t now)
             end_planned(s, now, true);
         }
         copy_cfg(s);
+        bool other_server = strcasecmp(old_host, s->cfg.host) != 0;
+        if (other_server) {
+            new_server(s, now);
+        }
         if (s->cfg.protected_slot && !was_protected) {
             /* Pointed at Onocoy now: the epochs it lost before, unprotected, are
              * not the protected slot's, so they are never reported (publish). */
@@ -1608,8 +1641,11 @@ static void handle_commands(slot_t *s, uint32_t now)
         apply_lag(s);
         persist_backoff(s, now);
         ledger_report(s);
-        ESP_LOGI(TAG, "cst%u (%s): settings changed%s", (unsigned)s->idx, s->cfg.name,
-                 s->cfg.enabled ? "" : ", disabled");
+        if (other_server) {
+            publish(s, now, true);   /* the old server's figures leave the status at once */
+        }
+        ESP_LOGI(TAG, "cst%u (%s): settings changed%s%s", (unsigned)s->idx, s->cfg.name,
+                 s->cfg.enabled ? "" : ", disabled", other_server ? ", another server: its figures start over" : "");
     }
     if (cmd & CMD_RETRY) {
         bool was_stopped = s->sm.stop != NTRIP_STOP_NONE;

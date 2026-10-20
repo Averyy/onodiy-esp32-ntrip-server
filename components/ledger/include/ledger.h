@@ -177,6 +177,12 @@ void ledger_shutdown(bool planned);
  */
 void ledger_set_slot(size_t slot, bool enabled, bool protected_slot, bool streaming);
 
+/**
+ * Another server in the slot (ntrip_server: removed, or another host): its
+ * figures start over, as a new slot's, in today and the history alike.
+ */
+void ledger_forget_slot(size_t slot);
+
 /** Planned receiver work in progress (casters paused for receiver flash/config); counted as down and also as planned. */
 void ledger_set_planned(bool planned);
 
