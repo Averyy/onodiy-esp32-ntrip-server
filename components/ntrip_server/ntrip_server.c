@@ -2310,9 +2310,13 @@ esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out)
     }
     *out = s_status[slot];
     xSemaphoreGive(s_status_mutex);
+    /* The slot task stamps these on its own: one may be newer than `now` (stored right after it was read).
+     * That is no age at all, not 2^32 ms, which the health monitor would take for a stuck slot. */
     uint32_t now = now_ms();
-    out->state_age_s = (now - s->state_since_ms) / 1000u;
-    out->progress_age_ms = now - s->progress_ms;
+    uint32_t since = s->state_since_ms;
+    uint32_t progress = s->progress_ms;
+    out->state_age_s = (int32_t)(now - since) > 0 ? (now - since) / 1000u : 0;
+    out->progress_age_ms = (int32_t)(now - progress) > 0 ? now - progress : 0;
     return ESP_OK;
 }
 

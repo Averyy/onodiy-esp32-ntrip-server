@@ -18,6 +18,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   board you wired yourself (from the next start; updates and a factory reset keep it);
   "Revert firmware" moved here from Updates and names the version it starts.
 - Buttons no longer end in "…".
+- NTRIP: a server that streams fine is no longer restarted now and then by the health
+  monitor (a timing race made its progress look 49 days old).
 
 ## v0.1.3
 
