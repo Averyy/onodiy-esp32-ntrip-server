@@ -45,15 +45,15 @@ target_link_libraries(${COMPONENT_LIB} INTERFACE "-u net_tw_inpacket")
 # The same supplicant clears the station's channel and pinned access point at
 # every association with a call the driver refuses there since ESP-IDF v5.5
 # ("sta is connecting, cannot set config", ESP-IDF issue 17686): its handler
-# (supplicant_sta_conn_handler, called from esp_wpa_main.c) and the
-# configuration read inside it (esp_wifi_get_config) are wrapped so that it
-# skips that call (network.c). Every other esp_wifi_get_config passes straight
-# through.
+# (supplicant_sta_conn_handler, called from esp_wpa_main.c) and that call
+# (esp_wifi_set_config) are wrapped so that it gets the driver's refusal
+# without reaching the driver (network.c). Every other esp_wifi_set_config
+# passes straight through.
 if(CONFIG_ESP_WIFI_WNM_SUPPORT)
     target_link_libraries(${COMPONENT_LIB} INTERFACE
         "-Wl,--wrap=ieee802_11_rx_wnm_action" "-u __wrap_ieee802_11_rx_wnm_action"
         "-Wl,--wrap=supplicant_sta_conn_handler" "-u __wrap_supplicant_sta_conn_handler"
-        "-Wl,--wrap=esp_wifi_get_config" "-u __wrap_esp_wifi_get_config")
+        "-Wl,--wrap=esp_wifi_set_config" "-u __wrap_esp_wifi_set_config")
 endif()
 
 # Keeping the address across a move (network.c, net_roam.h "Keeping the

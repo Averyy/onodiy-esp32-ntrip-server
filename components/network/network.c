@@ -2311,18 +2311,19 @@ void __wrap_ieee802_11_rx_wnm_action(struct wpa_supplicant *wpa_s, uint8_t *send
  * channel there. Since ESP-IDF v5.5 the driver refuses that call while the
  * station is connecting, which it still is then: "sta is connecting, cannot
  * set config" at every join, and nothing cleared (ESP-IDF issue 17686,
- * IDFGH-16567, open). The supplicant clears the same fields at the next
- * disconnect, where the call works. So the handler is wrapped: while it runs,
- * its own read of the configuration (on its task only) shows neither, and it
- * skips the call that cannot succeed. Nothing else changes. Drop this once
- * ESP-IDF clears them after the connection completes.
+ * IDFGH-16567, open). The supplicant tries again at the next disconnect that
+ * is not a move. So the handler is wrapped: while it runs, a station
+ * configuration write on its task (that call) gets the driver's answer
+ * there, ESP_ERR_WIFI_STATE, without reaching the driver and its error line.
+ * Nothing else changes. Drop this once ESP-IDF clears them after the
+ * connection completes.
  */
 static TaskHandle_t volatile s_conn_handler_task;   /* the task inside the supplicant's handler, else NULL */
 
 void __real_supplicant_sta_conn_handler(uint8_t *bssid);
 void __wrap_supplicant_sta_conn_handler(uint8_t *bssid);
-esp_err_t __real_esp_wifi_get_config(wifi_interface_t interface, wifi_config_t *conf);
-esp_err_t __wrap_esp_wifi_get_config(wifi_interface_t interface, wifi_config_t *conf);
+esp_err_t __real_esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *conf);
+esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *conf);
 
 void __wrap_supplicant_sta_conn_handler(uint8_t *bssid)
 {
@@ -2331,15 +2332,13 @@ void __wrap_supplicant_sta_conn_handler(uint8_t *bssid)
     s_conn_handler_task = NULL;
 }
 
-esp_err_t __wrap_esp_wifi_get_config(wifi_interface_t interface, wifi_config_t *conf)
+esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *conf)
 {
-    esp_err_t err = __real_esp_wifi_get_config(interface, conf);
-    if (err == ESP_OK && interface == WIFI_IF_STA && conf != NULL && s_conn_handler_task != NULL &&
+    if (interface == WIFI_IF_STA && s_conn_handler_task != NULL &&
         s_conn_handler_task == xTaskGetCurrentTaskHandle()) {
-        conf->sta.channel = 0;
-        conf->sta.bssid_set = false;
+        return ESP_ERR_WIFI_STATE;   /* the driver's answer while the station is connecting */
     }
-    return err;
+    return __real_esp_wifi_set_config(interface, conf);
 }
 #endif /* CONFIG_ESP_WIFI_WNM_SUPPORT */
 
