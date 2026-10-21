@@ -991,8 +991,8 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
                   ("notices", [stopped, "receiver"]), ("notices", [settings, ""]), ("notices", [settings, "logs"]),
                   ("notices", [settings_down, ""]), ("notices", [trial, ""]), ("notices", [trial_stopped, ""])])
     keys = [[k for k, _ in o] for o in out]
-    # The Status page's Station card says the update: no notice there; another page keeps it.
-    assert keys[0] == [], out[0]
+    # The update shows as the banner on the Status page too (its Station card only names the version), as elsewhere.
+    assert keys[0] == ["update"], out[0]
     assert keys[1] == ["maintenance", "update"]
     assert keys[2] == [] and keys[3] == ["onocoy_stopped:0"]
     assert out[3][0][1] == "Onocoy stopped: duplicate stream"
@@ -1800,10 +1800,10 @@ def test_a_notice_hides_on_the_page_whose_card_says_it():
               "settings": {"wifi", "update", "maintenance"}, "logs": {"settings"}, "logs/history": set()}
     for p, keys in zip(pages, out[:6]):
         assert set(keys) == every - hidden[p], p
-    # The Status page: the one its top card says (settings storage here), the update (its Station card says it) and every
-    # stopped caster (the top card names each, as its subject or in an "Also:" line).
+    # The Status page: the one its top card says (settings storage here) and every stopped caster (the top card names
+    # each, as its subject or in an "Also:" line). The update shows there as everywhere but Settings.
     ((status_keys,),) = [[[k for k, _ in o] for o in run_ui([("notices", [BUSY, ""])])]]
-    assert set(status_keys) == every - {"settings", "update", "onocoy_stopped:0"}, status_keys
+    assert set(status_keys) == every - {"settings", "onocoy_stopped:0"}, status_keys
     two = status(casters=[caster(0, "Onocoy", "stopped", stop_reason="duplicate"),
                           caster(1, "Bench", "stopped", stop_reason="rejected")])
     two_k = [[k for k, _ in o] for o in run_ui([("notices", [two, p]) for p in ("", "receiver", "ntrip")])]
