@@ -4,6 +4,12 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Status: the "Update available" banner shows here too, and its button says where it
+  goes: "Settings page".
+- The dot beside a tab (an update is waiting) lines up with the tab's name.
+
 ## v0.1.5
 
 - Wi-Fi: no more "sta is connecting, cannot set config" error in the log at every join
