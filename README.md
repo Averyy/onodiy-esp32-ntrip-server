@@ -25,9 +25,16 @@ affiliated with or endorsed by Onocoy.
 
 ## Hardware
 
-![The UM982 + ESP32-S3 board seen from the front: a black circuit board with the silver Unicore UM982 module left of centre, the ESP32-S3 module on the right with a small Wi-Fi antenna connector at its edge, a USB-C port on the top edge and another on the bottom edge, two gold SMA antenna sockets sticking out of the left end, and pin headers along the top and bottom edges](docs/images/board.png)
-
-*The board, here with the external Wi-Fi antenna connector: Unicore UM982 receiver (left of centre), ESP32-S3 module (right), USB-C to the receiver's COM2 (top edge), USB-C printed `ESP32S3` for the ESP32-S3 (bottom edge), and the SMA antenna sockets `M` (lower) and `S` (upper) on the left.*
+<table>
+<tr>
+<td width="60%"><img src="docs/images/board.png" alt="The UM982 + ESP32-S3 board seen from the front: a black circuit board with the silver Unicore UM982 module left of centre, the ESP32-S3 module on the right with a small Wi-Fi antenna connector at its edge, a USB-C port on the top edge and another on the bottom edge, two gold SMA antenna sockets sticking out of the left end, and pin headers along the top and bottom edges"></td>
+<td width="40%"><img src="docs/images/board-um980.jpg" alt="The UM980 + ESP32-S3 board seen from the front: a green circuit board with the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right, an SMA antenna socket on the top edge, a coin cell on the right, and two USB-C ports with a button between them on the bottom edge"></td>
+</tr>
+<tr>
+<td><em>The UM982 board, here with the external Wi-Fi antenna connector: Unicore UM982 receiver (left of centre), ESP32-S3 module (right), USB-C to the receiver's COM2 (top edge), USB-C printed <code>ESP32S3</code> for the ESP32-S3 (bottom edge), and the SMA antenna sockets <code>M</code> (lower) and <code>S</code> (upper) on the left.</em></td>
+<td><em>The UM980 board: ESP32-S3-WROOM-1 module (left), Unicore UM980 receiver (right), the GNSS antenna's SMA socket (top edge), two USB-C ports (bottom edge). Not supported yet (below).</em></td>
+</tr>
+</table>
 
 - **The board:** ESP32-S3-WROOM-1 N16R8 (16 MB flash, 8 MB PSRAM) and a Unicore UM982
   all-band receiver. The ESP32 talks to the receiver's COM1.
@@ -36,6 +43,11 @@ affiliated with or endorsed by Onocoy.
   Ipex" option of [this listing](https://www.aliexpress.com/item/1005013018359434.html).
   An external antenna reaches much farther than the module's built-in one. The Status
   page's Performance card shows the signal and the ping time to your router over 24h.
+- **UM980 version (not supported yet):** the same idea with a Unicore UM980 receiver,
+  whose firmware updates are easier to find: [this listing](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html),
+  US$150 (about C$212). It comes with the built-in Wi-Fi antenna; message the seller to
+  get the ESP32-S3-WROOM-1U-N16R8 (external antenna) instead, at the same price. The
+  firmware recognises a UM980 but does not configure it yet: UM980 support is planned.
 - **Antenna:** a multi-band GNSS antenna on the lower SMA socket, marked `M`. Connect
   or disconnect it only with the power off: the socket carries the antenna's power.
 - **Power:** a plain 5 V USB-A charger and an A-to-C cable into the USB-C printed
