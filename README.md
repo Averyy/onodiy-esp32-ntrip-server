@@ -32,8 +32,10 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 |---|---|---|---|
 | **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$140 | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html), [Alt](https://www.aliexpress.com/item/1005013190792289.html) |
 | **UM980** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna); ask the seller for WROOM-1U-N16R8 (external antenna), same price | US$150 | [Alibaba](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html) |
-| **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
 | **Antenna:** Beitian BT-800S | N/A (all the bands the station uses; TNC socket, so a TNC-to-SMA cable) | about US$53 | [AliExpress](https://www.aliexpress.com/item/1005009033251316.html) (variant "BT-800S") |
+| **Antenna cable:** RG58, TNC male to SMA male | N/A (antenna to board; pick the length) | from about US$1, by length | [AliExpress](https://www.aliexpress.com/item/1005005550779000.html) |
+| **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
+| **Splitter jumpers:** SMA male to SMA male (RG402) | N/A (splitter to each receiver) | from about US$1, by length | [AliExpress](https://www.aliexpress.com/item/1005002380816726.html) |
 
 - **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board).
   Plug or unplug it only with the power off: the socket powers the antenna.
