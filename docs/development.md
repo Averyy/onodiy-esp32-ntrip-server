@@ -45,7 +45,8 @@ does (an action other than checkout, setup-uv and upload-artifact, a matrix, a j
 timeout, an expression to evaluate, a workflow-level `env:`) stops it before the first
 step (`tools/ci/ci_job.py`).
 
-CI's two QEMU jobs (the smoke test with the end-to-end run, and the bench console; see
+CI's two QEMU jobs (the smoke test with the end-to-end run, and the bench console with
+the NTRIP-X's 8 MB install after it, `tools/qemu/board_8mb.py`; see
 [`tools/qemu/README.md`](../tools/qemu/README.md)) run the same way:
 
 ```sh
@@ -74,9 +75,11 @@ Notes:
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
   `partitions.csv`). Boards with 8 MB flash (the NTRIP-X) run the same build with
-  `partitions-8mb.csv`, whose board marker tells the app which board it is. Every board's
-  install files from a build, checked (the app within the 2.5 MB slot of the 8 MB table,
-  each bootloader valid for its flash size), as CI makes them for a release:
+  `partitions-8mb.csv`, whose board marker tells the app which board it is; it has no
+  receiver package partition, so a package is staged in PSRAM there
+  (`CONFIG_PKG_STORE_RAM`). Every board's install files from a build, checked (the app
+  within the 2.5 MB slot of the 8 MB table, each bootloader valid for its flash size), as
+  CI makes them for a release:
 
   ```sh
   tools/ci/install_files.sh build install   # install/onodiy-install-16mb.bin, ...-um980-ntrx.bin

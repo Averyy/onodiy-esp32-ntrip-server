@@ -7,13 +7,12 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 ## Unreleased
 
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
-  Wi-Fi). NTRIP-X (GNS Electronics) support, not yet tested with an antenna: its own
-  install with 8 MB flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver
-  on GPIO16/15, and its LEDs: the status LED blinks the codes of GNS's quick guide
-  (white, then blue for Wi-Fi and green for the servers; fast red for a new alert; fast
-  yellow and pink while the button is held to 10 s and 20 s), the Wi-Fi LED brightens
-  with the signal and the GNSS LED shows a fix. Receiver firmware updates are not
-  available on it yet.
+  Wi-Fi). NTRIP-X (GNS Electronics) support, in testing: its own install with 8 MB
+  flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on GPIO16/15,
+  and its LEDs: the status LED blinks the codes of GNS's quick guide (white, then blue
+  for Wi-Fi and green for the servers; fast red for a new alert; fast yellow and pink
+  while the button is held to 10 s and 20 s), the Wi-Fi LED brightens with the signal
+  and the GNSS LED shows a fix.
 - Release: one image per board to write at 0x0 after an erase
   (`onodiy-install-16mb.bin` for the UM982 and UM980 boards), with the commands in the
   notes.
@@ -26,11 +25,15 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   tracks every satellite above the horizon (its own default was 5°). Existing stations
   switch to 0° and configure the receiver once after the update.
 - Local server: up to 4 rovers at once (was 2).
-- Receiver: UM980 support, untested (no UM980 has run it yet). The station configures a
+- Receiver: UM980 support, in testing on the NTRIP-X. The station configures a
   UM980 with its own signal group, by default 2 (every signal: both GPS L2 signals, L1C,
   GLONASS G3, Galileo E6, NavIC), and turns on its multipath mitigation. The Signals card
-  shows the UM980's groups when one is connected. Receiver firmware updates stay UM982
-  only.
+  shows the UM980's groups when one is connected.
+- Receiver firmware updates for the UM980 too (receiver flashing itself stays off in
+  station builds until it has been tested on a board, as for the UM982): its packages pass
+  the same checks with the UM980's own marks, and releases carry builds 11833 and 23980.
+  A board without room in flash (the NTRIP-X) keeps the package in memory; if a restart
+  cuts the update short, Retry downloads the package again (or asks for the same file).
 
 ## v0.1.5
 

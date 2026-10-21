@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+menu "Station: receiver package staging"
+
+    config PKG_STORE_RAM
+        bool "Stage receiver packages in PSRAM on a board without the package partition"
+        default y
+        help
+            A board whose partition table has no "gnss_pkg" partition (8 MB
+            flash) keeps the package in one PSRAM buffer instead, from the
+            download or upload to the end of the receiver update. It is not
+            kept over a restart: an update cut short by one is finished
+            with the same package downloaded (or uploaded) again. Off: no
+            receiver updates on such a board.
+
+    config PKG_STORE_RAM_MAX_KB
+        int "Largest package staged in PSRAM (KB)"
+        depends on PKG_STORE_RAM
+        range 1024 6144
+        default 3584
+        help
+            The largest receiver package is about 3 MB (UM980 build 25735:
+            3,024,000 bytes; UM982 build 23575: 3,043,556 bytes).
+
+    config PKG_STORE_RAM_MARGIN_KB
+        int "PSRAM kept free beside a staged package (KB)"
+        depends on PKG_STORE_RAM
+        range 256 4096
+        default 1024
+        help
+            A package is staged only when PSRAM has one free block of its
+            size plus this much more: the flasher's decompression buffer
+            (256 KB) and everything else the station allocates meanwhile.
+
+endmenu

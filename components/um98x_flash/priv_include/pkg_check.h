@@ -29,11 +29,12 @@
  *    Adler-32
  *  7 the loader baud in the type-2 block is 460800 and the partition table
  *    is one of the known-good tables compiled in
- *  8 the model string (NUL within 16 bytes) is exactly "UM982" and equals
- *    the receiver's model from this session's version query (the journalled
- *    model in recovery)
- *  9 UM982 product tags: +0x1F = 0x40 on the type-2, 3, 4, 6 headers, file
- *    byte 0x7F = 0x40, file word 0xAC = 660000000
+ *  8 the model string (NUL within 16 bytes) is one of pkg_models ("UM982",
+ *    "UM980") and equals the receiver's model from this session's version
+ *    query (the journalled model in recovery)
+ *  9 the model's product tags: +0x1F = its tag on the type-2, 3, 4, 6
+ *    headers, file byte 0x7F = its tag, file word 0xAC = its word (UM982:
+ *    0x40 and 660000000; UM980: 0x41 and 0)
  * 10 the length is not a multiple of 1024
  * 11 size and SHA-256 of the RAM copy equal the release manifest entry or
  *    what the user confirmed for an upload
@@ -44,8 +45,9 @@
  *    Not re-run in recovery.
  *
  * PROVISIONAL, to be confirmed on hardware: the format knowledge comes from
- * the package files themselves, and the table of the older build is
- * derived from the one difference recorded for it.
+ * the package files themselves. The table of UM982 build 13495 was derived
+ * from the one difference recorded for it; UM980 builds 10110 and 11833
+ * carry exactly that table in their own files.
  */
 #pragma once
 
@@ -68,23 +70,34 @@ extern "C" {
 #define PKG_BOOT_BAUD        460800u
 #define PKG_TAG_BYTE_OFF     0x7Fu
 #define PKG_TAG_WORD_OFF     0xACu
-#define PKG_TAG_WORD         660000000u
-#define PKG_UM982_TAG        0x40u
 #define PKG_BOOTCFG_SIZE     0x9Cu
-#define PKG_MODEL            "UM982"
 #define PKG_LZO_BLOCK_MAX    (256u * 1024u)   /**< largest decompressed block accepted */
-#define PKG_KNOWN_LAYOUTS    3u
+#define PKG_KNOWN_LAYOUTS    7u
+#define PKG_MODELS           2u
+
+/** A receiver model the station flashes, with the product tags its packages carry (rule 9). */
+typedef struct {
+    const char *model;                   /**< "UM982" */
+    uint8_t tag;                         /**< +0x1F of the type-2, 3, 4, 6 headers and file byte 0x7F */
+    uint32_t tag_word;                   /**< file word 0xAC */
+} pkg_model_t;
+
+extern const pkg_model_t pkg_models[PKG_MODELS];
+
+/** The model named `name` (exactly), NULL when the station does not flash it. */
+const pkg_model_t *pkg_model_find(const char *name);
 
 /** A known-good partition table: file bytes 0x30..0x77 of the package. */
 typedef struct {
-    uint32_t build;                      /**< receiver build that uses it */
+    const char *model;                   /**< the receiver model of `build` */
+    uint32_t build;                      /**< receiver build that uses it (builds never repeat across models) */
     uint32_t a[PKG_TYPES];               /**< primary flash address per type */
     uint32_t b[PKG_TYPES];               /**< backup flash address per type */
 } pkg_layout_t;
 
 extern const pkg_layout_t pkg_known_layouts[PKG_KNOWN_LAYOUTS];
 
-/** Index of the known table a receiver build uses, -1 when the build is unknown. */
+/** Index of the known table a receiver build uses (any model), -1 when the build is unknown. */
 int pkg_layout_for_build(uint32_t build);
 
 /** Facts readable without the receiver (upload page, logs). */

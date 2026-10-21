@@ -323,6 +323,47 @@ bool fw_update_same_as_running(const uint8_t elf_sha256[32])
 
 /* ---- receiver package ------------------------------------------------------------- */
 
+esp_err_t fw_install_gnss_restage_job(void)
+{
+    static fw_manifest_gnss_t entry;   /* worker only */
+    um98x_flash_journal_t j;
+    bool waits = station_flash_waits_for_package(&j);
+    fw_lock();
+    bool have = waits && fw_manifest_entry_for_journal(&j, &entry);
+    char tag[sizeof(g_fw.manifest.version)];
+    strlcpy(tag, g_fw.manifest.version, sizeof(tag));
+    fw_unlock();
+    if (!have) {
+        /* Something changed since the user asked (the journal, the manifest). */
+        fw_set_state(FW_UPDATE_FAILED, ESP_ERR_INVALID_STATE);
+        return ESP_ERR_INVALID_STATE;
+    }
+    char url[384];
+    if (!fw_asset_url(tag, entry.file.asset, url, sizeof(url))) {
+        fw_set_state(FW_UPDATE_FAILED, ESP_ERR_INVALID_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    fw_set_state(FW_UPDATE_DOWNLOADING_GNSS, ESP_OK);
+    ESP_LOGW(TAG, "downloading receiver firmware %s again for the interrupted update (%u bytes)", entry.version,
+             (unsigned)entry.file.size);
+    esp_err_t err = fw_http_download_package(url, &entry.file, entry.version);
+    if (err == ESP_OK) {
+        err = pkg_store_verify();
+    }
+    if (err == ESP_OK) {
+        err = station_flash_retry_restaged();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "the interrupted receiver update was not retried: %s", esp_err_to_name(err));
+        pkg_store_info_t pkg;
+        if (pkg_store_get_info(&pkg) == ESP_OK && !pkg.pinned) {
+            (void)pkg_store_release();   /* nothing stays staged without a session that uses it */
+        }
+    }
+    fw_set_state(err == ESP_OK ? FW_UPDATE_IDLE : FW_UPDATE_FAILED, err);
+    return err;
+}
+
 esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
 {
     static fw_manifest_gnss_t entry;   /* worker only */

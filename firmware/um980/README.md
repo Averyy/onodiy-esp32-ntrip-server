@@ -1,9 +1,16 @@
 # UM980 GNSS firmware
 
-Unicore UM980 receiver firmware packages, kept for UM980 support later. **The station
-does not use them yet:** it supports the UM982 only and refuses a package for any
-other model. Releases do not include them (the release attaches `firmware/um982/`
-only), and none has been flashed on hardware.
+Unicore UM980 receiver firmware packages. The station checks them by the same rules as
+the UM982's, with the UM980's own marks, and takes one only for a UM980 receiver. None
+has been flashed on hardware yet, and receiver flashing stays off in station builds
+until it has (as for the UM982). Releases carry 11833 and 23980
+([`firmware/release-packages.txt`](../release-packages.txt)). 11833 is the build the
+NTRIP-X ships with: an update never goes down a build, so the first test installs the same
+build again (uploaded by hand) and keeps 23980 for later. The update banner offers the
+highest build above the receiver's, so a receiver on 11833 is offered 23980. That is a
+cross-layout update (another partition table: the type-4 backup address), which the
+station refuses until such updates have been tested on a board
+(`CONFIG_UM98X_FLASH_CROSS_LAYOUT`) and the user confirms it.
 
 | Build | Built (the package's block date stamps) | SHA-256 |
 |---|---|---|
@@ -18,9 +25,7 @@ only the build number.
 
 **Format.** The same block format as the UM982 packages
 ([`firmware/um982/README.md`](../um982/README.md)): five blocks, a bootloader block
-among them. All four pass the station's package rules 1-7 (structure,
-header checksums, addresses, payload sums, trailers, every compressed block
-decoded, a known partition table) and stop at rule 8, the model. What marks them as
+among them. All four pass every package rule on a UM980 (host-tested: test/host/main/test_pkg_check.c). What marks them as
 UM980 packages: the model string `UM980`, product tag `0x41` (UM982: `0x40`) and a
 zero at file word `0xAC` (UM982: 660000000).
 
@@ -29,6 +34,5 @@ build 13495 (the type-4 backup at the primary address); 23980 and 25735 carry th
 table of UM982 builds 18975 and 23575, and the same bootloader block as UM982
 build 23575.
 
-**Before a station can use them:** the package checks would have to accept each
-model's own marks and tables, the release would have to attach this folder, and a
-UM980 board has to be tested first.
+**Still to do:** flash one on hardware (the NTRIP-X, then the UM980 board) before
+receiver flashing is turned on for station builds.

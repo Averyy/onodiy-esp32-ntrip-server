@@ -193,6 +193,9 @@ esp_err_t um98x_flash_init(void);
 /** Receiver flashing is built in (CONFIG_UM98X_FLASH_ENABLE). */
 bool um98x_flash_enabled(void);
 
+/** A receiver model whose packages the flasher takes ("UM982", "UM980"; pkg_check.h pkg_models). */
+bool um98x_flash_model_supported(const char *model);
+
 /**
  * Load the staged package into one PSRAM buffer and run every pre-flight
  * rule on that copy (see above). The buffer stays allocated for the run

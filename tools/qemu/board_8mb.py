@@ -5,8 +5,8 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""The 8 MB board's install in QEMU: the same build on partitions-8mb.csv finds its board, runs without a package
-area, and keeps a crash's core dump.
+"""The 8 MB board's install in QEMU: the same build on partitions-8mb.csv finds its board, stages receiver packages
+in PSRAM (no package partition), and keeps a crash's core dump.
 
     uv run tools/qemu/board_8mb.py [--out DIR] [--timeout S]
 
@@ -28,7 +28,8 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
      partition table)"), the receiver link on the board's pins ("GNS
      NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"),
      its LEDs driven (status, Wi-Fi and GNSS LED), the package store's note
-     that the board has no package partition (and no warning about it), and
+     that the board has no package partition and stages packages in PSRAM
+     (and no warning about it), and
      "startup complete" without a failed step;
   3. UART1: the receiver detection arrives (the link opened on the board);
   4. the web API, with the first admin password: GET /api/system names the
@@ -36,7 +37,8 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
      wiring as the default (RX GPIO16, TX GPIO15, COM1) and no pin of the
      board's own among the link's choices (1, 2, 4-8, 11, 40, 41); GET
      /api/update: app_max_bytes 2621440 (the 2.5 MB slot), pkg_max_bytes
-     null; GET /api/status: gnss_flash_reason "no_package_area";
+     3670016 (PSRAM staging); GET /api/status: receiver flashing available
+     (the bench build), no reason;
   5. a crash: `crash CRASH-ESP32` aborts; the panic handler saves the core
      dump (every task, as for any crash) to the 128 KB partition ("Core dump has been saved to flash.", never "Not
      enough space"), the station starts again, and GET /api/health has the
@@ -72,12 +74,13 @@ import smoke  # noqa: E402
 BUILD = bench_console.BUILD
 BOARD_LINE = "board: NTRIP-X (marked in the partition table)"
 LINK_LINE = "NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"
-NO_PKG_LINE = "no partition 'gnss_pkg' on this board"
+NO_PKG_LINE = "no partition 'gnss_pkg' on this board: receiver packages are staged in PSRAM (up to 3584 KB"
 LEDS_LINE = "leds: NTRIP-X: status LED on, Wi-Fi LED on, GNSS LED on"
 SAVED = "Core dump has been saved to flash."
 NO_ROOM = "Not enough space to save core dump"
 COREDUMP_BYTES = 0x20000     # partitions-8mb.csv
 APP_SLOT_BYTES = 0x280000
+PSRAM_PKG_BYTES = 3584 * 1024   # CONFIG_PKG_STORE_RAM_MAX_KB
 BOARD_PINS = {1, 2, 4, 5, 6, 7, 8, 11, 40, 41}
 
 
@@ -221,12 +224,16 @@ class Board8mb(bench_console.BenchConsole):
             if upd is not None:
                 self.check(upd.get("app_max_bytes") == APP_SLOT_BYTES,
                            f"GET /api/update app_max_bytes {upd.get('app_max_bytes')} (the 2.5 MB slot)")
-                self.check("pkg_max_bytes" in upd and upd["pkg_max_bytes"] is None,
-                           f"GET /api/update pkg_max_bytes {upd.get('pkg_max_bytes', 'missing')} (no package area)")
+                self.check(upd.get("pkg_max_bytes") == PSRAM_PKG_BYTES,
+                           f"GET /api/update pkg_max_bytes {upd.get('pkg_max_bytes', 'missing')} (staged in PSRAM)")
             st = self.get("/api/status")
             if st is not None:
-                why = (st.get("update") or {}).get("gnss_flash_reason")
-                self.check(why == "no_package_area", f"GET /api/status update.gnss_flash_reason {why}")
+                # The bench build has receiver flashing on: available (no reason), PSRAM standing in for the partition.
+                upd_st = st.get("update") or {}
+                why = upd_st.get("gnss_flash_reason")
+                self.check(upd_st.get("gnss_flash_available") is True and why is None,
+                           f"GET /api/status update.gnss_flash_available {upd_st.get('gnss_flash_available')}, "
+                           f"gnss_flash_reason {why}")
         except (OSError, http.client.HTTPException, ValueError) as e:
             self.check(False, f"web API: {type(e).__name__}: {e}")
 

@@ -813,7 +813,11 @@ static web_err_t gnss_refusal(uint32_t *retry_in_s)
         case FW_GNSS_BLOCK_APP_UPDATE:
             return WEB_ERR_APP_UPDATE;
         case FW_GNSS_BLOCK_JOURNAL_OPEN:
-            return WEB_ERR_JOURNAL_OPEN;
+            /* Except the package the journal waits for (staged in PSRAM, lost in a restart): upload it again. */
+            if (!station_flash_waits_for_package(NULL)) {
+                return WEB_ERR_JOURNAL_OPEN;
+            }
+            break;
         case FW_GNSS_BLOCK_RECEIVER_NOT_STREAMING:
             return WEB_ERR_RECEIVER_NOT_STREAMING;
         case FW_GNSS_BLOCK_UNSUPPORTED_MODEL:

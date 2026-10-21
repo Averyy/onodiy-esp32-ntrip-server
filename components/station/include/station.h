@@ -49,7 +49,8 @@
  *    (lifecycle_app_trial_active), no app update running (the update slot,
  *    lifecycle_update_claim), not safe mode, the station STREAMING (valid
  *    RTCM or NMEA within the last 10 s, so the receiver runs its
- *    application), model "UM982", and the staged package passes every
+ *    application), a model the flasher takes (UM982, UM980:
+ *    um98x_flash_model_supported), and the staged package passes every
  *    pre-flight rule on its RAM copy (um98x_flash_prepare);
  *  - before the first action the station claims the update slot, pins the
  *    staged package, takes a reboot inhibit and the flasher writes the
@@ -710,8 +711,8 @@ esp_err_t station_request_flash(const station_flash_request_t *req);
 bool station_flash_available(void);
 
 /**
- * Why station_flash_available() is false: "no_package_area" (the board's partition table has no package
- * partition), "not_enabled_in_build" or "receiver_port"; NULL when it is true.
+ * Why station_flash_available() is false: "no_package_area" (no package area: no package partition and no
+ * PSRAM staging), "not_enabled_in_build" or "receiver_port"; NULL when it is true.
  */
 const char *station_flash_reason(void);
 
@@ -828,6 +829,25 @@ uint32_t station_expected_flash_downtime_s(uint32_t package_size);
  *         ESP_ERR_INVALID_STATE when the action is not allowed now.
  */
 esp_err_t station_flash_user_action(station_flash_action_t action);
+
+/**
+ * The open journal waits for the user and its package is not staged and
+ * pinned for it: staged in PSRAM (pkg_store_in_ram) on a board without the
+ * package partition, it did not survive the restart. A retry needs the same
+ * package staged again: the journal's SHA-256 and size, for its model
+ * (`out`); a package staged meanwhile but not pinned (an upload, its own or
+ * another) does not end the wait. False otherwise (no journal, not waiting,
+ * its package pinned, or the package partition).
+ */
+bool station_flash_waits_for_package(um98x_flash_journal_t *out);
+
+/**
+ * Stage-again ending: the package now staged (its SHA-256 the journal's,
+ * checked here) is pinned for the journal and the user's retry starts
+ * (STATION_FLASH_ACTION_RETRY). ESP_ERR_INVALID_CRC for another package
+ * (released), ESP_ERR_INVALID_STATE when the journal no longer waits for it.
+ */
+esp_err_t station_flash_retry_restaged(void);
 
 /** Copy the last receiver text of the flash session (up to 4 KB). @return bytes copied. */
 size_t station_get_flash_log(char *buf, size_t len);

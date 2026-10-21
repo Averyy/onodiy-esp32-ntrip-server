@@ -340,6 +340,20 @@ bool fw_update_same_as_running(const uint8_t elf_sha256[32]);
 esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack);
 
 /**
+ * The user's retry of a receiver update cut short by a restart on a board
+ * that stages the package in PSRAM (station_flash_waits_for_package): the
+ * release manifest's package with the journal's SHA-256 is downloaded and
+ * checked again (async, state downloading_gnss), then the station retries
+ * with it. ESP_ERR_NOT_FOUND when the manifest has no such package (it must
+ * be uploaded again), ESP_ERR_INVALID_STATE when the journal does not wait
+ * for one or another job runs.
+ */
+esp_err_t fw_update_restage_gnss(void);
+
+/** The release manifest has the package an open journal waits for (fw_update_restage_gnss would download it). */
+bool fw_update_has_journal_package(void);
+
+/**
  * Manual rollback: mark the running image invalid, record its version in
  * ota/bad_ver, reboot into the other slot (async, via the lifecycle reboot
  * service). ESP_ERR_NOT_FOUND if the other slot holds no valid image;

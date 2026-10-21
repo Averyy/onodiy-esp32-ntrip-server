@@ -30,7 +30,8 @@ versions such as v0.8.3, which GNS supplies on request.
 
 ## Restore
 
-Over USB (the board's USB-C, through its FTDI bridge, or the internal debug USB-C):
+Over USB (the board's USB-C, through its FTDI bridge, or the internal debug USB-C; done
+through the internal one on 2026-10-21):
 
 ```
 esptool --chip esp32s3 erase-flash

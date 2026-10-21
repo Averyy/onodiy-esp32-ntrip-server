@@ -59,7 +59,8 @@ static um98x_flash_progress_t s_progress;
 static volatile bool s_cancel;
 
 /* The prepared RAM copy and its digest. */
-static uint8_t *s_buf;
+static const uint8_t *s_buf;   /* the package sent: a RAM copy, or the staged PSRAM bytes themselves (s_buf_lent) */
+static bool s_buf_lent;        /* s_buf is pkg_store's PSRAM buffer (pkg_store_borrow): returned, never freed here */
 static uint32_t s_len;
 static uint8_t s_sha[32];
 
@@ -409,6 +410,11 @@ esp_err_t um98x_flash_init(void)
     return ESP_OK;
 }
 
+bool um98x_flash_model_supported(const char *model)
+{
+    return pkg_model_find(model) != NULL;
+}
+
 bool um98x_flash_enabled(void)
 {
     return CONFIG_UM98X_FLASH_ENABLE != 0;
@@ -437,10 +443,13 @@ static bool sha_of(const uint8_t *data, uint32_t len, uint8_t out[32])
 
 void um98x_flash_discard(void)
 {
-    if (s_buf != NULL) {
-        heap_caps_free(s_buf);
-        s_buf = NULL;
+    if (s_buf != NULL && s_buf_lent) {
+        pkg_store_return(s_buf);
+    } else if (s_buf != NULL) {
+        heap_caps_free((void *)s_buf);
     }
+    s_buf = NULL;
+    s_buf_lent = false;
     s_len = 0;
     memset(s_sha, 0, sizeof(s_sha));
 }
@@ -473,20 +482,36 @@ esp_err_t um98x_flash_prepare(const um98x_flash_expect_t *expect, um98x_flash_pk
         return ESP_ERR_NOT_FOUND;
     }
     out->size = info.size;
-    s_buf = heap_caps_malloc(info.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    /* Staged in PSRAM already (a board without the package partition): sent from there, never copied (two
+     * copies would not fit); its SHA-256 is checked below like a copy's. Else a RAM copy of the flash bytes. */
+    uint32_t lent_len = 0;
+    s_buf = pkg_store_borrow(&lent_len);
+    s_buf_lent = s_buf != NULL;
+    uint8_t *copy = NULL;
+    if (s_buf_lent && lent_len != info.size) {
+        um98x_flash_discard();
+        snprintf(out->why, sizeof(out->why), "staged package changed while it was read");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_buf_lent) {
+        copy = heap_caps_malloc(info.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        s_buf = copy;
+    }
     uint8_t *work = heap_caps_malloc(PKG_LZO_BLOCK_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (s_buf == NULL || work == NULL) {
+        bool lent = s_buf_lent;
         heap_caps_free(work);
         um98x_flash_discard();
-        snprintf(out->why, sizeof(out->why), "no PSRAM for the package copy (%u bytes)", (unsigned)info.size);
+        snprintf(out->why, sizeof(out->why), "no PSRAM for the package %s (%u bytes)", lent ? "check" : "copy",
+                 (unsigned)info.size);
         ESP_LOGE(TAG, "%s: refused (never sent from flash)", out->why);
         return ESP_ERR_NO_MEM;
     }
     s_len = info.size;
     esp_err_t err = ESP_OK;
-    for (uint32_t off = 0; off < info.size && err == ESP_OK; off += 4096u) {
+    for (uint32_t off = 0; copy != NULL && off < info.size && err == ESP_OK; off += 4096u) {
         uint32_t n = info.size - off < 4096u ? info.size - off : 4096u;
-        err = pkg_store_read(off, s_buf + off, n);
+        err = pkg_store_read(off, copy + off, n);
         if ((off & 0xFFFFu) == 0) {
             feed();
         }

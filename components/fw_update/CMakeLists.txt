@@ -37,6 +37,7 @@ idf_component_register(
         lifecycle
         diag
         station
+        um98x_flash
         network
         ntrip_server
         rtcm_hub)

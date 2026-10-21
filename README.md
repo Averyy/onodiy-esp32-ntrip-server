@@ -24,8 +24,8 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
-<td align="center"><b>UM980</b> (configured, untested)</td>
-<td align="center"><b>NTRIP-X</b> (untested)</td>
+<td align="center"><b>UM980</b> (in testing)</td>
+<td align="center"><b>NTRIP-X</b> (in testing)</td>
 <td align="center"><b>GNSS splitter</b> (optional)</td>
 </tr>
 </table>
@@ -40,7 +40,8 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 | **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
 | **Splitter jumpers:** SMA male to SMA male (RG402) | N/A (splitter to each receiver) | from about US$4, by length | [AliExpress](https://www.aliexpress.com/item/1005002380816726.html) |
 
-- **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board).
+- **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board,
+  `GNSS` on the NTRIP-X).
   Plug or unplug it only with the power off: the socket powers the antenna.
 - **Power:** a 5 V USB-A charger and an A-to-C cable into the USB-C printed `ESP32S3`
   (a USB-C charger gives the UM982 board no power). The NTRIP-X: a USB-C supply of 2 A or more.
@@ -57,8 +58,8 @@ One firmware for every board; only the install differs.
 | Board | Flash | Install image | Status |
 |---|---|---|---|
 | UM982 board (AliExpress) | 16 MB | `onodiy-install-16mb.bin` | tested |
-| UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | configured, untested |
-| NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | untested; LEDs and button follow GNS's quick guide; no receiver updates yet |
+| UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | in testing |
+| NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | in testing; LEDs and button follow GNS's quick guide; receiver updates kept in memory |
 
 Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
 pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the
@@ -114,8 +115,9 @@ Up to 4 rovers, local network only.
 
 The station checks GitHub Releases daily and shows a banner; nothing installs until you
 click Update. Files are checked against the release's SHA-256 manifest, and a new
-version runs on trial, going back to the previous one if it fails.
-[More](docs/releases.md).
+version runs on trial, going back to the previous one if it fails. Receiver firmware
+(UM982, UM980) is offered the same way; installing it on the receiver is in testing and
+stays off in release builds until then. [More](docs/releases.md).
 
 ## Building
 

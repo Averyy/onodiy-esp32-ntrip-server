@@ -25,6 +25,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "gnss_types.h"
 #include "lifecycle.h"
 #include "manifest.h"
 #include "update_policy.h"
@@ -38,6 +39,7 @@ typedef enum {
     FW_JOB_CHECK = 1,
     FW_JOB_INSTALL_APP,
     FW_JOB_INSTALL_GNSS,
+    FW_JOB_RESTAGE_GNSS,          /**< the open journal's package again (PSRAM staging), then the retry */
 } fw_job_kind_t;
 
 typedef struct {
@@ -165,6 +167,15 @@ esp_err_t fw_install_app_job(void);
 
 /** Worker: download the receiver package for `build` and hand it to the station. */
 esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack);
+
+/**
+ * The manifest's entry for the package an open journal waits for (its model, SHA-256 and size), copied to `out`.
+ * Call with fw_lock held. @return false when the manifest has none.
+ */
+bool fw_manifest_entry_for_journal(const um98x_flash_journal_t *j, fw_manifest_gnss_t *out);
+
+/** Worker: download the package the open journal waits for (PSRAM staging), then start the user's retry. */
+esp_err_t fw_install_gnss_restage_job(void);
 
 /** Baseline of the running station for the next image's trial. */
 void fw_capture_baseline(uint8_t *baseline, uint8_t *slots);

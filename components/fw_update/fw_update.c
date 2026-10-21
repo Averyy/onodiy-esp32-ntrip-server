@@ -24,6 +24,7 @@
 #include "semver.h"
 #include "settings.h"
 #include "station.h"
+#include "um98x_flash.h"
 
 static const char *TAG = "fw_update";
 
@@ -41,9 +42,6 @@ fw_ctx_t g_fw;
 #define MANIFEST_KEEP    4000u   /* a larger manifest (with its repository) is not kept over a restart */
 /* A wall clock before this (2026-01-01) is not a trusted one. */
 #define MIN_TRUSTED_UNIX 1767225600LL
-
-/* The receiver model this firmware configures and flashes. */
-#define SUPPORTED_MODEL "UM982"
 
 /* ---- shared helpers -------------------------------------------------------------- */
 
@@ -175,7 +173,7 @@ static fw_update_gnss_block_t gnss_block_reason(const station_status_t *st, bool
     if (!st_ok || st->flash_journal_open) {
         return FW_GNSS_BLOCK_JOURNAL_OPEN;
     }
-    if (st->receiver.valid && strcmp(st->receiver.model, SUPPORTED_MODEL) != 0) {
+    if (st->receiver.valid && !um98x_flash_model_supported(st->receiver.model)) {
         return FW_GNSS_BLOCK_UNSUPPORTED_MODEL;
     }
     if (st->state != STATION_STATE_STREAMING) {
@@ -462,6 +460,9 @@ static void run_job(const fw_job_t *job)
     case FW_JOB_INSTALL_GNSS:
         err = fw_install_gnss_job(job->gnss_build, job->cross_layout_ack);
         break;
+    case FW_JOB_RESTAGE_GNSS:
+        err = fw_install_gnss_restage_job();
+        break;
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
@@ -711,6 +712,57 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
     }
     fw_unlock();
     free(st);
+    return err;
+}
+
+bool fw_manifest_entry_for_journal(const um98x_flash_journal_t *j, fw_manifest_gnss_t *out)
+{
+    if (!g_fw.have_manifest) {
+        return false;
+    }
+    for (unsigned i = 0; i < g_fw.manifest.gnss_count; i++) {
+        const fw_manifest_gnss_t *g = &g_fw.manifest.gnss[i];
+        if (g->file.size == j->size && memcmp(g->file.sha256, j->sha256, sizeof(g->file.sha256)) == 0 &&
+            strcmp(g->model, j->pre_model) == 0) {
+            *out = *g;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool fw_update_has_journal_package(void)
+{
+    um98x_flash_journal_t j;
+    if (g_fw.mtx == NULL || !station_flash_waits_for_package(&j)) {
+        return false;
+    }
+    fw_manifest_gnss_t entry;
+    fw_lock();
+    bool have = fw_manifest_entry_for_journal(&j, &entry);
+    fw_unlock();
+    return have;
+}
+
+esp_err_t fw_update_restage_gnss(void)
+{
+    if (g_fw.mtx == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    um98x_flash_journal_t j;
+    if (!station_flash_waits_for_package(&j)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    fw_manifest_gnss_t entry;
+    esp_err_t err;
+    fw_lock();
+    if (!fw_manifest_entry_for_journal(&j, &entry)) {
+        err = ESP_ERR_NOT_FOUND;
+    } else {
+        fw_job_t job = { .kind = FW_JOB_RESTAGE_GNSS };
+        err = queue_job_locked(&job);
+    }
+    fw_unlock();
     return err;
 }
 

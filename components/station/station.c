@@ -3263,7 +3263,8 @@ static void flash_recovery_begin(void)
         /* See station_early_boot: "power" may be the reset pin on this chip. */
         bool power = boot.reset_class == LIFECYCLE_RESET_POWER_ON || boot.reset_class == LIFECYCLE_RESET_BROWNOUT;
         (void)um98x_flash_journal_plan(jerr, &j, power, &text);
-        if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
+        /* A package staged in PSRAM (no package partition) did not survive the restart: nothing to recover with. */
+        if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS && pkg_store_partition_present()) {
             ESP_LOGW(TAG, "interrupted receiver update (%s, %s reset): %s", um98x_flash_journal_state_name(j.state),
                      power ? "power-on" : "ESP32-only", text);
             s_recover_wanted = true;
@@ -3380,6 +3381,12 @@ esp_err_t station_early_boot(void)
         return ESP_OK;   /* the rest of the recovery table runs in the station task */
     }
 
+    if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS && !pkg_store_partition_present()) {
+        /* Staged in PSRAM, the package did not survive the restart: no race into a loader with nothing to send.
+         * The journal waits for the user, who stages it again (station_flash_waits_for_package). */
+        ESP_LOGW(TAG, "no package partition: the interrupted update's package is gone; no race, the journal waits");
+        return ESP_OK;
+    }
     if (CONFIG_UM98X_FLASH_ENABLE && CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
         esp_err_t err = board_init();
         if (err == ESP_OK) {
@@ -4045,7 +4052,7 @@ bool station_wiring_pending(void)
 const char *station_flash_reason(void)
 {
     if (pkg_store_absent()) {
-        return "no_package_area";   /* this board's partition table has none (a board with 8 MB flash) */
+        return "no_package_area";   /* no package partition (8 MB flash) and PSRAM staging off */
     }
     if (!um98x_flash_enabled()) {
         return "not_enabled_in_build";
@@ -4091,6 +4098,59 @@ uint32_t station_expected_flash_downtime_s(uint32_t package_size)
      * confirmed on hardware). Refined from measured runs. */
     uint64_t transfer_s = ((uint64_t)package_size * 10u * 11u) / ((uint64_t)UM98X_FLASH_BAUD * 10u);
     return (uint32_t)transfer_s + CONFIG_STATION_FLASH_RESTART_ALLOWANCE_S;
+}
+
+bool station_flash_waits_for_package(um98x_flash_journal_t *out)
+{
+    if (!pkg_store_in_ram()) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_lock);
+    bool waiting = s_inited && !s_journal_clearing && s_journal_err == ESP_OK &&
+                   journal_waits_for_user(s_journal_err, &s_journal);
+    um98x_flash_journal_t j = s_journal;
+    portEXIT_CRITICAL(&s_lock);
+    if (!waiting) {
+        return false;
+    }
+    /* Only its own package, pinned, ends the wait: an upload not confirmed yet (unpinned) or another one does not. */
+    pkg_store_info_t info;
+    if (pkg_store_get_info(&info) == ESP_OK && info.valid && info.pinned && info.size == j.size &&
+        memcmp(info.sha256, j.sha256, sizeof(info.sha256)) == 0) {
+        return false;
+    }
+    if (out != NULL) {
+        *out = j;
+    }
+    return true;
+}
+
+esp_err_t station_flash_retry_restaged(void)
+{
+    um98x_flash_journal_t j;
+    portENTER_CRITICAL(&s_lock);
+    bool waiting = s_inited && !s_journal_clearing && s_journal_err == ESP_OK &&
+                   journal_waits_for_user(s_journal_err, &s_journal);
+    j = s_journal;
+    portEXIT_CRITICAL(&s_lock);
+    if (!waiting) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    pkg_store_info_t info;
+    if (pkg_store_get_info(&info) != ESP_OK || !info.valid) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (info.size != j.size || memcmp(info.sha256, j.sha256, sizeof(info.sha256)) != 0) {
+        ESP_LOGE(TAG, "staged package is not the open journal's (size or SHA-256): released");
+        (void)pkg_store_release();
+        return ESP_ERR_INVALID_CRC;
+    }
+    esp_err_t err = pkg_store_set_pinned(true);   /* a journal waiting for the user keeps its package pinned */
+    if (err != ESP_OK) {
+        return err;
+    }
+    ESP_LOGW(TAG, "receiver update: the open journal's package is staged again (PSRAM): the user's retry");
+    return station_flash_user_action(STATION_FLASH_ACTION_RETRY);
 }
 
 esp_err_t station_flash_user_action(station_flash_action_t action)

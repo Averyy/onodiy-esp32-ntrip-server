@@ -655,7 +655,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const p = Object.assign({ signal_group_master: 3, signal_group_slave: 6, base_mode: 'survey_in', survey_in_s: 600, fixed: null,
     station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true, elevation_mask_deg: 0, signal_group_um980: 2 },
   g.profile || {});
-  /* A UM980 (untested) gets its own groups: one number, no second antenna, no comparison. */
+  /* A UM980 (in testing) gets its own groups: one number, no second antenna, no comparison. */
   const um980 = (g.receiver || {}).model === 'UM980';
   const folds = fold || { advanced: false };
   let profDirty = false;
@@ -1055,7 +1055,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     e.preventDefault();
     save('profile', saveBtn, err);
   } },
-  um980 ? pgroup('Signals', badge('UM980 · untested', 'warn'), sg980.el, satView.el, F.elevation_mask_deg.el, refused[2]) :
+  um980 ? pgroup('Signals', badge('UM980 · in testing', 'info'), sg980.el, satView.el, F.elevation_mask_deg.el, refused[2]) :
     pgroup('Signals', null, sgChoice.el, cmpLink, satView.el, F.elevation_mask_deg.el, refused[2]),
   pgroup('Correction messages', setChip, editRow(summary, msgBox, open => {
     msgList.hidden = open;

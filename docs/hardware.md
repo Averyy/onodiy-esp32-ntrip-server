@@ -85,8 +85,13 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 A finished base station from GNS-Electronics: an ESP32-S3-WROOM-1U-N8R8 (8 MB flash,
 8 MB PSRAM) and a UM980 in a case. The station's firmware runs on it with its own
 install (`onodiy-install-um980-ntrx.bin`: an 8 MB partition table whose
-`board.um980-ntrx` partition tells the firmware which board it is). On the bench so far
-(no antenna yet): it finds its board and its UM980; the LEDs are not checked by eye yet.
+`board.um980-ntrx` partition tells the firmware which board it is). In testing: on the
+bench it finds its board and its UM980 (Build 11833 as delivered), and going back to
+GNS's firmware and installing this one again both work. Next: the LEDs and the button by
+eye, the case's USB-C, then the antenna.
+
+**Power:** a USB-C supply of 2 A or more on the case's port. **Antenna:** the port
+marked `GNSS` (3.3 V for an active antenna, at most 100 mA).
 
 | Part | ESP32 pins | Notes |
 |---|---|---|
@@ -102,8 +107,9 @@ ESP32's UART0 or to the UM980. Inside, a second USB-C (`USB2 DEBUG`) is the ESP3
 built-in USB, where `esptool` enters the loader by itself; installing through it needs
 the case open. Whether an install works through the case's port is still to be checked.
 
-**Receiver firmware updates** are not available on it yet: its flash has no room for a
-receiver package (keeping one in PSRAM instead is planned).
+**Receiver firmware updates:** its flash has no room for a receiver package, so the
+station keeps it in PSRAM from the download to the end of the update (up to 3.5 MB). A
+restart in between loses it: Retry downloads it again, or asks for the same file.
 
 GNS's own firmware is in [`firmware/ntrip-x/`](../firmware/ntrip-x/README.md), to go back
 to it.

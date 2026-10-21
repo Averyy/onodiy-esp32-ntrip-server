@@ -15,6 +15,7 @@
 #include "esp_private/partition_linux.h"
 #include "pkg_header.h"
 #include "pkg_store.h"
+#include "pkg_store_ram.h"
 #include "psa/crypto.h"
 #include "unity.h"
 
@@ -302,3 +303,121 @@ TEST_CASE("pkg_store: verify finds a payload changed in flash", "[pkg_store]")
     free(s_pkg);
     s_pkg = NULL;
 }
+
+/* ---- PSRAM staging (a board without the partition) ------------------------------------------------- */
+
+static void up_ram(void)
+{
+    up();   /* the package bytes; the emulated flash is not used */
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_init_ram());
+    TEST_ASSERT_TRUE(pkg_store_in_ram());
+    TEST_ASSERT_FALSE(pkg_store_absent());
+}
+
+TEST_CASE("pkg_store in PSRAM: staged, read, verified, pinned and released like the partition", "[pkg_store]")
+{
+    up_ram();
+    TEST_ASSERT_EQUAL_size_t((size_t)CONFIG_PKG_STORE_RAM_MAX_KB * 1024u, pkg_store_capacity());
+    pkg_store_info_t info;
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    TEST_ASSERT_NULL(pkg_store_borrow(NULL));   /* nothing staged */
+    stage("R4.10Build11833");
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_get_info(&info));
+    TEST_ASSERT_TRUE(info.valid);
+    TEST_ASSERT_EQUAL_UINT32(PKG_LEN, info.size);
+    TEST_ASSERT_EQUAL_STRING("R4.10Build11833", info.version);
+    uint8_t buf[100];
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_read(PKG_LEN - sizeof(buf), buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_MEMORY(&s_pkg[PKG_LEN - sizeof(buf)], buf, sizeof(buf));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, pkg_store_read(PKG_LEN - 1, buf, 2));
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_verify());
+
+    /* Pinned: no new package over it, no invalidate; release unpins and empties it. */
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_set_pinned(true));
+    pkg_store_writer_t w = NULL;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, pkg_store_begin(PKG_LEN, NULL, &w));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, pkg_store_invalidate());
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_get_info(&info));
+    TEST_ASSERT_TRUE(info.pinned);
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_release());
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    TEST_ASSERT_FALSE(info.pinned);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_read(0, buf, 1));
+    down();
+}
+
+TEST_CASE("pkg_store in PSRAM: nothing survives a restart, a cut or wrong write leaves it empty", "[pkg_store]")
+{
+    up_ram();
+    stage("x");
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_set_pinned(true));
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_init_ram());   /* a restart: even a pinned package is gone */
+    pkg_store_info_t info;
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    TEST_ASSERT_FALSE(info.pinned);
+
+    /* Too large for the PSRAM slot. */
+    pkg_store_writer_t w = NULL;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, pkg_store_begin((uint32_t)pkg_store_capacity() + 1u, NULL, &w));
+    /* Short, then wrong digest, then abandoned: empty every time. */
+    uint8_t digest[32];
+    sha(s_pkg, PKG_LEN, digest);
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_begin(PKG_LEN, digest, &w));
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_write(w, s_pkg, PKG_LEN - 1));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, pkg_store_write(w, s_pkg, 2));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, pkg_store_finish(w, "x", &info));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    digest[0] ^= 1;
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_begin(PKG_LEN, digest, &w));
+    TEST_ASSERT_EQUAL(ESP_OK, write_all(w, PKG_LEN));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_CRC, pkg_store_finish(w, "x", &info));
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_begin(PKG_LEN, NULL, &w));
+    TEST_ASSERT_EQUAL(ESP_OK, write_all(w, PKG_LEN / 2));
+    pkg_store_abort(w);
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    down();
+}
+
+TEST_CASE("pkg_store in PSRAM: the flasher borrows the bytes, a release meanwhile frees them only on return",
+          "[pkg_store]")
+{
+    up_ram();
+    stage("x");
+    uint32_t len = 0;
+    const uint8_t *p = pkg_store_borrow(&len);
+    TEST_ASSERT_NOT_NULL(p);
+    TEST_ASSERT_EQUAL_UINT32(PKG_LEN, len);
+    TEST_ASSERT_EQUAL_MEMORY(s_pkg, p, PKG_LEN);
+    TEST_ASSERT_NULL(pkg_store_borrow(&len));   /* one borrower */
+    /* Released while borrowed: the slot is empty at once, the bytes stay readable for the borrower. */
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_release());
+    pkg_store_info_t info;
+    TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, pkg_store_get_info(&info));
+    TEST_ASSERT_EQUAL_MEMORY(s_pkg, p, PKG_LEN);
+    /* A new package meanwhile gets its own buffer. */
+    stage("y");
+    uint32_t len2 = 0;
+    const uint8_t *q = pkg_store_borrow(&len2);
+    TEST_ASSERT_NULL(q);   /* still one borrower: the first has not returned */
+    pkg_store_return(p);   /* freed now */
+    q = pkg_store_borrow(&len2);
+    TEST_ASSERT_NOT_NULL(q);
+    TEST_ASSERT_EQUAL_MEMORY(s_pkg, q, PKG_LEN);
+    pkg_store_return(q);
+    pkg_store_return(NULL);
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_release());
+    down();
+}
+
+TEST_CASE("pkg_store on the partition: nothing to borrow (the flasher copies)", "[pkg_store]")
+{
+    up();
+    TEST_ASSERT_FALSE(pkg_store_in_ram());
+    TEST_ASSERT_TRUE(pkg_store_partition_present());   /* read from the table, before or after init */
+    stage("x");
+    TEST_ASSERT_NULL(pkg_store_borrow(NULL));
+    TEST_ASSERT_EQUAL(ESP_OK, pkg_store_release());
+    down();
+}
+

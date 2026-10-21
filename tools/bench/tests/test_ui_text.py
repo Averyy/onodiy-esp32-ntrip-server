@@ -103,6 +103,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  noRx: a => [noReceiverText(a[0], a[1]), noReceiverLead(a[0], a[1]), alertText(a[0], { link: a[1] })[1]],\n' +
   '  notEnabled: a => { S.status = a[0]; const r = notEnabled(a[1]); S.status = null; return r; },\n' +
+  '  pkgNeeded: p => packageNeededText(p),\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -2231,6 +2232,13 @@ def test_receiver_updates_off_says_why():
     # A board whose partition table has no receiver package area (8 MB flash).
     (board,) = run_ui([("notEnabled", [status(update={"gnss_flash_reason": "no_package_area"}), None])])
     assert board == "Receiver firmware updates are not available on this board yet."
+    # An interrupted update whose package was kept in memory only (PSRAM staging): how it comes back.
+    fetch, upload, needed = run_ui([("pkgNeeded", {"in_release": True}), ("pkgNeeded", {"in_release": False}),
+                                    ("refusalText", {"status": 409, "error": {"code": "package_needed",
+                                                                              "message": "x"}})])
+    assert fetch == "The restart cleared the package from memory. Retry downloads it again first."
+    assert upload == "The restart cleared the package from memory. Upload the same .pkg under Install manually to continue."
+    assert needed == "Upload the same receiver package (.pkg) again under Install manually."
     (pending,) = run_ui([("refusalText", {"status": 409, "error": {"code": "busy", "reason": "wiring_pending",
                                                                      "message": "busy"}})])
     assert pending == "The receiver wiring changes at the next restart. Restart the station first, then update the receiver."

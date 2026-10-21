@@ -27,6 +27,12 @@ const JOURNAL_STATE = {
   failed: 'Failed', needs_user: 'Waiting for you',
 };
 
+/* The interrupted update's package is gone (kept in memory only on this board): how the retry gets it back. */
+function packageNeededText(p) {
+  return p.in_release ? 'The restart cleared the package from memory. Retry downloads it again first.'
+    : 'The restart cleared the package from memory. Upload the same .pkg under Install manually to continue.';
+}
+
 const FLASH_ACTIONS = [
   ['retry', 'retry', 'Flash again', 'Flash the same package again?',
     'The same package is sent to the receiver again. Keep the station powered and do not plug anything into the receiver\'s USB port.'],
@@ -515,6 +521,7 @@ const updatesPart = {
         h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
         f.journal !== 'none' ? h('p', null, (L.journal[f.journal] || ['', ''])[1]) : null,
         f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
+        f.package_needed ? msg('warn', packageNeededText(f.package_needed)) : null,
         rec || pr ? kv([
           rec ? ['Expected firmware', rec.expected_fw] : null,
           rec ? ['Before the update', [rec.pre_model, rec.pre_fw].filter(Boolean).join(' ')] : null,
@@ -664,7 +671,9 @@ const updatesPart = {
       }
       const s = staged.staged || {};
       const r = staged.receiver || {};
-      const latest = u && u.gnss && u.gnss.latest ? u.gnss.latest : '';
+      /* The interrupted update's package again (kept in memory only): its own firmware is what it should report. */
+      const again = flash && flash.package_needed && flash.record ? flash.record.expected_fw : '';
+      const latest = again || (u && u.gnss && u.gnss.latest ? u.gnss.latest : '');
       const exp = textInput(latest, { maxlength: 47, placeholder: 'R4.10Build19152' });
       const fExp = field('Firmware the receiver should report afterwards', exp, 'As published with the package, e.g. R4.10Build19152.');
       const shaOk = checkbox('The SHA-256 above matches the checksum published with this package.', false);

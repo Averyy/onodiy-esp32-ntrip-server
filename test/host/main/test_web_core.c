@@ -30,6 +30,8 @@ TEST_CASE("every error code has a name, a status and a message", "[web_core]")
     TEST_ASSERT_EQUAL_STRING("202 Accepted", web_status_line(202));
     /* The comparison's refusal without a receiver; not the detection's not_no_receiver. */
     TEST_ASSERT_EQUAL_STRING("no_receiver", web_err_code(WEB_ERR_NO_RECEIVER));
+    TEST_ASSERT_EQUAL_STRING("package_needed", web_err_code(WEB_ERR_PACKAGE_NEEDED));
+    TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_PACKAGE_NEEDED));
     TEST_ASSERT_EQUAL(409, web_err_status(WEB_ERR_NO_RECEIVER));
     TEST_ASSERT_EQUAL_STRING("No receiver is connected", web_err_message(WEB_ERR_NO_RECEIVER));
     TEST_ASSERT_EQUAL_STRING("not_no_receiver", web_err_code(WEB_ERR_NOT_NO_RECEIVER));

@@ -654,6 +654,7 @@ const ERR = {
   caster_policy: 'This server setup is not allowed.',
   slot_disabled: 'The slot is not enabled.',
   sha256_mismatch: 'The SHA-256 does not match the uploaded package.',
+  package_needed: 'Upload the same receiver package (.pkg) again under Install manually.',
   downgrade: 'That build is older than the receiver\'s current firmware.',
   no_rollback_image: 'There is no previous app version to go back to.',
   admin_already_set: 'An admin password is already set.',

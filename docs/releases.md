@@ -23,7 +23,8 @@ tests, bench tools, the bench-overlay build and both QEMU jobs), then creates th
 Release with:
 
 - `onodiy-esp32-ntrip-server.bin`, the app image stations install;
-- the receiver package(s) from [`firmware/um982/`](../firmware/um982/) (checked against
+- the receiver packages listed in [`firmware/release-packages.txt`](../firmware/release-packages.txt),
+  at most 4 (stations up to v0.1.5 refuse a manifest with more) (each checked against
   its `SHA256SUMS`);
 - `manifest.json`, written by [`tools/release_manifest.py`](../tools/release_manifest.py):
   the version, and every file with its size and SHA-256;

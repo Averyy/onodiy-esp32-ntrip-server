@@ -572,7 +572,7 @@ computer.
 
 The NTRIP-X gets the same app and bootloader with another partition
 table (`partitions-8mb.csv`: 2.5 MB app slots, no receiver package
-partition, a 128 KB core dump partition and the `board.um980-ntrx` marker)
+partition (packages are staged in PSRAM), a 128 KB core dump partition and the `board.um980-ntrx` marker)
 and `--flash-size 8MB`. `board_8mb.py` runs that install of the bench
 overlay's build:
 
@@ -585,12 +585,13 @@ It starts `run.sh --overlay sdkconfig.bench --table 8mb` headless with the
 console and UART1 on sockets it listens on, and checks: the console names
 the board (`board: NTRIP-X (marked in the partition table)`), puts the
 receiver link on its pins (RX GPIO16, TX GPIO15, COM1) and says the board
-has no package partition, and the start has no failed step; the receiver
-detection arrives on UART1; `GET /api/system` names the board
-(`um980-ntrx`, source `marker`), 8 MB flash, the board's wiring as the
-default and none of the board's own pins among the link's choices; `GET
-/api/update` gives `app_max_bytes` 2621440 and `pkg_max_bytes` null, and
-`GET /api/status` `gnss_flash_reason` `no_package_area`; `crash
+stages receiver packages in PSRAM (no package partition), and the start has
+no failed step; the receiver detection arrives on UART1; `GET /api/system`
+names the board (`um980-ntrx`, source `marker`), 8 MB flash, the board's
+wiring as the default and none of the board's own pins among the link's
+choices; `GET /api/update` gives `app_max_bytes` 2621440 and
+`pkg_max_bytes` 3670016 (the PSRAM slot), and `GET /api/status` has
+receiver flashing available (the bench build); `crash
 CRASH-ESP32` aborts, the core dump is saved in the 128 KB partition (48,576
 bytes on 2026-10-21) and, after the restart, `GET /api/health` has it with
 its summary (the crashed task, its PC, a backtrace); two boots and no other

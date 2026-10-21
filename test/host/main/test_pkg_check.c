@@ -713,3 +713,141 @@ TEST_CASE("package facts: unreadable packages report unknowns", "[pkg]")
     TEST_ASSERT_EQUAL_INT(1, pkg_layout_for_build(18975));
     TEST_ASSERT_EQUAL_INT(2, pkg_layout_for_build(23575));
 }
+
+#ifndef FL_TEST_UM980_DIR
+#define FL_TEST_UM980_DIR ""
+#endif
+
+static uint8_t *load_file(const char *path, uint32_t *len)
+{
+    FILE *f = fopen(path, "rb");
+    if (f == NULL) {
+        return NULL;
+    }
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = malloc((size_t)n);
+    if (buf == NULL || fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        fclose(f);
+        free(buf);
+        return NULL;
+    }
+    fclose(f);
+    *len = (uint32_t)n;
+    return buf;
+}
+
+TEST_CASE("package rules: the UM980 packages pass all twelve for a UM980, never for a UM982", "[pkg]")
+{
+    static const struct {
+        uint32_t build;
+        int8_t layout;          /* their own model's entry for their table */
+        uint32_t layout_build;
+    } pkgs[] = { { 10110, 3, 10110 }, { 11833, 3, 10110 }, { 23980, 5, 23980 }, { 25735, 5, 23980 } };
+    for (size_t i = 0; i < sizeof(pkgs) / sizeof(pkgs[0]); i++) {
+        char path[512];
+        snprintf(path, sizeof(path), "%s/UM980_R4.10Build%u.pkg", FL_TEST_UM980_DIR, (unsigned)pkgs[i].build);
+        uint32_t len = 0;
+        uint8_t *p = load_file(path, &len);
+        if (p == NULL) {
+            TEST_IGNORE_MESSAGE("firmware/um980 package not found");
+        }
+        pkg_facts_t f;
+        pkg_inspect_mem(p, len, &f);
+        TEST_ASSERT_EQUAL_STRING("UM980", f.model);
+        TEST_ASSERT_TRUE(f.chain_ok);
+        TEST_ASSERT_EQUAL_INT8(pkgs[i].layout, f.layout);
+        TEST_ASSERT_EQUAL_UINT32(pkgs[i].layout_build, f.layout_build);
+
+        /* On a UM980 at its own build: every rule passes, the same layout. */
+        pkg_check_in_t in = inputs(len);
+        in.live_model = "UM980";
+        in.receiver_build = pkgs[i].build;
+        in.package_build = pkgs[i].build;
+        pkg_check_out_t out;
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, pkg_check(p, len, &in, &out), out.why);
+        TEST_ASSERT_FALSE(out.cross_layout);
+        TEST_ASSERT_TRUE(out.lzo_blocks > 0);
+
+        /* Never on a UM982 (rule 8: the receiver's model). */
+        in.live_model = "UM982";
+        TEST_ASSERT_EQUAL_UINT8(8, pkg_check(p, len, &in, &out));
+        TEST_ASSERT_EQUAL_STRING("package model UM980, receiver reports \"UM982\"", out.why);
+
+        /* With the UM982's product tag: rule 9 names the UM980's. */
+        in.live_model = "UM980";
+        p[PKG_TAG_BYTE_OFF] = 0x40;
+        reseal(p, 0);   /* the type-2 block (the first): its sum and header CRC */
+        TEST_ASSERT_EQUAL_UINT8(9, pkg_check(p, len, &in, &out));
+        TEST_ASSERT_EQUAL_STRING("boot configuration tag 40, not the UM980 tag", out.why);
+        free(p);
+    }
+}
+
+TEST_CASE("package rules: the NTRIP-X's UM980 at 11833: 11833 again, 23980 only as a confirmed cross-layout update",
+          "[pkg]")
+{
+    char path[512];
+    uint32_t len = 0;
+    snprintf(path, sizeof(path), "%s/UM980_R4.10Build10110.pkg", FL_TEST_UM980_DIR);
+    uint8_t *old = load_file(path, &len);
+    if (old == NULL) {
+        TEST_IGNORE_MESSAGE("firmware/um980 package not found");
+    }
+    pkg_check_in_t in = inputs(len);
+    in.live_model = "UM980";
+    in.receiver_build = 11833;
+    in.package_build = 10110;
+    pkg_check_out_t out;
+    TEST_ASSERT_EQUAL_UINT8(12, pkg_check(old, len, &in, &out));   /* lower: never a downgrade */
+    free(old);
+
+    snprintf(path, sizeof(path), "%s/UM980_R4.10Build11833.pkg", FL_TEST_UM980_DIR);
+    uint8_t *same = load_file(path, &len);
+    TEST_ASSERT_NOT_NULL(same);
+    in = inputs(len);
+    in.live_model = "UM980";
+    in.receiver_build = 11833;
+    in.package_build = 11833;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, pkg_check(same, len, &in, &out), out.why);   /* the oldest that updates */
+    TEST_ASSERT_FALSE(out.cross_layout);
+    free(same);
+
+    snprintf(path, sizeof(path), "%s/UM980_R4.10Build23980.pkg", FL_TEST_UM980_DIR);
+    uint8_t *next = load_file(path, &len);
+    TEST_ASSERT_NOT_NULL(next);
+    in = inputs(len);
+    in.live_model = "UM980";
+    in.receiver_build = 11833;
+    in.package_build = 23980;
+    TEST_ASSERT_EQUAL_UINT8(12, pkg_check(next, len, &in, &out));
+    TEST_ASSERT_TRUE(out.cross_layout);
+    in.cross_layout_allowed = true;
+    TEST_ASSERT_EQUAL_UINT8(12, pkg_check(next, len, &in, &out));   /* allowed, not yet confirmed */
+    in.cross_layout_ack = true;
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, pkg_check(next, len, &in, &out), out.why);
+    free(next);
+}
+
+TEST_CASE("package models: the station flashes the UM982 and the UM980, builds never repeat across them", "[pkg]")
+{
+    TEST_ASSERT_NOT_NULL(pkg_model_find("UM982"));
+    TEST_ASSERT_NOT_NULL(pkg_model_find("UM980"));
+    TEST_ASSERT_NULL(pkg_model_find("UM981"));
+    TEST_ASSERT_NULL(pkg_model_find("UM982C"));
+    TEST_ASSERT_NULL(pkg_model_find(""));
+    TEST_ASSERT_NULL(pkg_model_find(NULL));
+    TEST_ASSERT_EQUAL_HEX8(0x41, pkg_model_find("UM980")->tag);
+    TEST_ASSERT_EQUAL_UINT32(0, pkg_model_find("UM980")->tag_word);
+    TEST_ASSERT_EQUAL_UINT32(660000000u, pkg_model_find("UM982")->tag_word);
+    for (unsigned i = 0; i < PKG_KNOWN_LAYOUTS; i++) {
+        TEST_ASSERT_NOT_NULL(pkg_model_find(pkg_known_layouts[i].model));
+        for (unsigned j = 0; j < i; j++) {
+            TEST_ASSERT_NOT_EQUAL(pkg_known_layouts[j].build, pkg_known_layouts[i].build);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(4, pkg_layout_for_build(11833));
+    TEST_ASSERT_EQUAL_INT(5, pkg_layout_for_build(23980));
+}
+

@@ -2,7 +2,8 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * GNSS firmware package staging area (raw flash partition "gnss_pkg").
+ * GNSS firmware package staging area (raw flash partition "gnss_pkg"; on a
+ * board without it, one PSRAM buffer: see "PSRAM staging" below).
  *
  * Holds at most one receiver firmware package (.pkg), and only while a
  * user-initiated receiver update is in progress: it is written after the
@@ -40,6 +41,16 @@
  * checks the SHA-256 of that copy, which is what gets sent;
  * pkg_store_verify() re-hashes the flash copy (e.g. for the upload page).
  *
+ * PSRAM staging (CONFIG_PKG_STORE_RAM, a board with 8 MB flash): the same
+ * calls and rules, the payload in one PSRAM buffer allocated by
+ * pkg_store_begin() (refused unless PSRAM keeps CONFIG_PKG_STORE_RAM_MARGIN_KB
+ * beside it) and freed when the slot empties, the header in RAM. Nothing
+ * survives a restart: a receiver update cut short by one finds no package
+ * and waits for the user, who stages the same one again (the journal's
+ * SHA-256). The flasher sends straight from the buffer (pkg_store_borrow)
+ * instead of copying it: a release while it is borrowed empties the slot,
+ * and the memory is freed when the flasher returns it.
+ *
  * Writers: fw_update (download after the user's click) and web (manual
  * upload). Reader: um98x_flash. One writer at a time; begin() fails with
  * ESP_ERR_INVALID_STATE otherwise. Do not call from a task whose stack is in
@@ -73,19 +84,35 @@ typedef struct pkg_store_writer *pkg_store_writer_t;
  * Locate the partition and read the header (once at boot). A write that a
  * reset cut short is forgotten: the slot is then empty. A partition table
  * without the partition (a board with 8 MB flash) is not an error: ESP_OK,
- * pkg_store_capacity() 0, and every other call refuses (ESP_ERR_NOT_FOUND,
+ * and the package is staged in PSRAM (CONFIG_PKG_STORE_RAM); with that off,
+ * pkg_store_capacity() is 0 and every other call refuses (ESP_ERR_NOT_FOUND,
  * ESP_ERR_INVALID_STATE).
  */
 esp_err_t pkg_store_init(void);
 
-/** Payload capacity in bytes (partition size minus header sector). */
+/** Payload capacity in bytes (partition size minus header sector; PSRAM staging: CONFIG_PKG_STORE_RAM_MAX_KB). */
 size_t pkg_store_capacity(void);
 
 /**
- * pkg_store_init() found no package partition: the board's partition table has none (8 MB flash). False before
- * init, when the partition is there, and when init failed for another reason (capacity is 0 then too).
+ * No package area at all: no partition and no PSRAM staging (receiver updates are not available). False before
+ * init, with either area, and when init failed for another reason (capacity is 0 then too).
  */
 bool pkg_store_absent(void);
+
+/** The partition table has the package partition (before pkg_store_init too: for the early boot steps). */
+bool pkg_store_partition_present(void);
+
+/** The package is staged in PSRAM (the board has no package partition): it does not survive a restart. */
+bool pkg_store_in_ram(void);
+
+/**
+ * The staged package's bytes in PSRAM, for the flasher to send without a copy (`len`: its size); NULL when it is
+ * not staged in PSRAM or already borrowed. Give it back with pkg_store_return().
+ */
+const uint8_t *pkg_store_borrow(uint32_t *len);
+
+/** Give back what pkg_store_borrow() lent (NULL is ignored): freed now if the slot was emptied meanwhile. */
+void pkg_store_return(const uint8_t *p);
 
 /** Staged package metadata. ESP_ERR_NOT_FOUND if the slot is empty/invalid. */
 esp_err_t pkg_store_get_info(pkg_store_info_t *out);

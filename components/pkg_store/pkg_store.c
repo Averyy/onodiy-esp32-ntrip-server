@@ -7,11 +7,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "pkg_header.h"
+#include "pkg_store_ram.h"
 #include "psa/crypto.h"
 #include "sdkconfig.h"
 #if CONFIG_ESP_TASK_WDT_EN
@@ -27,6 +29,13 @@ static const char *TAG = "pkg_store";
 #define PKG_STORE_HEADER_SIZE       PKG_HDR_SECTOR_SIZE
 #define PKG_STORE_ERASE_SIZE        4096u
 #define VERIFY_CHUNK                4096u
+#if CONFIG_PKG_STORE_RAM
+#define RAM_MAX_BYTES               ((size_t)CONFIG_PKG_STORE_RAM_MAX_KB * 1024u)
+#define RAM_MARGIN_BYTES            ((size_t)CONFIG_PKG_STORE_RAM_MARGIN_KB * 1024u)
+#else
+#define RAM_MAX_BYTES               ((size_t)0)   /* never in PSRAM mode */
+#define RAM_MARGIN_BYTES            ((size_t)0)
+#endif
 
 /* Hashing uses PSA Crypto (Mbed TLS 4 / TF-PSA-Crypto in IDF v6.x); the
  * legacy mbedtls_sha256_* API is private there. */
@@ -45,7 +54,13 @@ struct pkg_store_writer {
 };
 
 static const esp_partition_t *s_part;
-static bool s_absent;   /* pkg_store_init found no partition (the board has none), not a failure */
+static bool s_absent;   /* pkg_store_init found no package area: no partition and no PSRAM staging */
+
+/* PSRAM staging (a board without the partition): the payload in one buffer, the header in s_hdr only. */
+static bool s_ram_mode;
+static uint8_t *s_ram;           /* the payload being written or staged, NULL = none */
+static const uint8_t *s_borrowed;/* the buffer the flasher holds (pkg_store_borrow), NULL = none */
+static uint8_t *s_orphan;        /* released while borrowed: freed when it comes back */
 static SemaphoreHandle_t s_mutex;
 static pkg_hdr_t s_hdr;          /* current state (valid when s_have_hdr) */
 static bool s_have_hdr;
@@ -107,6 +122,11 @@ static esp_err_t load_header(void)
 /* Erase the header sector: the slot is empty from here on. Call locked. */
 static esp_err_t erase_header(void)
 {
+    if (s_ram_mode) {
+        s_have_hdr = false;
+        memset(&s_hdr, 0, sizeof(s_hdr));
+        return ESP_OK;
+    }
     esp_err_t err = esp_partition_erase_range(s_part, 0, PKG_HDR_SECTOR_SIZE);
     if (err == ESP_OK) {
         s_have_hdr = false;
@@ -125,6 +145,11 @@ static esp_err_t append_header(const pkg_hdr_t *h)
 {
     pkg_hdr_t rec = *h;
     rec.seq = s_have_hdr ? s_hdr.seq + 1u : 1u;
+    if (s_ram_mode) {
+        s_hdr = rec;   /* kept until the next start only */
+        s_have_hdr = true;
+        return ESP_OK;
+    }
     uint8_t buf[PKG_HDR_RECORD_SIZE];
     uint8_t back[PKG_HDR_RECORD_SIZE];
     esp_err_t err = ESP_FAIL;
@@ -158,8 +183,25 @@ static esp_err_t append_header(const pkg_hdr_t *h)
     return err;
 }
 
+/* Let go of the PSRAM payload (the slot is empty): freed now, or when the flasher returns it. Call locked. */
+static void ram_drop(void)
+{
+    if (s_ram == NULL) {
+        return;
+    }
+    if (s_ram == s_borrowed) {
+        s_orphan = s_ram;
+    } else {
+        heap_caps_free(s_ram);
+    }
+    s_ram = NULL;
+}
+
 static esp_err_t append_state(uint8_t state, bool pinned)
 {
+    if (state == PKG_HDR_EMPTY) {
+        ram_drop();
+    }
     pkg_hdr_t h = s_hdr;
     h.state = state;
     h.pinned = pinned;
@@ -179,7 +221,7 @@ static void writer_close(void)
     memset(&s_writer, 0, sizeof(s_writer));
 }
 
-esp_err_t pkg_store_init(void)
+static esp_err_t init_impl(bool no_partition)
 {
     if (s_mutex == NULL) {
         s_mutex = xSemaphoreCreateMutex();
@@ -192,14 +234,28 @@ esp_err_t pkg_store_init(void)
     }
     lock();
     writer_close();   /* a write cut short by a reboot left the slot empty */
+    ram_drop();
     s_have_hdr = false;
+    memset(&s_hdr, 0, sizeof(s_hdr));
     s_next_slot = 0;
-    s_part = esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE, PKG_STORE_PARTITION_LABEL);
+    s_ram_mode = false;
+    s_absent = false;
+    s_part = no_partition ? NULL
+                          : esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE,
+                                                     PKG_STORE_PARTITION_LABEL);
     if (s_part == NULL) {
+        /* A partition table without one (a board with 8 MB flash): the package is staged in PSRAM. */
+#if CONFIG_PKG_STORE_RAM
+        s_ram_mode = true;
+        unlock();
+        ESP_LOGI(TAG, "no partition '%s' on this board: receiver packages are staged in PSRAM (up to %u KB, "
+                      "not kept over a restart)",
+                 PKG_STORE_PARTITION_LABEL, (unsigned)(pkg_store_capacity() / 1024));
+#else
         s_absent = true;
         unlock();
-        /* A partition table without one (a board with 8 MB flash): receiver packages cannot be kept. */
         ESP_LOGI(TAG, "no partition '%s' on this board: receiver packages cannot be staged", PKG_STORE_PARTITION_LABEL);
+#endif
         return ESP_OK;
     }
     if (s_part->size <= PKG_STORE_HEADER_SIZE) {
@@ -225,13 +281,71 @@ esp_err_t pkg_store_init(void)
     return ESP_OK;
 }
 
+esp_err_t pkg_store_init(void)
+{
+    return init_impl(false);
+}
+
+esp_err_t pkg_store_init_ram(void)
+{
+    return init_impl(true);
+}
+
 bool pkg_store_absent(void)
 {
     return s_absent;
 }
 
+bool pkg_store_partition_present(void)
+{
+    return esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE, PKG_STORE_PARTITION_LABEL) !=
+           NULL;
+}
+
+bool pkg_store_in_ram(void)
+{
+    return s_ram_mode;
+}
+
+const uint8_t *pkg_store_borrow(uint32_t *len)
+{
+    if (!s_ram_mode || s_mutex == NULL) {
+        return NULL;
+    }
+    lock();
+    const uint8_t *p = NULL;
+    if (staged_valid() && s_ram != NULL && s_borrowed == NULL) {
+        p = s_ram;
+        s_borrowed = s_ram;
+        if (len != NULL) {
+            *len = s_hdr.size;
+        }
+    }
+    unlock();
+    return p;
+}
+
+void pkg_store_return(const uint8_t *p)
+{
+    if (p == NULL || s_mutex == NULL) {
+        return;
+    }
+    lock();
+    if (p == s_borrowed) {
+        s_borrowed = NULL;
+        if (p == s_orphan) {
+            heap_caps_free(s_orphan);
+            s_orphan = NULL;
+        }
+    }
+    unlock();
+}
+
 size_t pkg_store_capacity(void)
 {
+    if (s_ram_mode) {
+        return RAM_MAX_BYTES;
+    }
     if (s_part == NULL || s_part->size <= PKG_STORE_HEADER_SIZE) {
         return 0;
     }
@@ -244,7 +358,7 @@ esp_err_t pkg_store_get_info(pkg_store_info_t *out)
         return ESP_ERR_INVALID_ARG;
     }
     memset(out, 0, sizeof(*out));
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_NOT_FOUND;
     }
     lock();
@@ -253,13 +367,31 @@ esp_err_t pkg_store_get_info(pkg_store_info_t *out)
     return out->valid ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
+/* The PSRAM buffer for a package of `size` bytes, when PSRAM keeps its margin beside it. Call locked. */
+static esp_err_t ram_alloc(uint32_t size)
+{
+#if CONFIG_IDF_TARGET_LINUX
+    s_ram = malloc(size);
+#else
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    size_t margin = RAM_MARGIN_BYTES;
+    if (largest < (size_t)size + margin) {
+        ESP_LOGW(TAG, "PSRAM: %u KB in one block, a package of %u KB needs %u KB more beside it: not staged",
+                 (unsigned)(largest / 1024), (unsigned)(size / 1024), (unsigned)(margin / 1024));
+        return ESP_ERR_NO_MEM;
+    }
+    s_ram = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    return s_ram != NULL ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
 esp_err_t pkg_store_begin(uint32_t size, const uint8_t expected_sha256[32], pkg_store_writer_t *out)
 {
     if (out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
     *out = NULL;
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_INVALID_STATE;
     }
     if (size == 0 || size > pkg_store_capacity()) {
@@ -277,9 +409,18 @@ esp_err_t pkg_store_begin(uint32_t size, const uint8_t expected_sha256[32], pkg_
         unlock();
         return err;
     }
+    if (s_ram_mode) {
+        ram_drop();
+        err = ram_alloc(size);
+        if (err != ESP_OK) {
+            unlock();
+            return err;
+        }
+    }
     memset(&s_writer, 0, sizeof(s_writer));
     s_writer.hash = psa_hash_operation_init();
     if (psa_hash_setup(&s_writer.hash, PSA_ALG_SHA_256) != PSA_SUCCESS) {
+        ram_drop();
         unlock();
         return ESP_FAIL;
     }
@@ -313,6 +454,19 @@ esp_err_t pkg_store_write(pkg_store_writer_t w, const void *data, size_t len)
     }
     esp_err_t err = ESP_OK;
     uint32_t end = s_writer.written + (uint32_t)len;
+    if (s_ram_mode) {
+        if (len > 0) {
+            memcpy(s_ram + s_writer.written, data, len);
+            if (psa_hash_update(&s_writer.hash, data, len) != PSA_SUCCESS) {
+                err = ESP_FAIL;
+            }
+        }
+        if (err == ESP_OK) {
+            s_writer.written = end;
+        }
+        unlock();
+        return err;
+    }
     /* Erase ahead, one sector at a time (never a long block erase). */
     while (err == ESP_OK && s_writer.erased < end) {
         err = esp_partition_erase_range(s_part, PKG_STORE_HEADER_SIZE + s_writer.erased, PKG_STORE_ERASE_SIZE);
@@ -371,6 +525,9 @@ esp_err_t pkg_store_finish(pkg_store_writer_t w, const char *version, pkg_store_
     }
     /* psa_hash_finish ends the operation whatever it returns; abort is harmless after it. */
     writer_close();
+    if (err != ESP_OK) {
+        ram_drop();   /* the slot stays empty */
+    }
     if (err == ESP_OK && out != NULL) {
         fill_info(out);
     }
@@ -389,6 +546,7 @@ void pkg_store_abort(pkg_store_writer_t w)
     lock();
     if (w == &s_writer) {
         writer_close();
+        ram_drop();
     }
     unlock();
 }
@@ -398,7 +556,7 @@ esp_err_t pkg_store_read(uint32_t offset, void *buf, size_t len)
     if (buf == NULL && len > 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_NOT_FOUND;
     }
     lock();
@@ -407,6 +565,8 @@ esp_err_t pkg_store_read(uint32_t offset, void *buf, size_t len)
         err = ESP_ERR_NOT_FOUND;
     } else if (offset > s_hdr.size || len > s_hdr.size - offset) {
         err = ESP_ERR_INVALID_SIZE;
+    } else if (len > 0 && s_ram_mode) {
+        memcpy(buf, s_ram + offset, len);
     } else if (len > 0) {
         err = esp_partition_read(s_part, PKG_STORE_HEADER_SIZE + offset, buf, len);
     }
@@ -416,7 +576,7 @@ esp_err_t pkg_store_read(uint32_t offset, void *buf, size_t len)
 
 esp_err_t pkg_store_verify(void)
 {
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_NOT_FOUND;
     }
     uint8_t *buf = malloc(VERIFY_CHUNK);
@@ -436,7 +596,11 @@ esp_err_t pkg_store_verify(void)
     }
     for (uint32_t off = 0; err == ESP_OK && off < s_hdr.size; off += VERIFY_CHUNK) {
         size_t n = (s_hdr.size - off) < VERIFY_CHUNK ? (s_hdr.size - off) : VERIFY_CHUNK;
-        err = esp_partition_read(s_part, PKG_STORE_HEADER_SIZE + off, buf, n);
+        if (s_ram_mode) {
+            memcpy(buf, s_ram + off, n);
+        } else {
+            err = esp_partition_read(s_part, PKG_STORE_HEADER_SIZE + off, buf, n);
+        }
         if (err == ESP_OK && psa_hash_update(&op, buf, n) != PSA_SUCCESS) {
             err = ESP_FAIL;
         }
@@ -466,7 +630,7 @@ esp_err_t pkg_store_verify(void)
 
 esp_err_t pkg_store_set_pinned(bool pinned)
 {
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_NOT_FOUND;
     }
     lock();
@@ -482,7 +646,7 @@ esp_err_t pkg_store_set_pinned(bool pinned)
 
 esp_err_t pkg_store_invalidate(void)
 {
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_INVALID_STATE;
     }
     lock();
@@ -499,9 +663,9 @@ esp_err_t pkg_store_invalidate(void)
 esp_err_t pkg_store_release(void)
 {
     if (s_absent) {
-        return ESP_OK;   /* no partition: nothing can be staged */
+        return ESP_OK;   /* no package area: nothing can be staged */
     }
-    if (s_part == NULL) {
+    if (s_part == NULL && !s_ram_mode) {
         return ESP_ERR_INVALID_STATE;
     }
     lock();

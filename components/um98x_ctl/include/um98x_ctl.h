@@ -223,8 +223,8 @@ esp_err_t um98x_ctl_get_info(um98x_info_t *out);
 
 /**
  * True for a model this firmware configures: exactly "UM982", or "UM980"
- * (UNTESTED: configured from the N4 manual, never on hardware). Receiver
- * firmware updates stay UM982 only (their own package checks).
+ * (in testing: configured from the N4 manual, on the NTRIP-X). Receiver
+ * firmware updates check their own list (um98x_flash_model_supported).
  */
 bool um98x_ctl_model_supported(const um98x_info_t *info);
 

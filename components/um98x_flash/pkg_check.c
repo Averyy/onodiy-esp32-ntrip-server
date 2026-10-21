@@ -26,27 +26,47 @@ static const blk_rule_t k_order[PKG_BLOCKS] = {
     { 6, 0x10000000u, 0xE0u },
 };
 
+const pkg_model_t pkg_models[PKG_MODELS] = {
+    { "UM982", 0x40u, 660000000u },
+    { "UM980", 0x41u, 0u },
+};
+
+const pkg_model_t *pkg_model_find(const char *name)
+{
+    for (unsigned i = 0; name != NULL && i < PKG_MODELS; i++) {
+        if (strcmp(pkg_models[i].model, name) == 0) {
+            return &pkg_models[i];
+        }
+    }
+    return NULL;
+}
+
+#define LAYOUT_13495                                                                                                   \
+    { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,      \
+      0x00018000u },                                                                                                   \
+    { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x00680000u, 0x0001F000u, 0x00460000u, 0x0002F000u,      \
+      0x00018000u }
+#define LAYOUT_18975                                                                                                   \
+    { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,      \
+      0x00018000u },                                                                                                   \
+    { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x006C0000u, 0x0001F000u, 0x00460000u, 0x0002F000u,      \
+      0x00018000u }
+
 /* Known-good partition tables. The 18975 table is read from that package, and
  * the 23575 package carries the same one; the 13495 table differs only in the
- * type-4 backup address (PROVISIONAL, to be confirmed on hardware with a 13495
- * package). Two builds may share a table: rule 12 compares the tables. */
+ * type-4 backup address (PROVISIONAL for the UM982, derived; UM980 builds 10110
+ * and 11833 carry exactly it in their own files, and 23980 and 25735 the 18975
+ * one). Two builds may share a table: rule 12 compares the tables. */
 const pkg_layout_t pkg_known_layouts[PKG_KNOWN_LAYOUTS] = {
-    { 13495u,
-      { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,
-        0x00018000u },
-      { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x00680000u, 0x0001F000u, 0x00460000u, 0x0002F000u,
-        0x00018000u } },
-    { 18975u,
-      { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,
-        0x00018000u },
-      { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x006C0000u, 0x0001F000u, 0x00460000u, 0x0002F000u,
-        0x00018000u } },
-    { 23575u,
-      { 0x00000000u, 0x0001C000u, 0x0001A000u, 0x00030000u, 0x00680000u, 0x0001E000u, 0x00240000u, 0x0002F000u,
-        0x00018000u },
-      { 0x00020000u, 0x0001C000u, 0x0001B000u, 0x00138000u, 0x006C0000u, 0x0001F000u, 0x00460000u, 0x0002F000u,
-        0x00018000u } },
+    { "UM982", 13495u, LAYOUT_13495 },
+    { "UM982", 18975u, LAYOUT_18975 },
+    { "UM982", 23575u, LAYOUT_18975 },
+    { "UM980", 10110u, LAYOUT_13495 },
+    { "UM980", 11833u, LAYOUT_13495 },
+    { "UM980", 23980u, LAYOUT_18975 },
+    { "UM980", 25735u, LAYOUT_18975 },
 };
+
 
 /* Two known tables with the same addresses (builds that share a layout). */
 static bool same_layout(int a, int b)
@@ -92,19 +112,23 @@ int pkg_layout_for_build(uint32_t build)
     return -1;
 }
 
-/* Index of the known table equal to the 72 table bytes, -1 none. */
-static int layout_of_table(const uint8_t *t)
+/* Index of the known table equal to the 72 table bytes, -1 none; among equal ones, the first of `model` (NULL: any). */
+static int layout_of_table(const uint8_t *t, const char *model)
 {
+    int any = -1;
     for (unsigned i = 0; i < PKG_KNOWN_LAYOUTS; i++) {
         bool same = true;
         for (unsigned k = 0; k < PKG_TYPES && same; k++) {
             same = fl_le32(t + 8u * k) == pkg_known_layouts[i].a[k] && fl_le32(t + 8u * k + 4u) == pkg_known_layouts[i].b[k];
         }
-        if (same) {
+        if (same && (model == NULL || strcmp(pkg_known_layouts[i].model, model) == 0)) {
             return (int)i;
         }
+        if (same && any < 0) {
+            any = (int)i;
+        }
     }
-    return -1;
+    return any;
 }
 
 /* ---- facts ------------------------------------------------------------------ */
@@ -134,7 +158,7 @@ void pkg_inspect(pkg_read_t read, void *ctx, uint32_t len, pkg_facts_t *out)
                 out->model[n] = '\0';
             }
         }
-        int l = layout_of_table(head + PKG_TABLE_OFF);
+        int l = layout_of_table(head + PKG_TABLE_OFF, out->model[0] != '\0' ? out->model : NULL);
         out->layout = (int8_t)l;
         out->layout_build = l >= 0 ? pkg_known_layouts[l].build : 0;
     }
@@ -410,7 +434,7 @@ static uint8_t rule7(const uint8_t *p, pkg_check_out_t *out)
     if (fl_le32(p + PKG_BOOT_BAUD_OFF) != PKG_BOOT_BAUD) {
         return fail(out, 7, "loader baud %u, not %u", (unsigned)fl_le32(p + PKG_BOOT_BAUD_OFF), (unsigned)PKG_BOOT_BAUD);
     }
-    if (layout_of_table(p + PKG_TABLE_OFF) < 0) {
+    if (layout_of_table(p + PKG_TABLE_OFF, NULL) < 0) {
         return fail(out, 7, "partition table is not one of the known ones");
     }
     return 0;
@@ -423,12 +447,13 @@ static uint8_t rule8(const uint8_t *p, const pkg_check_in_t *in, pkg_check_out_t
     if (nul == NULL) {
         return fail(out, 8, "model field has no terminator");
     }
-    size_t n = (size_t)(nul - m);
-    if (n != strlen(PKG_MODEL) || memcmp(m, PKG_MODEL, n) != 0) {
-        return fail(out, 8, "package model is not %s", PKG_MODEL);
+    char model[PKG_MODEL_LEN];
+    memcpy(model, m, (size_t)(nul - m) + 1u);
+    if (pkg_model_find(model) == NULL) {
+        return fail(out, 8, "package model \"%.15s\" is not one the station flashes", model);
     }
-    if (in->live_model == NULL || strlen(in->live_model) != n || memcmp(in->live_model, m, n) != 0) {
-        return fail(out, 8, "package model %s, receiver reports \"%s\"", PKG_MODEL,
+    if (in->live_model == NULL || strcmp(in->live_model, model) != 0) {
+        return fail(out, 8, "package model %s, receiver reports \"%s\"", model,
                     in->live_model != NULL ? in->live_model : "(nothing)");
     }
     return 0;
@@ -436,21 +461,29 @@ static uint8_t rule8(const uint8_t *p, const pkg_check_in_t *in, pkg_check_out_t
 
 static uint8_t rule9(const uint8_t *p, const chain_t *c, pkg_check_out_t *out)
 {
+    char model[PKG_MODEL_LEN];
+    memcpy(model, p + PKG_MODEL_OFF, PKG_MODEL_LEN);
+    model[PKG_MODEL_LEN - 1] = '\0';   /* rule 8 found the terminator */
+    const pkg_model_t *mk = pkg_model_find(model);
+    if (mk == NULL) {
+        return fail(out, 9, "no product tags known for model \"%.15s\"", model);
+    }
     for (unsigned i = 0; i < PKG_BLOCKS; i++) {
         uint8_t k = k_order[i].type;
         if (k == 0) {
             continue;
         }
-        if (p[c->off[i] + 0x1F] != PKG_UM982_TAG) {
-            return fail(out, 9, "type %u header tag %02x, not the UM982 tag", (unsigned)k,
-                        (unsigned)p[c->off[i] + 0x1F]);
+        if (p[c->off[i] + 0x1F] != mk->tag) {
+            return fail(out, 9, "type %u header tag %02x, not the %s tag", (unsigned)k, (unsigned)p[c->off[i] + 0x1F],
+                        mk->model);
         }
     }
-    if (p[PKG_TAG_BYTE_OFF] != PKG_UM982_TAG) {
-        return fail(out, 9, "boot configuration tag %02x, not the UM982 tag", (unsigned)p[PKG_TAG_BYTE_OFF]);
+    if (p[PKG_TAG_BYTE_OFF] != mk->tag) {
+        return fail(out, 9, "boot configuration tag %02x, not the %s tag", (unsigned)p[PKG_TAG_BYTE_OFF], mk->model);
     }
-    if (fl_le32(p + PKG_TAG_WORD_OFF) != PKG_TAG_WORD) {
-        return fail(out, 9, "boot configuration word %u, not the UM982 value", (unsigned)fl_le32(p + PKG_TAG_WORD_OFF));
+    if (fl_le32(p + PKG_TAG_WORD_OFF) != mk->tag_word) {
+        return fail(out, 9, "boot configuration word %u, not the %s value", (unsigned)fl_le32(p + PKG_TAG_WORD_OFF),
+                    mk->model);
     }
     return 0;
 }

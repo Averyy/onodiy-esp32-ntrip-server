@@ -574,7 +574,24 @@ TEST_CASE("flash view: record only for an open readable journal, actions listed"
     TEST_ASSERT_EQUAL_STRING("not_available_yet", at(at(acts, "retry"), "why")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(acts, "clear"), "allowed")));
     TEST_ASSERT_TRUE(cJSON_IsNull(at(at(acts, "clear"), "why")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "package_needed")));   /* the package is staged (or on the partition) */
     cJSON_Delete(root);
+
+    /* PSRAM staging: the restart lost the package; whether the release still has it. */
+    c.package_needed = true;
+    c.package_in_release = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "package_needed"), "in_release")));
+    cJSON_Delete(root);
+    c.package_in_release = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "package_needed"), "in_release")));
+    cJSON_Delete(root);
+    c.package_needed = false;
 
     st.flash_journal_readable = false;
     c.journal = web_journal_view(&st, false);

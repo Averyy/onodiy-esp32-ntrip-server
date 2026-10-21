@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked` |
+| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -1381,6 +1381,7 @@ it is open. `journal` (here and in `/api/status`):
                "journal_state": "needs_user"},
   "receiver_in_loader": false,
   "receiver_text": "...last 4 KB of receiver text...",
+  "package_needed": null,
   "actions": {"retry": {"allowed": false, "why": "app_trial"},
               "restart_receiver": {"allowed": true, "why": null},
               "clear": {"allowed": true, "why": null}},
@@ -1409,9 +1410,25 @@ in builds without receiver flashing (`CONFIG_UM98X_FLASH_ENABLE` off), then
 `flash_reason` is `not_enabled_in_build` and the UI says that receiver
 firmware updates are not enabled in this build yet; `false` too with the
 receiver wired by another port than COM1 (`flash_reason` `receiver_port`);
-packages can still be uploaded and checked. On a board without a package
-partition (`flash_reason` `no_package_area`, the NTRIP-X) nothing can be
-uploaded: `pkg_max_bytes` is `null` and an upload is refused with `413`.
+packages can still be uploaded and checked. A board without a package
+partition (8 MB flash: the NTRIP-X) stages the package in PSRAM instead
+(`CONFIG_PKG_STORE_RAM`, `pkg_max_bytes` 3670016); only with that off is
+there no package area at all (`flash_reason` `no_package_area`,
+`pkg_max_bytes` `null`, an upload refused with `413`).
+
+`package_needed` (PSRAM staging only): the session waits for the user and
+its package is gone, since a package staged in PSRAM does not survive a
+restart; `null` otherwise. `{"in_release": true}`: the release manifest
+still has the journal's package (its model, size and SHA-256), and the
+retry (`POST /api/gnss/flash/retry`) downloads it again first (`202`,
+`update.state` `downloading_gnss`), checks it and pins it, then retries.
+`{"in_release": false}`: upload the same package (`POST /api/upload/gnss`
+is accepted while the journal waits for it); its confirmation
+(`POST /api/upload/gnss/confirm`), or a retry with it staged, pins it for
+the journal and starts the retry (`202`; another package: `409
+sha256_mismatch` with `reason` `not_journal_package`, and it is released).
+An upload not confirmed yet does not end the wait (`package_needed`
+stays); a retry without any package staged answers `409 package_needed`.
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
 (only `clear` there), `settings_unavailable`, `receiver_maintenance` (retry
@@ -2109,7 +2126,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
 | `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: the rest of the trial (confirmation plus crash watch; for a reinstall of the running image the confirmation only) |
-| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `no_package_area` (the board's partition table has no receiver package partition: a board with 8 MB flash such as the NTRIP-X; `pkg_max_bytes` is then `null`, no receiver build is offered and an upload is refused), `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
+| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `no_package_area` (no package area at all: the board's partition table has no receiver package partition and PSRAM staging, `CONFIG_PKG_STORE_RAM`, is off; `pkg_max_bytes` is then `null`, no receiver build is offered and an upload is refused; with PSRAM staging on, the default, a board with 8 MB flash such as the NTRIP-X stages the package in PSRAM), `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
 ### `GET /api/update` (adm)
@@ -2146,7 +2163,7 @@ until a newer version appears; the server keeps no "later" state.
 | `last_check_result` | how that check went (`fw_update_check_result_t`): `ok`, `no_release` (HTTP 404: no public release with a manifest at `release_repo`), `http_error` (another status: `last_http_status`), `no_response` (offline, DNS, TLS, timeout, no trusted clock yet; retried after 1 h), `untrusted_redirect`, `bad_manifest` (an answer, but no manifest this build accepts); `null` before the first check of this boot. A field of its own because `last_result` already names job outcomes |
 | `last_http_status` | the check's final HTTP status, `null` when no answer came |
 | `next_check_in_s` | until the next automatic check is due (`0` = due, it waits for the network), `null` when this build cannot check |
-| `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it. `pkg_max_bytes` is `null` on a board without a receiver package partition (`gnss_flash_reason` `no_package_area`): the UI offers no package upload there, and `POST /api/upload/gnss` answers `413 too_large` |
+| `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it. On a board without a receiver package partition the package is staged in PSRAM: `pkg_max_bytes` is `CONFIG_PKG_STORE_RAM_MAX_KB` (3670016), and a package is staged only when PSRAM has a free block that large plus `CONFIG_PKG_STORE_RAM_MARGIN_KB` (else the upload or download fails). `null` only without any package area (`gnss_flash_reason` `no_package_area`): the UI offers no package upload there, and `POST /api/upload/gnss` answers `413 too_large` |
 | `running_elf_sha256` | the running app's ELF SHA-256 (`esp_app_desc_t.app_elf_sha256`): an app image with the same one is the code running now |
 | `app.latest` | the latest release's version, `null` before a check found one; the last check's manifest is kept over a restart (`ota/manifest`), so a restart does not forget it |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching`; `left_s` is the stage's time left, `ends_in_s` the whole trial's (to the crash watch's end; both 0 without a trial) |

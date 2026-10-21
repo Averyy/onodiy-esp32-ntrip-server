@@ -16,8 +16,8 @@
 # ota_0/1   2.5 MB each, 64 KB aligned: the size limit of every app build
 #           (CI fails a larger one; the 16 MB slots are 4 MB).
 #           No package partition: there is no room for a receiver package
-#           (up to 3 MB). Staging the package in PSRAM instead is planned;
-#           until then pkg_store has capacity 0 and receiver updates are off.
+#           (up to 3 MB): pkg_store stages it in PSRAM instead
+#           (CONFIG_PKG_STORE_RAM), not kept over a restart.
 # journal   128 KB raw event journal (custom type 0x40, subtype 0x01), as on 16 MB.
 # coredump  128 KB (16 MB: 256 KB): ELF core dumps without full DRAM capture.
 # board.um980-ntrx  the board marker (custom type 0x40, subtype 0x02, one empty

@@ -2801,7 +2801,7 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert ("On (default): the receiver sends where each satellite is every 10s, so the Receiver page shows them "
             "on a sky map. Off: no sky map.") in settings["hints"]
     # Opened: the station ID, the link speed, the antenna model and Apply again; still open once the forms rebuild.
-    # A UM980 (untested): its own groups, group 2 the default, no UM982 pairs and no comparison.
+    # A UM980 (in testing): its own groups, group 2 the default, no UM982 pairs and no comparison.
     u = out["settings_um980"]
     assert "2 All signals (default)" in u["choices"] and "1 Factory setting" in u["choices"]
     assert not any(c.startswith("3 6") for c in u["choices"])

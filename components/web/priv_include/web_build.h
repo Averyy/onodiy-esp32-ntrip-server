@@ -94,6 +94,8 @@ typedef struct {
     bool flash_available;      /**< receiver flashing is built */
     const char *flash_reason;  /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     bool maintenance;          /**< receiver maintenance: nothing is sent to the receiver */
+    bool package_needed;       /**< the waiting journal's package is gone (PSRAM staging, a restart): a retry stages it again */
+    bool package_in_release;   /**< ... and the release manifest has it: the retry downloads it (else: upload it again) */
 } web_flash_ctx_t;
 
 typedef enum {

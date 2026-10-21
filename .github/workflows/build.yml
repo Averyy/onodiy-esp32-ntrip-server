@@ -364,7 +364,8 @@ jobs:
 
   # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
   # the app image the firmware job built as that release version, the receiver
-  # package(s) from firmware/um982/ and manifest.json listing each with its
+  # packages listed in firmware/release-packages.txt (at most 4: stations up to
+  # v0.1.5 refuse a manifest with more) and manifest.json listing each with its
   # size and SHA-256 (tools/release_manifest.py; signed only when the
   # MANIFEST_SIGNING_KEY secret is set), plus the files for a first flash
   # over USB (one image per board's flash size, tools/ci/install_files.sh,
@@ -433,9 +434,10 @@ jobs:
             move_args=(--move-to "$RELEASE_MOVE_TO")
           fi
           mkdir -p release
+          mapfile -t gnss < firmware/release-packages.txt
           python3 tools/release_manifest.py --version "$TAG" \
             --app artifact/build/onodiy-esp32-ntrip-server.bin \
-            --gnss firmware/um982/*.pkg \
+            --gnss "${gnss[@]}" \
             --sdkconfig-json artifact/build/config/sdkconfig.json \
             --repo "$GITHUB_REPOSITORY" \
             --out release/manifest.json ${sign_args[@]+"${sign_args[@]}"} ${move_args[@]+"${move_args[@]}"}
@@ -504,9 +506,10 @@ jobs:
             echo "esptool --chip esp32s3 write-flash $settings $flash"
             echo '```'
           } > "$RUNNER_TEMP/notes.md"
+          mapfile -t gnss < firmware/release-packages.txt
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TAG" \
             --notes-file "$RUNNER_TEMP/notes.md" ${pre[@]+"${pre[@]}"} \
-            "$a/onodiy-esp32-ntrip-server.bin" firmware/um982/*.pkg release/manifest.json \
+            "$a/onodiy-esp32-ntrip-server.bin" "${gnss[@]}" release/manifest.json \
             "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
             artifact/install/partition-table-8mb.bin artifact/install/onodiy-install-16mb.bin \
             artifact/install/onodiy-install-um980-ntrx.bin artifact/THIRD_PARTY_NOTICES.md
@@ -571,7 +574,8 @@ jobs:
           base="https://github.com/$GITHUB_REPOSITORY/releases"
           check "$base/download/$TAG/manifest.json"
           check "$base/download/$TAG/onodiy-esp32-ntrip-server.bin"
-          for pkg in firmware/um982/*.pkg; do
+          mapfile -t gnss < firmware/release-packages.txt
+          for pkg in "${gnss[@]}"; do
             check "$base/download/$TAG/$(basename "$pkg")"
           done
           case "$TAG" in

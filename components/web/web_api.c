@@ -1055,6 +1055,9 @@ static void flash_ctx(const station_status_t *st, web_flash_ctx_t *c)
     c->flash_available = WEB_FLASH_AVAILABLE;
     c->flash_reason = WEB_FLASH_REASON;
     c->maintenance = st->rx_maintenance;
+    um98x_flash_journal_t j;
+    c->package_needed = station_flash_waits_for_package(&j);
+    c->package_in_release = c->package_needed && fw_update_has_journal_package();
 }
 
 static esp_err_t h_flash_get(web_req_t *r)
@@ -1086,7 +1089,28 @@ static esp_err_t flash_action(web_req_t *r, web_flash_action_t a, station_flash_
     if (web_flash_action_why(&ctx, a, &e) != NULL) {
         return web_send_err(r->req, e);
     }
-    esp_err_t err = station_flash_user_action(sa);
+    esp_err_t err;
+    pkg_store_info_t staged;
+    if (a == WEB_FLASH_RETRY && ctx.package_needed && pkg_store_get_info(&staged) == ESP_OK && staged.valid) {
+        /* Uploaded and not confirmed: checked against the journal (its own: pinned, retried; another: released). */
+        err = station_flash_retry_restaged();
+        web_staged_forget();
+        if (err == ESP_ERR_INVALID_CRC) {
+            return web_send_error(r->req, WEB_ERR_SHA256_MISMATCH, "This is not the package of the interrupted update.",
+                                  NULL, UINT32_MAX, NULL, "not_journal_package");
+        }
+    } else if (a == WEB_FLASH_RETRY && ctx.package_needed) {
+        /* Staged in PSRAM, the package did not survive the restart: the release's copy first, then the retry. */
+        err = fw_update_restage_gnss();
+        if (err == ESP_ERR_NOT_FOUND) {
+            return web_send_err(r->req, WEB_ERR_PACKAGE_NEEDED);
+        }
+        if (err == ESP_ERR_INVALID_STATE) {
+            return web_send_err(r->req, WEB_ERR_BUSY);
+        }
+    } else {
+        err = station_flash_user_action(sa);
+    }
     switch (err) {
     case ESP_OK:
         if (a == WEB_FLASH_CLEAR) {
@@ -2041,6 +2065,30 @@ static esp_err_t h_upload_gnss_confirm(web_req_t *r)
     }
     if (memcmp(sha, facts.sha256, sizeof(sha)) != 0) {
         return web_send_err(r->req, WEB_ERR_SHA256_MISMATCH);
+    }
+    /* The upload for an interrupted update whose package was staged in PSRAM: it must be that package, which the
+     * station pins for its journal before the user's retry (the other fields are the journal's, not these). */
+    station_snapshot(&s_st);
+    if (pkg_store_in_ram() && web_journal_view(&s_st, lifecycle_in_safe_mode()) == WEB_JOURNAL_WAITING) {
+        esp_err_t rerr = station_flash_retry_restaged();
+        web_staged_forget();
+        if (rerr == ESP_OK) {
+            ESP_LOGW(TAG, "uploaded receiver package: the interrupted update's own, retried");
+            return accepted(r->req);
+        }
+        if (rerr == ESP_ERR_INVALID_CRC) {
+            return web_send_error(r->req, WEB_ERR_SHA256_MISMATCH, "This is not the package of the interrupted update.",
+                                  NULL, UINT32_MAX, NULL, "not_journal_package");
+        }
+        pkg_store_info_t left;
+        if (pkg_store_get_info(&left) == ESP_OK && !left.pinned) {
+            (void)pkg_store_release();   /* not taken for the journal: nothing stays staged without a session */
+        }
+        /* Pinned for the journal but not retried now (maintenance, an app update or trial): Retry later. */
+        return web_send_err(r->req, rerr == ESP_ERR_NOT_SUPPORTED   ? WEB_ERR_NOT_AVAILABLE_YET
+                                    : web_rx_hands_off()            ? WEB_ERR_RECEIVER_MAINTENANCE
+                                    : lifecycle_app_trial_active() ? WEB_ERR_APP_TRIAL
+                                                                    : WEB_ERR_NOT_WAITING);
     }
     station_snapshot(&s_st);
     if (s_st.receiver.valid && s_st.receiver.build != 0 && build < s_st.receiver.build) {

@@ -1532,6 +1532,13 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
     wj_obj_close(w);
     wj_bool(w, "receiver_in_loader", ctx->receiver_in_loader);
     wj_str(w, "receiver_text", receiver_text != NULL ? receiver_text : "");
+    if (ctx->package_needed) {
+        wj_obj_open(w, "package_needed");
+        wj_bool(w, "in_release", ctx->package_in_release);
+        wj_obj_close(w);
+    } else {
+        wj_null(w, "package_needed");
+    }
     wj_obj_open(w, "actions");
     action(w, "retry", ctx, WEB_FLASH_RETRY);
     action(w, "restart_receiver", ctx, WEB_FLASH_RESTART_RECEIVER);

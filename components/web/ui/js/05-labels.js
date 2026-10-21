@@ -276,7 +276,7 @@ const SG_CHOICES = [
   ['5 0', 'No L5', 'Low power, no L5 signals; second antenna off.', 'no L5'],
 ];
 const SG_RECOMMENDED = '3 6';
-/* A UM980's groups (one antenna input, one number; untested): the N4 manual's table. No UM982 pair uses these numbers. */
+/* A UM980's groups (one antenna input, one number; in testing): the N4 manual's table. No UM982 pair uses these numbers. */
 const SG980_CHOICES = [
   ['2', 'All signals', 'Both GPS L2 signals, L1C, GLONASS G3, Galileo E6 and NavIC.', 'all signals'],
   ['1', 'Factory setting', 'One GPS L2 signal; no Galileo E6.', 'factory'],
