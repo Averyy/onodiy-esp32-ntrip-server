@@ -741,10 +741,13 @@ static bool power_tick(void)
 }
 
 /* The ladder's reason in words, once when it changes. */
-/* Where the board's antenna goes, for the no-RTCM hints. */
+/* Where the board's antenna goes, for the no-RTCM hints (by the receiver's model on a board without a marker). */
 static const char *antenna_where(void)
 {
-    const char *a = board_get()->antenna;
+    const char *id;
+    const char *name;
+    const char *a;
+    board_shown(s_st.receiver.valid ? s_st.receiver.model : NULL, &id, &name, &a);
     return a != NULL ? a : "connected";
 }
 

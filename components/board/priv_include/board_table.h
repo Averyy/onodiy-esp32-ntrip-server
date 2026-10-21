@@ -84,13 +84,31 @@ typedef enum {
 } board_issue_t;
 
 typedef struct {
-    const board_entry_t *entry;        /**< the board (the original when the marker is not usable); never NULL */
+    const board_entry_t *entry;        /**< the board: the marked one (also when its flash size differs), the
+                                            original without a marker or with an unknown or second one; never NULL */
     board_from_t from;
     board_issue_t issue;
     bool trusted;                      /**< the entry's pins may be driven (issue is BOARD_OK or BOARD_NOTE_FLASH) */
     uint32_t flash_mb;                 /**< the chip's flash as read, 0 = not known */
     char why[112];                     /**< a sentence for the user when the link stays closed, else "" */
 } board_choice_t;
+
+/** How a board is shown (the API, the UI, the antenna hints). */
+typedef struct {
+    const char *id;
+    const char *name;
+    const char *antenna;               /**< NULL: no one place to name */
+} board_label_t;
+
+/**
+ * How the board is shown. A marked board as its entry. Without a marker the
+ * install is the same for every 16 MB board, so what it is shows at run
+ * time: with the user's own saved wiring "Other ESP32-S3 board"; with a
+ * UM980 (`model`, the receiver's, "" while unknown) the UM980 board; else
+ * the original UM982 board (every deployed station).
+ */
+void board_label(const board_entry_t *entry, board_from_t from, bool own_wiring, const char *model,
+                 board_label_t *out);
 
 /**
  * Pick the board: `dflt` without a marker, the marked board when the table

@@ -187,7 +187,7 @@ TEST_CASE("board choice: a marker on another flash size, an unknown or a second 
     TEST_ASSERT_EQUAL_PTR(orig(), c.entry);
     TEST_ASSERT_EQUAL(BOARD_BAD_TWO, c.issue);
     TEST_ASSERT_FALSE(c.trusted);
-    TEST_ASSERT_EQUAL_STRING("The partition table marks 2 boards. Install the firmware for this board again.", c.why);
+    TEST_ASSERT_EQUAL_STRING("The partition table marks more than one board. Install the firmware for this board again.", c.why);
     TEST_ASSERT_TRUE(strlen(c.why) < sizeof(c.why) - 1u);
 }
 
@@ -226,4 +226,33 @@ TEST_CASE("board wiring: the NTRIP-X's LEDs, status input and undriven pins are 
     w = (board_wiring_t){ .rx_gpio = 16, .tx_gpio = 41, .port = 1 };
     TEST_ASSERT_TRUE(board_wiring_problem(&w, uses, n, why, sizeof(why)));
     TEST_ASSERT_EQUAL_STRING("GPIO41 is wired to another part of the board.", why);
+}
+
+TEST_CASE("board label: a marked board as itself; without a marker by its wiring and receiver", "[board]")
+{
+    const board_entry_t *ntrx = board_table_find("um980-ntrx");
+    board_label_t l;
+    /* Marked: its entry, whatever the receiver or wiring. */
+    board_label(ntrx, BOARD_FROM_MARKER, true, "UM982", &l);
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", l.id);
+    TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", l.name);
+    TEST_ASSERT_EQUAL_STRING("on the port marked GNSS", l.antenna);
+    /* No marker, a UM982 or nothing known yet: the original board (every deployed station). */
+    board_label(orig(), BOARD_FROM_DEFAULT, false, "UM982", &l);
+    TEST_ASSERT_EQUAL_STRING("um982-alix", l.id);
+    TEST_ASSERT_EQUAL_STRING("on the socket marked M", l.antenna);
+    board_label(orig(), BOARD_FROM_DEFAULT, false, NULL, &l);
+    TEST_ASSERT_EQUAL_STRING("um982-alix", l.id);
+    board_label(orig(), BOARD_FROM_DEFAULT, false, "", &l);
+    TEST_ASSERT_EQUAL_STRING("UM982 board (AliExpress)", l.name);
+    /* A UM980 on the 16 MB install: the UM980 board, no socket named (it has one). */
+    board_label(orig(), BOARD_FROM_DEFAULT, false, "UM980", &l);
+    TEST_ASSERT_EQUAL_STRING("um980-alib", l.id);
+    TEST_ASSERT_EQUAL_STRING("UM980 board (Alibaba)", l.name);
+    TEST_ASSERT_NULL(l.antenna);
+    /* The user's own wiring: another board, whatever its receiver. */
+    board_label(orig(), BOARD_FROM_DEFAULT, true, "UM982", &l);
+    TEST_ASSERT_EQUAL_STRING("other", l.id);
+    TEST_ASSERT_EQUAL_STRING("Other ESP32-S3 board", l.name);
+    TEST_ASSERT_NULL(l.antenna);
 }

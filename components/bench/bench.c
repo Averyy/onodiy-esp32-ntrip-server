@@ -285,7 +285,7 @@ static int cmd_race_arm(int argc, char **argv)
     /* Maintenance is the hands-off mode (the receiver may be flashed over
      * its other port): the stop key at the next boot is not armed during it.
      * A maintenance started after arming is caught at that boot. */
-    static station_status_t st;
+    EXT_RAM_BSS_ATTR static station_status_t st;
     if (station_get_status(&st) == ESP_OK && st.rx_maintenance) {
         say("BENCH REFUSED: receiver maintenance is on (end it first)\n");
         return 1;
@@ -487,7 +487,7 @@ static int cmd_status(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    static station_status_t st;
+    EXT_RAM_BSS_ATTR static station_status_t st;
     if (station_get_status(&st) != ESP_OK) {
         say("BENCH no status\n");
         return 1;
@@ -525,7 +525,7 @@ static int cmd_capture(int argc, char **argv)
     }
     /* Skip to the last kb KB. */
     uint32_t cursor = 0;
-    static char buf[512];
+    EXT_RAM_BSS_ATTR static char buf[512];
     uint32_t total = 0;
     while (um98x_flash_capture_read(&cursor, buf, sizeof(buf)) > 0) {
     }
@@ -546,7 +546,7 @@ static int cmd_capture(int argc, char **argv)
  * maintenance, an open receiver update journal, another receiver session or job. */
 static bool link_free(void)
 {
-    static station_status_t st;
+    EXT_RAM_BSS_ATTR static station_status_t st;
     if (station_get_status(&st) != ESP_OK) {
         say("BENCH REFUSED: no station status\n");
         return false;
@@ -674,7 +674,7 @@ static void print_pct(const char *name, const gnss_link_pct_t *p, const char *un
 
 static int ftimes_dump(void)
 {
-    static char buf[1024];
+    EXT_RAM_BSS_ATTR static char buf[1024];
     int64_t off = 0;
     bool clock = sntp_clock(&off);
     gnss_link_timing_info_t info;
@@ -895,7 +895,7 @@ static int cmd_uartclose(int argc, char **argv)
 
 /* Internal blocks held by heapfrag (until "heapfrag free"). */
 #define FRAG_MAX 512u
-static void *s_frag[FRAG_MAX];
+EXT_RAM_BSS_ATTR static void *s_frag[FRAG_MAX];
 static unsigned s_frag_n;
 
 static void frag_free(void)
@@ -935,7 +935,7 @@ static int cmd_heapfrag(int argc, char **argv)
      * one is freed again, leaving holes of the target size between held
      * blocks; holes that merged are filled again until no free block is
      * larger than the target. */
-    static void *s_tmp[FRAG_MAX];
+    EXT_RAM_BSS_ATTR static void *s_tmp[FRAG_MAX];
     unsigned tmp_n = 0;
     while (heap_caps_get_largest_free_block(caps) > target && tmp_n < FRAG_MAX) {
         void *p = heap_caps_malloc(target, caps);
@@ -973,7 +973,7 @@ static int cmd_linkrestart(int argc, char **argv)
         say("usage: linkrestart   (the ladder's link restart now; nothing is sent to the receiver)\n");
         return 1;
     }
-    static station_status_t st;
+    EXT_RAM_BSS_ATTR static station_status_t st;
     if (station_get_status(&st) != ESP_OK) {
         say("BENCH REFUSED: no station status\n");
         return 1;

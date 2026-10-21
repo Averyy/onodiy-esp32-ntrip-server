@@ -87,6 +87,20 @@ const char *board_marker_id(const char *label)
     return label + n;
 }
 
+void board_label(const board_entry_t *entry, board_from_t from, bool own_wiring, const char *model,
+                 board_label_t *out)
+{
+    *out = (board_label_t){ entry->id, entry->name, entry->antenna };
+    if (from != BOARD_FROM_DEFAULT) {
+        return;
+    }
+    if (own_wiring) {
+        *out = (board_label_t){ "other", "Other ESP32-S3 board", NULL };
+    } else if (model != NULL && strncmp(model, "UM980", 5) == 0) {
+        *out = (board_label_t){ "um980-alib", "UM980 board (Alibaba)", NULL };
+    }
+}
+
 void board_choose(const board_entry_t *dflt, const char *const *markers, size_t n_markers, uint32_t flash_bytes,
                   board_choice_t *out)
 {
@@ -106,8 +120,8 @@ void board_choose(const board_entry_t *dflt, const char *const *markers, size_t 
     out->trusted = false;
     if (n_markers > 1) {
         out->issue = BOARD_BAD_TWO;
-        snprintf(out->why, sizeof(out->why), "The partition table marks %u boards. Install the firmware for this board again.",
-                 (unsigned)n_markers);
+        snprintf(out->why, sizeof(out->why),
+                 "The partition table marks more than one board. Install the firmware for this board again.");
         return;
     }
     const char *id = board_marker_id(markers[0]);

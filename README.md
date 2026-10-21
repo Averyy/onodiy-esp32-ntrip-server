@@ -57,8 +57,9 @@ One firmware for every board; only the install differs.
 | UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | configured, untested |
 | GNS NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | untested; LEDs and button follow GNS's quick guide; no receiver updates yet |
 
-Another ESP32-S3 board with a Unicore receiver: the 16 MB image, then set its pins under
-Settings → Receiver wiring. The GNS NTRIP-X's own firmware is in
+Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
+pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the
+NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise. The GNS NTRIP-X's own firmware is in
 [`firmware/ntrip-x/`](firmware/ntrip-x/README.md), to go back to it.
 
 ## Install

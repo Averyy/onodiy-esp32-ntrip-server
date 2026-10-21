@@ -1132,7 +1132,7 @@ function journalDetail(e) {
     case 'board': {
       /* a: board_issue_t; b: the chip's flash MB (bits 0-7, 0 = not known) | the board's (8-15). */
       const chipMb = b & 0xff, boardMb = (b >>> 8) & 0xff;
-      if (a === 1) return 'The install is for a ' + boardMb + NB + 'MB board, but the chip has ' + chipMb + NB + 'MB: receiver link off';
+      if (a === 1) return 'The install is for a board with ' + boardMb + NB + 'MB flash, but the chip has ' + chipMb + NB + 'MB: receiver link off';
       if (a === 2) return 'The install names a board this firmware does not know: receiver link off';
       if (a === 3) return 'The install marks more than one board: receiver link off';
       if (a === 4) return 'The chip has ' + chipMb + NB + 'MB flash, the board ' + boardMb + NB + 'MB';

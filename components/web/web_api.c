@@ -230,7 +230,9 @@ void web_snap_status(web_status_snap_t *s)
     board_wiring_active(&s->link);
     s->link_off = board_link_off_reason();
     s->link_off_board = board_problem() != NULL;
-    s->antenna = board_get()->antenna;
+    const char *bid;
+    const char *bname;
+    board_shown(s->st.receiver.valid ? s->st.receiver.model : NULL, &bid, &bname, &s->antenna);
     monitor_get_status(&s->mon);   /* a copy of the summary the monitor keeps: no summing here */
 }
 
@@ -1665,8 +1667,6 @@ static esp_err_t send_system(httpd_req_t *req, int reboot_required)
         .chip_revision = chip.revision,
         .flash_mb = flash / (1024u * 1024u),
         .psram_mb = (uint32_t)(esp_psram_get_size() / (1024u * 1024u)),
-        .board_id = board_get()->id,
-        .board_name = board_get()->name,
         .board_marked = board_get()->source == BOARD_SOURCE_MARKER,
         .reboot_required = reboot_required,
         .wiring_saved = have_saved,
@@ -1677,6 +1677,9 @@ static esp_err_t send_system(httpd_req_t *req, int reboot_required)
     };
     board_wiring_active(&s.wiring);
     board_wiring_default(&s.wiring_default);
+    station_snapshot(&s_st);
+    const char *antenna;
+    board_shown(s_st.receiver.valid ? s_st.receiver.model : NULL, &s.board_id, &s.board_name, &antenna);
     web_resp_t resp;
     resp_begin(&resp, req, 200);
     web_build_system(&resp.w, &s);

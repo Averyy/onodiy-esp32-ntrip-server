@@ -28,6 +28,7 @@ static bool s_valid;
 static bool s_have_saved;    /* board_use_wiring() gave one */
 static board_wiring_t s_saved;
 static char s_link_off[64];  /* why the saved wiring is refused this start ("" = it is not) */
+static bool s_own_wiring;    /* the saved wiring is in use this start (not the board's own) */
 
 /* The original board is the build's: its Kconfig pins replace the table's (a build for a board wired otherwise). */
 static void original_from_kconfig(board_entry_t *e)
@@ -140,6 +141,16 @@ const char *board_problem(void)
 {
     pick_board();
     return s_choice.trusted ? NULL : s_choice.why;
+}
+
+void board_shown(const char *model, const char **id, const char **name, const char **antenna)
+{
+    pick_board();
+    board_label_t l;
+    board_label(s_choice.entry, s_choice.from, s_own_wiring, model, &l);
+    *id = l.id;
+    *name = l.name;
+    *antenna = l.antenna;
 }
 
 bool board_wiring_refused(void)
@@ -280,6 +291,9 @@ static void take_saved_wiring(void)
     s_board.gnss_rx_gpio = w.rx_gpio;
     s_board.gnss_tx_gpio = w.tx_gpio;
     s_board.gnss_port = w.port;
+    board_wiring_t own;
+    board_wiring_default(&own);
+    s_own_wiring = !board_wiring_same(&w, &own);
     ESP_LOGI(TAG, "saved receiver wiring: RX GPIO%d, TX GPIO%d, COM%u", w.rx_gpio, w.tx_gpio, (unsigned)w.port);
 }
 

@@ -103,7 +103,7 @@ built-in USB, where `esptool` enters the loader by itself; installing through it
 the case open. Whether an install works through the case's port is still to be checked.
 
 **Receiver firmware updates** are not available on it yet: its flash has no room for a
-receiver package (the station will keep one in PSRAM instead).
+receiver package (keeping one in PSRAM instead is planned).
 
 GNS's own firmware is in [`firmware/ntrip-x/`](../firmware/ntrip-x/README.md), to go back
 to it.

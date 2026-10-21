@@ -570,7 +570,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
-| `receiver.antenna` | where this board's GNSS antenna goes, the end of "check that the antenna is ...": `on the socket marked M` (UM982 board), `on the port marked GNSS` (GNS NTRIP-X), `null` for a board with no one place to name; admin form only; the UI's `no_rtcm` and `no_satellites` texts use it |
+| `receiver.antenna` | where this board's GNSS antenna goes, the end of "check that the antenna is ...": `on the socket marked M` (UM982 board), `on the port marked GNSS` (GNS NTRIP-X), `null` for a board with no one place to name (the UM980 board, another board: `board` in `GET /api/system`); admin form only; the UI's `no_rtcm` and `no_satellites` texts use it |
 | `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; with `off` (a sentence: `board_link_off_reason()`) the link stays closed this start, and nothing is sent to the receiver: `off_by` says why, `wiring` the saved wiring fails the board's check (neither it nor the board's pins are used; saving another and restarting changes it), `board` the board choice failed (`board` in `GET /api/system`; a restart does not change it, an install for this board does); admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
@@ -2023,8 +2023,11 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
 `board` is the board this start runs on (`components/board/board_table.c`):
 its `id`, `name` and where that came from, `source`: `marker` (the partition
 table's `board.<id>` partition, written by the board's install, e.g.
-`um980-ntrx` for the GNS NTRIP-X) or `default` (no marker: the original board,
-`um982-alix`). A marker that cannot be used (the chip's flash size is
+`um980-ntrx` for the GNS NTRIP-X) or `default` (no marker: the 16 MB install,
+the same for every 16 MB board, so the station names it by what it finds:
+`other` "Other ESP32-S3 board" with a saved wiring in use, `um980-alib`
+"UM980 board (Alibaba)" with a UM980, else `um982-alix` "UM982 board
+(AliExpress)"). A marker that cannot be used (the chip's flash size is
 not the board's, a board this firmware does not know, or more than one
 marker) still has `source` `marker` and names the marked board, or the
 original one for an unknown id or two markers, keeps the receiver link

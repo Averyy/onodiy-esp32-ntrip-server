@@ -137,6 +137,13 @@ const char *board_problem(void);
  */
 bool board_journal_note(int32_t *a, int32_t *b);
 
+/**
+ * How the board is shown (board_table.h board_label): its id, name and where
+ * its antenna goes (NULL: no one place), by `model`, the receiver's ("" or
+ * NULL while unknown).
+ */
+void board_shown(const char *model, const char **id, const char **name, const char **antenna);
+
 /** The saved wiring fails the check this start (the link stays closed until another one is saved and the station restarts). */
 bool board_wiring_refused(void);
 

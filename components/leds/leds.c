@@ -98,7 +98,7 @@ esp_err_t leds_init(void)
     }
     const board_desc_t *b = board_get();
     if (!board_is_valid()) {
-        return ESP_ERR_INVALID_STATE;   /* the pins were not checked */
+        return ESP_OK;   /* the pins were not accepted (board_init failed and said so): nothing is driven */
     }
     s_rgb = b->rgb_gpio[0] >= 0 && b->rgb_gpio[1] >= 0 && b->rgb_gpio[2] >= 0;
     s_wifi = b->wifi_led_gpio >= 0;

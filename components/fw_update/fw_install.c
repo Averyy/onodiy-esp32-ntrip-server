@@ -333,7 +333,7 @@ esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
     }
     bool ok = station_get_status(st) == ESP_OK && st->state == STATION_STATE_STREAMING &&
               !st->flash_journal_open && !lifecycle_app_trial_active() && !lifecycle_in_safe_mode() &&
-              lifecycle_update_active() == LIFECYCLE_UPDATE_NONE && pkg_store_capacity() > 0;
+              lifecycle_update_active() == LIFECYCLE_UPDATE_NONE && !pkg_store_absent();
     fw_lock();
     const fw_manifest_gnss_t *g =
         (ok && g_fw.have_manifest)

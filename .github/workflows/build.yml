@@ -490,9 +490,10 @@ jobs:
             echo "esptool --chip esp32s3 write-flash 0x0 onodiy-install-16mb.bin"
             echo '```'
             echo
-            echo "GNS NTRIP-X (8 MB flash):"
+            echo "GNS NTRIP-X (8 MB flash; this image is for the NTRIP-X only), its flash saved first:"
             echo
             echo '```'
+            echo "esptool --chip esp32s3 read-flash 0 0x800000 ntrip-x-backup.bin"
             echo "esptool --chip esp32s3 erase-flash"
             echo "esptool --chip esp32s3 write-flash 0x0 onodiy-install-um980-ntrx.bin"
             echo '```'
