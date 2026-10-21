@@ -341,7 +341,7 @@ jobs:
           . "$IDF_PATH/export.sh"
           uv run tools/qemu/bench_console.py --out qemu-bench-console
 
-      # The same build installed as on the GNS NTRIP-X (partitions-8mb.csv,
+      # The same build installed as on the NTRIP-X (partitions-8mb.csv,
       # 8 MB flash): the board found by its marker, no package area, and a
       # crash's core dump in its 128 KB partition (tools/qemu/board_8mb.py).
       - name: 8 MB board
@@ -490,7 +490,7 @@ jobs:
             echo "esptool --chip esp32s3 write-flash 0x0 onodiy-install-16mb.bin"
             echo '```'
             echo
-            echo "GNS NTRIP-X (8 MB flash; this image is for the NTRIP-X only), its flash saved first:"
+            echo "NTRIP-X (8 MB flash; this image is for the NTRIP-X only), its flash saved first:"
             echo
             echo '```'
             echo "esptool --chip esp32s3 read-flash 0 0x800000 ntrip-x-backup.bin"

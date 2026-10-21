@@ -73,7 +73,7 @@ Notes:
   fixed when CMake configures; run `idf.py reconfigure` before a local build whose
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
-  `partitions.csv`). Boards with 8 MB flash (the GNS NTRIP-X) run the same build with
+  `partitions.csv`). Boards with 8 MB flash (the NTRIP-X) run the same build with
   `partitions-8mb.csv`, whose board marker tells the app which board it is. Every board's
   install files from a build, checked (the app within the 2.5 MB slot of the 8 MB table,
   each bootloader valid for its flash size), as CI makes them for a release:

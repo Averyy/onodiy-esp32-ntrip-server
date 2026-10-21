@@ -15,7 +15,7 @@ build-qemu-bench/ (tools/qemu/run.sh --overlay sdkconfig.bench
 --build-only): its console's `crash` command makes the crash.
 Standard library only.
 
-The GNS NTRIP-X gets the station's app and bootloader with another partition
+The NTRIP-X gets the station's app and bootloader with another partition
 table (partitions-8mb.csv: 2.5 MB app slots, no receiver package partition,
 a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
 8MB. This runs that install:
@@ -24,7 +24,7 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
      --headless (an 8 MB flash image), the console on --console
      connect:<port> and UART1 on --uart1 connect:<port>, so it sees every
      byte of both from the first boot;
-  2. the console: the board line ("board: GNS NTRIP-X (marked in the
+  2. the console: the board line ("board: NTRIP-X (marked in the
      partition table)"), the receiver link on the board's pins ("GNS
      NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"),
      its LEDs driven (status, Wi-Fi and GNSS LED), the package store's note
@@ -32,7 +32,7 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
      "startup complete" without a failed step;
   3. UART1: the receiver detection arrives (the link opened on the board);
   4. the web API, with the first admin password: GET /api/system names the
-     board (um980-ntrx, "GNS NTRIP-X", source marker), 8 MB flash, the board's
+     board (um980-ntrx, "NTRIP-X", source marker), 8 MB flash, the board's
      wiring as the default (RX GPIO16, TX GPIO15, COM1) and no pin of the
      board's own among the link's choices (1, 2, 4-8, 11, 40, 41); GET
      /api/update: app_max_bytes 2621440 (the 2.5 MB slot), pkg_max_bytes
@@ -70,10 +70,10 @@ import bench_console  # noqa: E402  (by path, above: its console tap and waits)
 import smoke  # noqa: E402
 
 BUILD = bench_console.BUILD
-BOARD_LINE = "board: GNS NTRIP-X (marked in the partition table)"
-LINK_LINE = "GNS NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"
+BOARD_LINE = "board: NTRIP-X (marked in the partition table)"
+LINK_LINE = "NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"
 NO_PKG_LINE = "no partition 'gnss_pkg' on this board"
-LEDS_LINE = "leds: GNS NTRIP-X: status LED on, Wi-Fi LED on, GNSS LED on"
+LEDS_LINE = "leds: NTRIP-X: status LED on, Wi-Fi LED on, GNSS LED on"
 SAVED = "Core dump has been saved to flash."
 NO_ROOM = "Not enough space to save core dump"
 COREDUMP_BYTES = 0x20000     # partitions-8mb.csv
@@ -203,7 +203,7 @@ class Board8mb(bench_console.BenchConsole):
             sysj = self.get("/api/system")
             if sysj is not None:
                 board = sysj.get("board") or {}
-                self.check(board == {"id": "um980-ntrx", "name": "GNS NTRIP-X", "source": "marker"},
+                self.check(board == {"id": "um980-ntrx", "name": "NTRIP-X", "source": "marker"},
                            f"GET /api/system board: {board}")
                 flash = (sysj.get("chip") or {}).get("flash_mb")
                 self.check(flash == 8, f"GET /api/system chip.flash_mb: {flash}")

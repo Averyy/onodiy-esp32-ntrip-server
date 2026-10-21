@@ -42,11 +42,11 @@ TEST_CASE("board table: the original board is today's Kconfig defaults, first in
     }
 }
 
-TEST_CASE("board table: the GNS NTRIP-X as found on the unit", "[board]")
+TEST_CASE("board table: the NTRIP-X as found on the unit", "[board]")
 {
     const board_entry_t *e = board_table_find("um980-ntrx");
     TEST_ASSERT_NOT_NULL(e);
-    TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", e->name);
+    TEST_ASSERT_EQUAL_STRING("NTRIP-X", e->name);
     TEST_ASSERT_EQUAL_STRING("on the port marked GNSS", e->antenna);
     TEST_ASSERT_EQUAL(8, e->flash_mb);
     TEST_ASSERT_EQUAL(1, e->uart_num);
@@ -170,7 +170,7 @@ TEST_CASE("board choice: a marker on another flash size, an unknown or a second 
     TEST_ASSERT_EQUAL(BOARD_FROM_MARKER, c.from);
     TEST_ASSERT_EQUAL(BOARD_BAD_FLASH, c.issue);
     TEST_ASSERT_FALSE(c.trusted);
-    TEST_ASSERT_EQUAL_STRING("The install is for the GNS NTRIP-X (8 MB flash), but this chip has 16 MB.", c.why);
+    TEST_ASSERT_EQUAL_STRING("The install is for the NTRIP-X (8 MB flash), but this chip has 16 MB.", c.why);
     board_choose(orig(), m, 1, 4u * MB, &c);
     TEST_ASSERT_EQUAL(BOARD_BAD_FLASH, c.issue);
 
@@ -235,7 +235,7 @@ TEST_CASE("board label: a marked board as itself; without a marker by its wiring
     /* Marked: its entry, whatever the receiver or wiring. */
     board_label(ntrx, BOARD_FROM_MARKER, true, "UM982", &l);
     TEST_ASSERT_EQUAL_STRING("um980-ntrx", l.id);
-    TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", l.name);
+    TEST_ASSERT_EQUAL_STRING("NTRIP-X", l.name);
     TEST_ASSERT_EQUAL_STRING("on the port marked GNSS", l.antenna);
     /* No marker, a UM982 or nothing known yet: the original board (every deployed station). */
     board_label(orig(), BOARD_FROM_DEFAULT, false, "UM982", &l);

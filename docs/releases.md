@@ -29,7 +29,7 @@ Release with:
   the version, and every file with its size and SHA-256;
 - for the first flash of a new board, one image per board to write at 0x0 after
   an erase: `onodiy-install-16mb.bin` (UM982 board, UM980 board) and
-  `onodiy-install-um980-ntrx.bin` (GNS NTRIP-X: the 8 MB table, the bootloader set
+  `onodiy-install-um980-ntrx.bin` (NTRIP-X: the 8 MB table, the bootloader set
   for 8 MB flash), with the commands in the release notes
   ([`tools/ci/install_files.sh`](../tools/ci/install_files.sh)); the same 16 MB
   install as `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` with

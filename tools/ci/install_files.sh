@@ -9,10 +9,10 @@
 #   tools/ci/install_files.sh <build dir> <out dir>
 #
 # Writes to <out dir>:
-#   partition-table-8mb.bin        partitions-8mb.csv (the GNS NTRIP-X)
+#   partition-table-8mb.bin        partitions-8mb.csv (the NTRIP-X)
 #   onodiy-install-16mb.bin        one image for 0x0 on a 16 MB board (UM982 board,
 #                                  UM980 board): bootloader, table, otadata, app
-#   onodiy-install-um980-ntrx.bin  the same for the GNS NTRIP-X: the 8 MB table and
+#   onodiy-install-um980-ntrx.bin  the same for the NTRIP-X: the 8 MB table and
 #                                  --flash-size 8MB (esptool writes it into the
 #                                  bootloader's header and updates its digest)
 #

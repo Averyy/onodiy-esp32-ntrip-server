@@ -31,12 +31,12 @@ static const board_entry_t s_boards[] = {
         .gnss_status_gpio = NONE,
         .keep_undriven = { NONE, NONE, NONE, NONE },
     },
-    /* GNS NTRIP-X (ESP32-S3-WROOM-1U-N8R8, UM980): the receiver's COM1 on GPIO16/15, the case's button on GPIO0,
+    /* NTRIP-X (ESP32-S3-WROOM-1U-N8R8, UM980): the receiver's COM1 on GPIO16/15, the case's button on GPIO0,
      * an RGB LED lit low, a Wi-Fi LED and a GNSS LED that follows the receiver's status output on GPIO11. GPIO1/2
      * (a flow-control pair, unused) and GPIO40/41 reach parts of the board whose use is not known. */
     {
         .id = "um980-ntrx",
-        .name = "GNS NTRIP-X",
+        .name = "NTRIP-X",
         .antenna = "on the port marked GNSS",
         .flash_mb = 8,
         .uart_num = 1,

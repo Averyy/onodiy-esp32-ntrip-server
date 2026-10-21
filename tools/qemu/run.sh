@@ -205,7 +205,7 @@ if [ "$table" = 8mb ]; then
     grep -q "^$table_off partition-table-8mb.bin$" "$bdir/flash_args_8mb" || die "no partition table line in flash_args"
     flash_args="flash_args_8mb"
     flash_size="8MB"
-    echo "Table:   partitions-8mb.csv (8 MB flash, the GNS NTRIP-X's install)"
+    echo "Table:   partitions-8mb.csv (8 MB flash, the NTRIP-X's install)"
 fi
 (cd "$bdir" && rm -f qemu_flash.bin.new && "$idf_python" -m esptool --chip=esp32s3 merge-bin \
     --output=qemu_flash.bin.new --pad-to-size="$flash_size" "@$flash_args" >/dev/null &&

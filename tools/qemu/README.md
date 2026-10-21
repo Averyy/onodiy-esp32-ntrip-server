@@ -570,7 +570,7 @@ computer.
 
 ## The 8 MB board
 
-The GNS NTRIP-X gets the same app and bootloader with another partition
+The NTRIP-X gets the same app and bootloader with another partition
 table (`partitions-8mb.csv`: 2.5 MB app slots, no receiver package
 partition, a 128 KB core dump partition and the `board.um980-ntrx` marker)
 and `--flash-size 8MB`. `board_8mb.py` runs that install of the bench
@@ -583,7 +583,7 @@ uv run tools/qemu/board_8mb.py        # logs in build-qemu-bench/board-8mb/
 
 It starts `run.sh --overlay sdkconfig.bench --table 8mb` headless with the
 console and UART1 on sockets it listens on, and checks: the console names
-the board (`board: GNS NTRIP-X (marked in the partition table)`), puts the
+the board (`board: NTRIP-X (marked in the partition table)`), puts the
 receiver link on its pins (RX GPIO16, TX GPIO15, COM1) and says the board
 has no package partition, and the start has no failed step; the receiver
 detection arrives on UART1; `GET /api/system` names the board

@@ -5,7 +5,7 @@
  * The status LED's blink codes and the Wi-Fi LED's brightness (pure logic,
  * no IDF includes, injected clock, host-tested).
  *
- * The codes are the ones the GNS NTRIP-X's printed quick guide explains, so
+ * The codes are the ones the NTRIP-X's printed quick guide (GNS) explains, so
  * its instructions stay true:
  *  - every cycle starts with one white blink; a cycle lasts at least
  *    LED_CYCLE_MS (setup hotspot only, nothing configured: white every 2 s);

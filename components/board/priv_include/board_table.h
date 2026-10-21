@@ -39,7 +39,7 @@ extern "C" {
 /** One board. GPIO -1 = not on this board. */
 typedef struct {
     const char *id;                    /**< "um980-ntrx"; the marker is "board." + id */
-    const char *name;                  /**< for people: "GNS NTRIP-X" */
+    const char *name;                  /**< for people: "NTRIP-X" */
     const char *antenna;               /**< where the GNSS antenna goes, for "the antenna is <antenna>": "on the
                                             socket marked M"; NULL: no one place to name */
     uint8_t flash_mb;                  /**< the module's flash */

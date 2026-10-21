@@ -2212,7 +2212,7 @@ def test_no_receiver_texts_name_the_wiring_in_use():
     assert closed[1] == ("The receiver link is off: the saved receiver wiring cannot be used. Change it under "
                          "Settings \u2192 Receiver wiring.")
     # The board choice keeps it off (off_by "board"): its reason, which says what to do; no wiring advice.
-    why = "The install is for the GNS NTRIP-X (8 MB flash), but this chip has 16 MB."
+    why = "The install is for the NTRIP-X (8 MB flash), but this chip has 16 MB."
     (board,) = run_ui([("noRx", [NO_RX, {**link, "off": why, "off_by": "board"}])])
     assert board[0] == board[1] == "The receiver link is off: " + why
 

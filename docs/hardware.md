@@ -1,7 +1,7 @@
 # Hardware details
 
 The UM982 + ESP32-S3 board: its two USB-C ports, the console, cables and power, and the board as delivered;
-then [the GNS NTRIP-X](#the-gns-ntrip-x). Back to the [README](../README.md).
+then [the NTRIP-X](#the-ntrip-x). Back to the [README](../README.md).
 
 ## The two USB-C ports
 
@@ -80,13 +80,13 @@ the receiver, and opening the receiver's USB-C does not reset it either.
   (Galileo E6) and `7 0` (BeiDou B2a) each give 4 bands on one constellation, which
   Onocoy rewards most. With an antenna, this build tracks Galileo E6 in `3 6`.
 
-## The GNS NTRIP-X
+## The NTRIP-X
 
 A finished base station from GNS-Electronics: an ESP32-S3-WROOM-1U-N8R8 (8 MB flash,
 8 MB PSRAM) and a UM980 in a case. The station's firmware runs on it with its own
 install (`onodiy-install-um980-ntrx.bin`: an 8 MB partition table whose
-`board.um980-ntrx` partition tells the firmware which board it is). Untested on the
-board itself so far.
+`board.um980-ntrx` partition tells the firmware which board it is). On the bench so far
+(no antenna yet): it finds its board and its UM980; the LEDs are not checked by eye yet.
 
 | Part | ESP32 pins | Notes |
 |---|---|---|

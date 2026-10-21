@@ -17,13 +17,15 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 
 <table width="100%">
 <tr>
-<td align="center" width="27%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
-<td align="center" width="49%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
-<td align="center" width="24%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
+<td align="center" width="14%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
+<td align="center" width="26%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
+<td align="center" width="48%"><img src="docs/images/ntrip-x.png" width="100%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
+<td align="center" width="12%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
 <td align="center"><b>UM980</b> (configured, untested)</td>
+<td align="center"><b>NTRIP-X</b> (untested)</td>
 <td align="center"><b>GNSS splitter</b> (optional)</td>
 </tr>
 </table>
@@ -32,6 +34,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 |---|---|---|---|
 | **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$140 | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html), [Alt](https://www.aliexpress.com/item/1005013190792289.html) |
 | **UM980** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna); ask the seller for WROOM-1U-N16R8 (external antenna), same price | US$150 | [Alibaba](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html) |
+| **NTRIP-X** (UM980, by GNS Electronics) | WROOM-1U-N8R8 (external Wi-Fi antenna), in a case with LEDs and a button | about US$299 | [GNS Electronics](https://www.gns-electronics.de/product/ntrip-x/) |
 | **Antenna:** Beitian BT-800S | N/A (all the bands the station uses; TNC socket, so a TNC-to-SMA cable) | about US$53 | [AliExpress](https://www.aliexpress.com/item/1005009033251316.html) (variant "BT-800S") |
 | **Antenna cable:** RG58, TNC male to SMA male | N/A (antenna to board; pick the length) | from about US$5, by length | [AliExpress](https://www.aliexpress.com/item/1005005550779000.html) |
 | **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
@@ -40,7 +43,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 - **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board).
   Plug or unplug it only with the power off: the socket powers the antenna.
 - **Power:** a 5 V USB-A charger and an A-to-C cable into the USB-C printed `ESP32S3`
-  (a USB-C charger gives the UM982 board no power).
+  (a USB-C charger gives the UM982 board no power). The NTRIP-X: a USB-C supply of 2 A or more.
 - **Weak Wi-Fi?** Choose the external-antenna module. The Status page shows the signal
   and the ping time to your router over 24h.
 
@@ -55,12 +58,12 @@ One firmware for every board; only the install differs.
 |---|---|---|---|
 | UM982 board (AliExpress) | 16 MB | `onodiy-install-16mb.bin` | tested |
 | UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | configured, untested |
-| GNS NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | untested; LEDs and button follow GNS's quick guide; no receiver updates yet |
+| NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | untested; LEDs and button follow GNS's quick guide; no receiver updates yet |
 
 Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
 pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the
-NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise. The GNS NTRIP-X's own firmware is in
-[`firmware/ntrip-x/`](firmware/ntrip-x/README.md), to go back to it.
+NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise. The NTRIP-X's own
+firmware is in [`firmware/ntrip-x/`](firmware/ntrip-x/README.md), to go back to it.
 
 ## Install
 
@@ -73,7 +76,7 @@ esptool --chip esp32s3 erase-flash
 esptool --chip esp32s3 write-flash 0x0 onodiy-install-16mb.bin
 ```
 
-On the GNS NTRIP-X, save its flash first (`esptool --chip esp32s3 read-flash 0 0x800000
+On the NTRIP-X, save its flash first (`esptool --chip esp32s3 read-flash 0 0x800000
 ntrip-x-backup.bin`). After that, updates install from the web UI. Changes:
 [CHANGELOG](CHANGELOG.md).
 
@@ -142,7 +145,7 @@ More: [development](docs/development.md).
 | `test/` | Host unit tests and recorded data |
 | `tools/bench/`, `tools/qemu/`, `tools/ci/` | Board tools, the emulator, CI run locally |
 | `firmware/um982/`, `firmware/um980/` | Unicore receiver firmware |
-| `firmware/ntrip-x/` | The GNS NTRIP-X's stock firmware, for restoring one |
+| `firmware/ntrip-x/` | The NTRIP-X's stock firmware, for restoring one |
 | `gnss-splitter/` | The antenna splitter (EasyEDA) |
 | `docs/`, `reference/` | Hardware, development, releases; board and antenna notes |
 

@@ -2822,7 +2822,7 @@ TEST_CASE("system: the board, its id, name and whether the partition table marke
         .chip_model = "esp32s3",
         .flash_mb = 8,
         .board_id = "um980-ntrx",
-        .board_name = "GNS NTRIP-X",
+        .board_name = "NTRIP-X",
         .board_marked = true,
         .reboot_required = -1,
     };
@@ -2833,7 +2833,7 @@ TEST_CASE("system: the board, its id, name and whether the partition table marke
     cJSON *root = cJSON_Parse(s_out);
     const cJSON *b = at(root, "board");
     TEST_ASSERT_EQUAL_STRING("um980-ntrx", at(b, "id")->valuestring);
-    TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", at(b, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("NTRIP-X", at(b, "name")->valuestring);
     TEST_ASSERT_EQUAL_STRING("marker", at(b, "source")->valuestring);
     TEST_ASSERT_EQUAL(8, at(at(root, "chip"), "flash_mb")->valueint);
     cJSON_Delete(root);

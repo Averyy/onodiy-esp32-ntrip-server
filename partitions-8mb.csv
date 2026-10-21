@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 #
-# Partition table for boards with 8 MB flash: the GNS NTRIP-X
+# Partition table for boards with 8 MB flash: the NTRIP-X
 # (ESP32-S3-WROOM-1U N8R8). The same app and bootloader as the 16 MB boards
 # (partitions.csv); only the install differs: this table at 0x10000 and
 # --flash-size 8MB, which esptool writes into the bootloader's header.
