@@ -70,7 +70,7 @@ static void pick_board(void)
     if (s_picked) {
         return;
     }
-    s_picked = true;
+    /* The first call is app_main's (board_init, or an early boot step before it), before any other task asks. */
     original_from_kconfig(&s_original);
     char labels[MARKERS_MAX][BOARD_LABEL_MAX + 1];
     const char *marks[MARKERS_MAX];
@@ -121,6 +121,7 @@ static void pick_board(void)
     for (size_t i = 0; i < BOARD_KEEP_MAX; i++) {
         s_board.undriven_gpio[i] = e->keep_undriven[i];
     }
+    s_picked = true;   /* only once filled in */
 }
 
 const board_desc_t *board_get(void)

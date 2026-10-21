@@ -58,6 +58,8 @@ table_off=$(awk '$2 ~ /partition-table\.bin$/ {print $1}' "$args")
 # The build's flash_args again, for the 8 MB board: its table and its flash size.
 sed -e "s/--flash-size [0-9A-Za-z]*/--flash-size 8MB/" \
     -e "s|^$table_off .*|$table_off $out/partition-table-8mb.bin|" "$args" > "$out/flash_args_8mb"
+grep -q "^$table_off $out/partition-table-8mb.bin$" "$out/flash_args_8mb" || die "the 8 MB table did not replace the table in $args"
+grep -q -- "--flash-size 8MB" "$out/flash_args_8mb" || die "no --flash-size in $args"
 
 merge() {   # <args file> <output>
     (cd "$bdir" && "$py" -m esptool --chip esp32s3 merge-bin --output "$2" "@$1" >/dev/null)

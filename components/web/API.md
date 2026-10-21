@@ -97,7 +97,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 422 | `not_this_project` (app upload) |
 | 429 | `rate_limited` (with `retry_in_s`) |
 | 500 | `internal` (`message` carries the `esp_err_t` name) |
-| 501 | `not_available_yet` (receiver flashing is not available: `flash_available` false, `flash_reason` says why: not in this build, or the receiver is not wired by its COM1), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
+| 501 | `not_available_yet` (receiver flashing is not available: `flash_available` false, `flash_reason` says why: the board has no package partition, not in this build, or the receiver is not wired by its COM1), `checks_disabled` (this build cannot check for updates: no valid release repository, or it requires signed manifests and none of its keys is usable) |
 | 503 | `too_many_clients` (WebSocket) |
 
 ---
@@ -1408,7 +1408,9 @@ in builds without receiver flashing (`CONFIG_UM98X_FLASH_ENABLE` off), then
 `flash_reason` is `not_enabled_in_build` and the UI says that receiver
 firmware updates are not enabled in this build yet; `false` too with the
 receiver wired by another port than COM1 (`flash_reason` `receiver_port`);
-packages can still be uploaded and checked.
+packages can still be uploaded and checked. On a board without a package
+partition (`flash_reason` `no_package_area`, the GNS NTRIP-X) nothing can be
+uploaded: `pkg_max_bytes` is `null` and an upload is refused with `413`.
 
 `why` codes: `no_journal`, `not_waiting` (a session runs), `safe_mode`
 (only `clear` there), `settings_unavailable`, `receiver_maintenance` (retry
@@ -2022,8 +2024,9 @@ its `id`, `name` and where that came from, `source`: `marker` (the partition
 table's `board.<id>` partition, written by the board's install, e.g.
 `um980-ntrx` for the GNS NTRIP-X) or `default` (no marker: the original board,
 `um982-alix`). A marker that cannot be used (the chip's flash size is
-not the board's, or a board this firmware does not know) still names the
-marked board, or the original one for an unknown id, keeps the receiver link
+not the board's, a board this firmware does not know, or more than one
+marker) still has `source` `marker` and names the marked board, or the
+original one for an unknown id or two markers, keeps the receiver link
 closed (`receiver.link.off`, `off_by` `board`) and is journalled (`board`).
 
 `wiring` is how the receiver is wired to the ESP32: its top-level fields the
@@ -2194,8 +2197,8 @@ The user confirmed the receiver dialog. Before the request the UI shows:
 version, `expected_downtime_s` against `budget_left_s`, "do not power off
 the station or plug anything into the receiver's USB port", "the station
 profile will be re-applied", and while `flash_available` is `false`, why
-(`flash_reason`: not enabled in this build, or the receiver not wired by
-its COM1). With receiver flashing available, a receiver wiring saved for
+(`flash_reason`: no package partition on this board, not enabled in this
+build, or the receiver not wired by its COM1). With receiver flashing available, a receiver wiring saved for
 the next start (`GET /api/system` `wiring.saved` differs from the wiring in
 use, or the saved one keeps the link off) refuses the update with `409 busy`
 (`reason` `wiring_pending`) here and in `POST /api/upload/gnss/confirm`:
@@ -2283,7 +2286,9 @@ before reinstalling the running image.
 
 ### `POST /api/upload/gnss` (adm)
 
-Size at most the package slot (`pkg_store_capacity()`, 6 MB minus 4 KB).
+Size at most the package slot (`pkg_store_capacity()`, 6 MB minus 4 KB on a
+16 MB board; 0 on a board without a package partition, where every upload
+gets `413 too_large`).
 Refused before anything is stored: `409 receiver_maintenance`, `409
 safe_mode`, `409 app_trial`, `409 app_update`, `409 journal_open`, `409
 receiver_not_streaming`, `409 unsupported_model`, `409 package_pinned`,

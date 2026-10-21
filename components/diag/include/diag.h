@@ -289,7 +289,8 @@ typedef enum {
      * than one marker: the receiver link stays closed and the board's LEDs
      * are not used; 4 the original board on a chip of another flash size:
      * noted only), b = the chip's flash in MB (bits 0-7, 0 = not known) |
-     * the board's flash in MB (bits 8-15).
+     * the board's flash in MB (bits 8-15). Written at every start while it
+     * holds (a start is rare; each one should show why the link is off).
      */
     DIAG_EV_BOARD = 28,
 } diag_event_t;

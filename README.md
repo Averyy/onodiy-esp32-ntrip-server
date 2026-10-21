@@ -47,11 +47,34 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 More: [hardware details](docs/hardware.md), [board notes](reference/um982-board-onocoy.md),
 [antenna notes](reference/antenna-specs.md).
 
+## Supported boards
+
+One firmware for every board; only the install differs.
+
+| Board | Flash | Install image | Status |
+|---|---|---|---|
+| UM982 board (AliExpress) | 16 MB | `onodiy-install-16mb.bin` | tested |
+| UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | configured, untested |
+| GNS NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | untested; LEDs and button follow GNS's quick guide; no receiver updates yet |
+
+Another ESP32-S3 board with a Unicore receiver: the 16 MB image, then set its pins under
+Settings → Receiver wiring. The GNS NTRIP-X's own firmware is in
+[`firmware/ntrip-x/`](firmware/ntrip-x/README.md), to go back to it.
+
 ## Install
 
-Download the [latest release](https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest):
-its notes give the `esptool` command for a new board. After that, updates install from
-the web UI. Changes: [CHANGELOG](CHANGELOG.md).
+Download your board's image from the
+[latest release](https://github.com/Averyy/onodiy-esp32-ntrip-server/releases/latest),
+then erase the board and write the image at 0x0:
+
+```sh
+esptool --chip esp32s3 erase-flash
+esptool --chip esp32s3 write-flash 0x0 onodiy-install-16mb.bin
+```
+
+On the GNS NTRIP-X, save its flash first (`esptool --chip esp32s3 read-flash 0 0x800000
+ntrip-x-backup.bin`). After that, updates install from the web UI. Changes:
+[CHANGELOG](CHANGELOG.md).
 
 ## First setup
 

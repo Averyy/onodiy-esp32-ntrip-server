@@ -28,7 +28,7 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
      partition table)"), the receiver link on the board's pins ("GNS
      NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"),
      its LEDs driven (status, Wi-Fi and GNSS LED), the package store's note
-     that the board has no package partition, and
+     that the board has no package partition (and no warning about it), and
      "startup complete" without a failed step;
   3. UART1: the receiver detection arrives (the link opened on the board);
   4. the web API, with the first admin password: GET /api/system names the
@@ -180,6 +180,9 @@ class Board8mb(bench_console.BenchConsole):
         self.check(line is not None and "failed" not in line, f"startup: {line or 'no startup line'}")
         failed = [x.strip()[:160] for x in text.splitlines() if " failed: " in x and ("init " in x or "start " in x)]
         self.check(not failed, f"no failed start step ({failed[0] if failed else 'none'})")
+        # Without a package partition there is nothing to release, and nothing to warn about.
+        note = next((x.strip()[:160] for x in text.splitlines() if "package not released" in x), None)
+        self.check(note is None, f"no warning about the package store ({note or 'none'})")
         deadline = time.monotonic() + self.args.timeout
         while time.monotonic() < deadline and self.alive() and self.uart1.size() == 0:
             time.sleep(0.2)

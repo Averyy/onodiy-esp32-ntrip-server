@@ -81,6 +81,12 @@ esp_err_t pkg_store_init(void);
 /** Payload capacity in bytes (partition size minus header sector). */
 size_t pkg_store_capacity(void);
 
+/**
+ * pkg_store_init() found no package partition: the board's partition table has none (8 MB flash). False before
+ * init, when the partition is there, and when init failed for another reason (capacity is 0 then too).
+ */
+bool pkg_store_absent(void);
+
 /** Staged package metadata. ESP_ERR_NOT_FOUND if the slot is empty/invalid. */
 esp_err_t pkg_store_get_info(pkg_store_info_t *out);
 

@@ -45,6 +45,7 @@ struct pkg_store_writer {
 };
 
 static const esp_partition_t *s_part;
+static bool s_absent;   /* pkg_store_init found no partition (the board has none), not a failure */
 static SemaphoreHandle_t s_mutex;
 static pkg_hdr_t s_hdr;          /* current state (valid when s_have_hdr) */
 static bool s_have_hdr;
@@ -195,6 +196,7 @@ esp_err_t pkg_store_init(void)
     s_next_slot = 0;
     s_part = esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE, PKG_STORE_PARTITION_LABEL);
     if (s_part == NULL) {
+        s_absent = true;
         unlock();
         /* A partition table without one (a board with 8 MB flash): receiver packages cannot be kept. */
         ESP_LOGI(TAG, "no partition '%s' on this board: receiver packages cannot be staged", PKG_STORE_PARTITION_LABEL);
@@ -221,6 +223,11 @@ esp_err_t pkg_store_init(void)
                  (unsigned)(pkg_store_capacity() / 1024));
     }
     return ESP_OK;
+}
+
+bool pkg_store_absent(void)
+{
+    return s_absent;
 }
 
 size_t pkg_store_capacity(void)
@@ -491,6 +498,9 @@ esp_err_t pkg_store_invalidate(void)
 
 esp_err_t pkg_store_release(void)
 {
+    if (s_absent) {
+        return ESP_OK;   /* no partition: nothing can be staged */
+    }
     if (s_part == NULL) {
         return ESP_ERR_INVALID_STATE;
     }

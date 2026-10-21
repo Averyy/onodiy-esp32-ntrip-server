@@ -1,7 +1,7 @@
 # Hardware details
 
-The UM982 + ESP32-S3 board: its two USB-C ports, the console, cables and power, and the board as delivered.
-Back to the [README](../README.md).
+The UM982 + ESP32-S3 board: its two USB-C ports, the console, cables and power, and the board as delivered;
+then [the GNS NTRIP-X](#the-gns-ntrip-x). Back to the [README](../README.md).
 
 ## The two USB-C ports
 
@@ -79,3 +79,31 @@ the receiver, and opening the receiver's USB-C does not reset it either.
   at 1 Hz. This build accepts the signal groups `4 5`, `3 6`, `5 0` and `7 0`; `3 6`
   (Galileo E6) and `7 0` (BeiDou B2a) each give 4 bands on one constellation, which
   Onocoy rewards most. With an antenna, this build tracks Galileo E6 in `3 6`.
+
+## The GNS NTRIP-X
+
+A finished base station from GNS-Electronics: an ESP32-S3-WROOM-1U-N8R8 (8 MB flash,
+8 MB PSRAM) and a UM980 in a case. The station's firmware runs on it with its own
+install (`onodiy-install-um980-ntrx.bin`: an 8 MB partition table whose
+`board.um980-ntrx` partition tells the firmware which board it is). Untested on the
+board itself so far.
+
+| Part | ESP32 pins | Notes |
+|---|---|---|
+| UM980 COM1 | RX GPIO16 (from its TXD), TX GPIO15, UART1 | the receiver's only port the ESP32 reaches |
+| Button (on the case) | GPIO0, active low | held 10 s: admin password cleared and the recovery hotspot; 20 s: factory reset |
+| Status LED (RGB) | red GPIO6, green GPIO5, blue GPIO4, lit low | the blink codes of GNS's quick guide |
+| Wi-Fi LED (green) | GPIO7 | lit while the station has an address, brighter with a stronger signal |
+| GNSS LED (green) | GPIO8 | follows GPIO11, a UM980 status output (high with a position fix) |
+| Never driven | GPIO1, GPIO2, GPIO40, GPIO41 | wired to parts whose use is not known; the receiver wiring check refuses them |
+
+**USB.** The case's USB-C is an FTDI FT232R bridge that a jumper (JP3) connects to the
+ESP32's UART0 or to the UM980. Inside, a second USB-C (`USB2 DEBUG`) is the ESP32-S3's
+built-in USB, where `esptool` enters the loader by itself; installing through it needs
+the case open. Whether an install works through the case's port is still to be checked.
+
+**Receiver firmware updates** are not available on it yet: its flash has no room for a
+receiver package (the station will keep one in PSRAM instead).
+
+GNS's own firmware is in [`firmware/ntrip-x/`](../firmware/ntrip-x/README.md), to go back
+to it.
