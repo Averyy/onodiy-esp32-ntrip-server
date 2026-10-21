@@ -15,11 +15,11 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 
 ## Hardware
 
-<table>
+<table width="100%">
 <tr>
-<td align="center"><img src="docs/images/board.png" height="350" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
-<td align="center"><img src="docs/images/board-um980.png" height="350" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
-<td align="center"><img src="docs/images/splitter.png" height="350" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
+<td align="center" width="27%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
+<td align="center" width="49%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
+<td align="center" width="24%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
@@ -30,9 +30,10 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 
 | Board | ESP32-S3 module | Price | Buy |
 |---|---|---|---|
-| **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$145 (C$200) | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html) |
+| **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$145 (C$200) | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html), [Alt](https://www.aliexpress.com/item/1005013190792289.html) (built-in antenna only) |
 | **UM980** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna); ask the seller for WROOM-1U-N16R8 (external antenna), same price | US$150 (C$212) | [Alibaba](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html) |
-| **GNSS splitter** (optional) | – (shares one antenna between two receivers) | about C$15 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
+| **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about C$15 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
+| **Antenna:** Beitian BT-800S | N/A (all the bands the station uses; TNC socket, so a TNC-to-SMA cable) | about C$75 | [AliExpress](https://www.aliexpress.com/item/1005009033251316.html) (variant "BT-800S") |
 
 - **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board).
   Plug or unplug it only with the power off: the socket powers the antenna.
