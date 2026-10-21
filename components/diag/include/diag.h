@@ -282,6 +282,16 @@ typedef enum {
      * b = seconds since its success reply.
      */
     DIAG_EV_ROVER_DOWN = 27,
+    /**
+     * The board choice at the start (components/board, board_table.h), only
+     * when something is off: a = board_issue_t (1 a marked board on a chip
+     * of another flash size, 2 a marker this firmware does not know, 3 more
+     * than one marker: the receiver link stays closed and the board's LEDs
+     * are not used; 4 the original board on a chip of another flash size:
+     * noted only), b = the chip's flash in MB (bits 0-7, 0 = not known) |
+     * the board's flash in MB (bits 8-15).
+     */
+    DIAG_EV_BOARD = 28,
 } diag_event_t;
 
 /** DIAG_EV_FIXED_POS events (low byte of `a`). */

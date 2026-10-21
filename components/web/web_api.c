@@ -229,6 +229,7 @@ void web_snap_status(web_status_snap_t *s)
     s->flash_reason = WEB_FLASH_REASON;
     board_wiring_active(&s->link);
     s->link_off = board_link_off_reason();
+    s->link_off_board = board_problem() != NULL;
     monitor_get_status(&s->mon);   /* a copy of the summary the monitor keeps: no summing here */
 }
 
@@ -1663,6 +1664,9 @@ static esp_err_t send_system(httpd_req_t *req, int reboot_required)
         .chip_revision = chip.revision,
         .flash_mb = flash / (1024u * 1024u),
         .psram_mb = (uint32_t)(esp_psram_get_size() / (1024u * 1024u)),
+        .board_id = board_get()->id,
+        .board_name = board_get()->name,
+        .board_marked = board_get()->source == BOARD_SOURCE_MARKER,
         .reboot_required = reboot_required,
         .wiring_saved = have_saved,
         .saved = saved,
@@ -1721,8 +1725,8 @@ static esp_err_t h_system_put(web_req_t *r)
         }
         board_wiring_t active;
         board_wiring_active(&active);
-        /* A restart is needed for another wiring, and for any while this start's link stays closed. */
-        bool differs = !board_wiring_same(&active, &wiring) || board_link_off_reason() != NULL;
+        /* A restart is needed for another wiring, and for any while this start's saved one is refused. */
+        bool differs = !board_wiring_same(&active, &wiring) || board_wiring_refused();
         ESP_LOGI(TAG, "receiver wiring saved by the user: RX GPIO%d, TX GPIO%d, COM%u%s", wiring.rx_gpio, wiring.tx_gpio,
                  (unsigned)wiring.port, differs ? " (from the next start)" : "");
         reboot = differs ? 1 : 0;

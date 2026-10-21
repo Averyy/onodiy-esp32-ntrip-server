@@ -536,6 +536,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         wiring_fields(w, &s->link);
         if (s->link_off != NULL) {
             wj_str(w, "off", s->link_off);
+            wj_str(w, "off_by", s->link_off_board ? "board" : "wiring");
         }
         wj_obj_close(w);
     }
@@ -2062,6 +2063,11 @@ void web_build_system(wj_t *w, const web_system_snap_t *s)
     wj_str(w, "revision", rev);
     wj_uint(w, "flash_mb", s->flash_mb);
     wj_uint(w, "psram_mb", s->psram_mb);
+    wj_obj_close(w);
+    wj_obj_open(w, "board");
+    wj_str(w, "id", s->board_id != NULL ? s->board_id : "");
+    wj_str(w, "name", s->board_name != NULL ? s->board_name : "");
+    wj_str(w, "source", s->board_marked ? "marker" : "default");
     wj_obj_close(w);
     wj_obj_open(w, "wiring");
     wiring_fields(w, &s->wiring);

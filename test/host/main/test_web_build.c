@@ -918,16 +918,18 @@ TEST_CASE("journal names cover the connection-history and receiver kinds; the ga
     TEST_ASSERT_EQUAL(25, DIAG_EV_WIFI_ROAM);
     TEST_ASSERT_EQUAL(26, DIAG_EV_ROVER_UP);
     TEST_ASSERT_EQUAL(27, DIAG_EV_ROVER_DOWN);
+    TEST_ASSERT_EQUAL(28, DIAG_EV_BOARD);
 }
 
 TEST_CASE("journal: a move between access points is wifi_roam, a rover's session rover_connect and rover_disconnect, "
-          "the kinds after them unknown", "[web_build]")
+          "the board choice board, the kinds after them unknown", "[web_build]")
 {
     TEST_ASSERT_EQUAL_STRING("wifi_roam", web_diag_event_name(DIAG_EV_WIFI_ROAM));
     TEST_ASSERT_EQUAL_STRING("rx_boot", web_diag_event_name(DIAG_EV_RX_BOOT));
     TEST_ASSERT_EQUAL_STRING("rover_connect", web_diag_event_name(DIAG_EV_ROVER_UP));
     TEST_ASSERT_EQUAL_STRING("rover_disconnect", web_diag_event_name(DIAG_EV_ROVER_DOWN));
-    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_ROVER_DOWN + 1));
+    TEST_ASSERT_EQUAL_STRING("board", web_diag_event_name(DIAG_EV_BOARD));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_BOARD + 1));
 }
 
 TEST_CASE("the power-lost alert and the new network ladder reasons have API names", "[web_build]")
@@ -2809,6 +2811,43 @@ TEST_CASE("system: the receiver wiring this start uses, the saved one, the build
     cJSON_Delete(root);
 }
 
+TEST_CASE("system: the board, its id, name and whether the partition table marked it", "[web_build]")
+{
+    web_system_snap_t s = {
+        .hostname = "",
+        .hostname_active = "onodiy",
+        .version = "v0.3.0",
+        .project = "onodiy-esp32-ntrip-server",
+        .idf = "v6.1",
+        .chip_model = "esp32s3",
+        .flash_mb = 8,
+        .board_id = "ntrip-x",
+        .board_name = "GNS NTRIP-X",
+        .board_marked = true,
+        .reboot_required = -1,
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_system(&w, &s);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    const cJSON *b = at(root, "board");
+    TEST_ASSERT_EQUAL_STRING("ntrip-x", at(b, "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", at(b, "name")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("marker", at(b, "source")->valuestring);
+    TEST_ASSERT_EQUAL(8, at(at(root, "chip"), "flash_mb")->valueint);
+    cJSON_Delete(root);
+    s.board_id = "um982-aliexpress";
+    s.board_name = "UM982 board (AliExpress)";
+    s.board_marked = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_system(&w, &s);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL_STRING("um982-aliexpress", at(at(root, "board"), "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("default", at(at(root, "board"), "source")->valuestring);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("status: the receiver's link, its pins and port, in the admin form only", "[web_build]")
 {
     fixture();
@@ -2824,7 +2863,14 @@ TEST_CASE("status: the receiver's link, its pins and port, in the admin form onl
     s_snap.link_off = "GPIO26 is used by flash/PSRAM.";
     root = build_status(false);
     TEST_ASSERT_EQUAL_STRING("GPIO26 is used by flash/PSRAM.", at(at(at(root, "receiver"), "link"), "off")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("wiring", at(at(at(root, "receiver"), "link"), "off_by")->valuestring);
     cJSON_Delete(root);
+    /* The board choice failed: the same field, another cause (a restart or another wiring does not change it). */
+    s_snap.link_off_board = true;
+    root = build_status(false);
+    TEST_ASSERT_EQUAL_STRING("board", at(at(at(root, "receiver"), "link"), "off_by")->valuestring);
+    cJSON_Delete(root);
+    s_snap.link_off_board = false;
     s_snap.link_off = NULL;
     root = build_status(true);
     TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "receiver"), "link"));

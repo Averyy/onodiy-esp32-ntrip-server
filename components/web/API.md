@@ -570,7 +570,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `receiver.restarting` | the receiver said it is restarting (it answered a command with `The Board is resetting,do not response any command!`) within the last 20 s and its restart banner has not come yet: it answers, it is not silent; admin form only (also in `GET /api/gnss`) |
 | `receiver.journal` | `none`, `running`, `waiting`, `unreadable`, `unknown` (section 9) |
 | `receiver.first_apply_held` | the receiver's first configuration waits for the user (`gnss/hold`, section 8): only queries reach the receiver until the user applies; admin form only |
-| `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; with `off` (a sentence: `board_link_off_reason()`) the link stays closed this start because the saved wiring fails the board's check, and nothing is sent to the receiver (neither on it nor on the build's pins); admin form only |
+| `receiver.link` | the receiver wiring this start uses (`board_wiring_active()`): the ESP32's RX and TX GPIOs and the receiver port they reach (`1` = COM1 ... `3` = COM3), as `wiring` in `GET /api/system`; with `off` (a sentence: `board_link_off_reason()`) the link stays closed this start, and nothing is sent to the receiver: `off_by` says why, `wiring` the saved wiring fails the board's check (neither it nor the board's pins are used; saving another and restarting changes it), `board` the board choice failed (`board` in `GET /api/system`; a restart does not change it, an install for this board does); admin form only |
 | `receiver.next_detect_in_s` | no receiver found, or the station looking for it (`no_receiver`, `detecting`): seconds until the next detection pass, `0` while one runs; `null` in every other state. Read at the time of the request (a pass can take most of a minute) |
 | `receiver.signal_test` | the signal-group comparison (section 8) in short: `null` when none runs and none ended in the last 24 h of this boot; else `{"state", "phase", "group", "left_s", "decide_left_s", "outcome"}`: `state` as in `GET /api/gnss/signal-test`, `phase` 0 or 1 while switching, settling or measuring (else `null`), `group` the group being switched to, measured or (deciding) running, or the one restored to (`{"master", "slave"}`, else `null`), `left_s` the time left in the phase rounded up to 10 s, `decide_left_s` the time left to choose rounded up to a minute (`null` outside those states; rounded so the section changes rarely), `outcome` once decided (`null` while running). Admin form only |
 | `casters[]` | every slot; the full status is in `/api/casters`. `empty`: the slot has no host and is not enabled (never set up, or removed); its `name` is then `""` whatever the stored name is. In safe mode (configs not loaded) no slot is empty and every `name` is `null`. `today_online_s` and `today_offline_s` are the availability ledger's (kept across restarts, section 10). Onocoy day figures (`graced_uptime_permille`, `streak_ok`, `graced_uptime_so_far_permille`, `data_rate_permille`, `budget_s`, `budget_left_s`, section 10) are `null` for other slots, and for the protected slot too while it is disabled or not set up (`onocoy_ready` false); `onocoy_ready` is true for an Onocoy slot with a mountpoint and the console's username and password; `unreached_s` = the current run of failures that never reached the caster (DNS, connect timed out or failed locally; 0 = none); `stop_reason` why the Onocoy login guard stopped the slot (`ntrip_stop_t`; `none` unless `state` is `stopped`, section 10) |
@@ -2010,11 +2010,21 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
  "setup_done": true, "settings_available": true,
  "version": "v0.3.0", "project": "onodiy-esp32-ntrip-server", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
  "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8},
+ "board": {"id": "um982-aliexpress", "name": "UM982 board (AliExpress)", "source": "default"},
  "wiring": {"rx_gpio": 1, "tx_gpio": 2, "port": 1,
             "saved": {"rx_gpio": 17, "tx_gpio": 18, "port": 2, "problem": null},
             "default": {"rx_gpio": 1, "tx_gpio": 2, "port": 1},
             "pins": [1, 2, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21, 38, 39, 40, 41, 42, 47, 48]}}
 ```
+
+`board` is the board this start runs on (`components/board/board_table.c`):
+its `id`, `name` and where that came from, `source`: `marker` (the partition
+table's `board.<id>` partition, written by the board's install, e.g.
+`ntrip-x` for the GNS NTRIP-X) or `default` (no marker: the original board,
+`um982-aliexpress`). A marker that cannot be used (the chip's flash size is
+not the board's, or a board this firmware does not know) still names the
+marked board, or the original one for an unknown id, keeps the receiver link
+closed (`receiver.link.off`, `off_by` `board`) and is journalled (`board`).
 
 `wiring` is how the receiver is wired to the ESP32: its top-level fields the
 wiring this start uses (the ESP32's RX GPIO, wired to the receiver's TXD; its
@@ -2024,11 +2034,13 @@ COM3). `saved` is the one saved on the station (settings `gnss/wiring`),
 and app updates and a factory reset keep it. Its `problem` says why the
 board does not use it (a later build reserving one of its pins: the
 receiver link then stays closed, `receiver.link.off`, and the build's pins
-are not used either), `null` when it is usable. `default` is the build's
-(`CONFIG_BOARD_GNSS_*`). `pins` are the GPIOs the link may use on this board:
-ones the ESP32-S3 has that the flash and PSRAM, native USB, the console, the
-strapping pins (0, 3, 45, 46), the button, the status LED, the receiver
-reset and the SD card do not use.
+are not used either), `null` when it is usable. `default` is the board's
+(on the original board the build's, `CONFIG_BOARD_GNSS_*`). `pins` are the
+GPIOs the link may use on this board: ones the ESP32-S3 has that the flash
+and PSRAM, native USB, the console, the strapping pins (0, 3, 45, 46), the
+button, the LEDs, the receiver reset and status input, the SD card and the
+board's pins wired to parts of unknown use (GPIO1, 2, 40 and 41 on the GNS
+NTRIP-X) do not use.
 
 ### `PUT /api/system` (adm)
 
@@ -2678,6 +2690,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one, 3 asked for on the bench console) \| bit 24: its reconnect found no stronger one after all and it stayed \| bit 25: the address and the connections were kept (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address, with bit 25 without a link (bits 16-30) |
 | `rover_connect` | a rover's session (section 10a) that has streamed 10 s, journalled then (at most 6 sessions an hour are listed; the others are only counted): connection (bits 0-3) \| NTRIP version (bits 4-5) \| IPv6 (bit 6) \| seconds since its success reply (bits 8-15) \| sessions not listed since the previous listed one, shorter ones included (bits 16-30) | its IPv4 address as `(a << 24) \| (b << 16) \| (c << 8) \| d` (read it as `b >>> 0`); for IPv6, the address's last 4 bytes |
 | `rover_disconnect` | the end of a listed session: connection (bits 0-3) \| end reason (`local_caster_end_t`, bits 8-15) | session s, since its success reply |
+| `board` | the board choice at the start, written only when something is off (`board_issue_t`): 1 the partition table marks a board whose flash size differs from the chip's, 2 it marks a board this firmware does not know, 3 it marks more than one (1-3: the receiver link stays closed, `receiver.link.off`, and the board's LEDs are not used); 4 no marker (the original board) but the chip's flash size differs from that board's: noted only | the chip's flash in MB (bits 0-7, 0 = not known) \| the board's flash in MB (bits 8-15) |
 | `rx_maintenance` | 1 entry, 0 exit | chosen duration s (entry), time spent s (exit) |
 | `rx_boot` | after a power-on or brownout reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin, or only its supply dipped), 2 restarted with it (the power was cut, or dipped for both), 3 unknown; written once per power-on or brownout boot, when the station knows (`station.rx_boot` in `/api/health`); only a power-on boot's 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
@@ -3244,7 +3257,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25, `rover_connect` = 26, `rover_disconnect` = 27 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25, `rover_connect` = 26, `rover_disconnect` = 27, `board` = 28 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |

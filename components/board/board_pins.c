@@ -61,7 +61,11 @@ static bool pin_problem(const char *role, int gpio, const board_pin_use_t *uses,
     }
     for (size_t i = 0; i < n_uses; i++) {
         if (uses[i].gpio == gpio) {
-            snprintf(why, cap, "GPIO%d is already the %s pin.", gpio, uses[i].what);
+            if (uses[i].what == NULL) {
+                snprintf(why, cap, "GPIO%d is wired to another part of the board.", gpio);
+            } else {
+                snprintf(why, cap, "GPIO%d is already the %s pin.", gpio, uses[i].what);
+            }
             return true;
         }
     }

@@ -118,6 +118,18 @@ static esp_err_t ledger_step(void)
     return lifecycle_register_shutdown_hook(ledger_reboot_hook, NULL);
 }
 
+/* The board, and in the journal anything off about which one it is (board is below diag). */
+static esp_err_t board_step(void)
+{
+    esp_err_t err = board_init();
+    int32_t a = 0;
+    int32_t b = 0;
+    if (board_journal_note(&a, &b)) {
+        (void)diag_journal_append(DIAG_EV_BOARD, a, b);
+    }
+    return err;
+}
+
 /* Initialisation: allocate, load settings, register handlers. No tasks yet
  * (except the lifecycle service, started by lifecycle_init() right after the
  * settings). fw_update goes first so a failing app trial is reverted before
@@ -125,7 +137,7 @@ static esp_err_t ledger_step(void)
  * are skipped in safe mode; their status getters work uninitialised. */
 static const boot_step_t s_init_steps[] = {
     { "fw_update",    fw_update_init,    false }, /* app trial bookkeeping, revert */
-    { "board",        board_init,        false },
+    { "board",        board_step,        false }, /* which board, its pins */
     { "ledger",       ledger_step,       false }, /* first shutdown hook; planned-reboot accounting */
     { "pkg_store",    pkg_store_init,    false },
     { "rtcm_hub",     rtcm_hub_init,     true  },

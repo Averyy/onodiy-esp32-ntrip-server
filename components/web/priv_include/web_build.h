@@ -146,6 +146,7 @@ typedef struct {
     const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
     board_wiring_t link;           /**< the receiver wiring this start uses (receiver.link) */
     const char *link_off;          /**< why the link stays closed (board_link_off_reason), NULL = it opens */
+    bool link_off_board;           /**< it stays closed because of the board choice (board_problem), not the saved wiring */
     monitor_status_t mon;          /**< the latest sample and the running 24 h (monitor) */
 } web_status_snap_t;
 
@@ -345,6 +346,9 @@ typedef struct {
     unsigned chip_revision;        /**< major * 100 + minor */
     uint32_t flash_mb;
     uint32_t psram_mb;
+    const char *board_id;          /**< board_get()->id */
+    const char *board_name;
+    bool board_marked;             /**< from the partition table's marker (else the original board, no marker) */
     int reboot_required;           /**< -1 = leave the field out */
     board_wiring_t wiring;         /**< the receiver wiring this start uses */
     board_wiring_t wiring_default; /**< the build's */

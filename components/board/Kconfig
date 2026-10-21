@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: MIT
 menu "Station: board and pins"
 
+    comment "The original board (no board marker in the partition table); a marked board uses its own pins (board_table.c)"
+
     config BOARD_GNSS_UART_NUM
         int "UART controller of the GNSS link"
         range 1 2

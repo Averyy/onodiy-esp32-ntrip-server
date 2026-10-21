@@ -2299,6 +2299,10 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
     assert gone == [r for r in gone if r[0] != "Signal"] and [r[0] for r in gone] == ["Chip", "ESP-IDF", "Wi-Fi", "MAC address",
                                                                                     "Moves to another access point"]
     assert dict(gone)["Wi-Fi"] == "Home, offline for 30s"
+    # The board, first, once the station names it (GET /api/system's board).
+    marked = dict(sys, board={"id": "ntrip-x", "name": "GNS NTRIP-X", "source": "marker"})
+    (named,) = run_editor([{"fn": "chip", "sys": marked, "status": status, "wifi": qemu, "net": {}}])
+    assert named[0] == ["Board", "GNS NTRIP-X"] and [r[0] for r in named[1:]] == [r[0] for r in bare]
 
 
 def test_earlier_starts_say_when_what_and_which_version():

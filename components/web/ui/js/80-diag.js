@@ -309,13 +309,14 @@ function healthCard(hl, s) {
     ]));
 }
 
-/* Chip and Wi-Fi: sys (GET /api/system), the status s, w (GET /api/wifi) and net (health's network), any of them may be missing. */
+/* Chip and Wi-Fi (and the board): sys (GET /api/system), the status s, w (GET /api/wifi) and net (health's network), any of them may be missing. */
 function chipCard(sys, s, w, net) {
   const chip = (sys && sys.chip) || {};
   net = net || {};
   return h('section', { class: 'card' },
     h('h2', null, 'Chip and Wi-Fi'),
     kv([
+      sys && sys.board && sys.board.name ? ['Board', sys.board.name] : null,
       sys ? ['Chip', [[chip.model, chip.revision].filter(Boolean).join(' '), chip.flash_mb ? chip.flash_mb + NB + 'MB flash' : null,
         chip.psram_mb ? chip.psram_mb + NB + 'MB PSRAM' : null].filter(Boolean).join(', ')] : null,
       sys ? ['ESP-IDF', sys.idf] : null,
@@ -1128,6 +1129,15 @@ function journalDetail(e) {
       return a ? 'Started for ' + fmt.dur(b) : 'Ended after ' + fmt.dur(b);
     case 'rx_boot':
       return a === 1 ? 'Kept running' : a === 2 ? 'Restarted too: the power was lost' : 'Not known';
+    case 'board': {
+      /* a: board_issue_t; b: the chip's flash MB (bits 0-7, 0 = not known) | the board's (8-15). */
+      const chipMb = b & 0xff, boardMb = (b >>> 8) & 0xff;
+      if (a === 1) return 'The install is for a ' + boardMb + NB + 'MB board, but the chip has ' + chipMb + NB + 'MB: receiver link off';
+      if (a === 2) return 'The install names a board this firmware does not know: receiver link off';
+      if (a === 3) return 'The install marks more than one board: receiver link off';
+      if (a === 4) return 'The chip has ' + chipMb + NB + 'MB flash, the board ' + boardMb + NB + 'MB';
+      return 'Issue ' + a;
+    }
     case 'wifi_roam': {
       /* a: channels before and after, who moved it, stayed on the same one, kept the address; b: signals before and
        * after, seconds offline (with the address kept: without a link, not said). */
@@ -1193,7 +1203,7 @@ function journalByBoot(entries) {
 /* The filter of the event list: [value, label, kinds (null: all)]. */
 const EV_FILTER = [
   ['all', 'All events', null],
-  ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot']],
+  ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot', 'board']],
   ['recovery', 'Recovery', ['ladder_step']],
   ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop', 'rover_connect', 'rover_disconnect']],
   ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],

@@ -45,7 +45,7 @@ bool board_pin_for_link(int gpio);
 
 /** One of the board's other pins, which the receiver link may not take. */
 typedef struct {
-    const char *what;        /**< "button", ... */
+    const char *what;        /**< "button", ...; NULL: a pin wired to a part of the board whose use is not known */
     int gpio;                /**< -1 = not wired (ignored) */
 } board_pin_use_t;
 

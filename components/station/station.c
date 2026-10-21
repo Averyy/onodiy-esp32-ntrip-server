@@ -4039,7 +4039,7 @@ bool station_wiring_pending(void)
     }
     board_wiring_t now;
     board_wiring_active(&now);
-    return !board_wiring_same(&next, &now) || board_link_off_reason() != NULL;
+    return !board_wiring_same(&next, &now) || board_wiring_refused();
 }
 
 const char *station_flash_reason(void)

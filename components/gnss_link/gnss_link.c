@@ -1313,7 +1313,7 @@ esp_err_t gnss_link_init(void)
     }
     const char *off = board_link_off_reason();
     if (off != NULL) {
-        ESP_LOGE(TAG, "saved receiver wiring not usable (%s): GNSS UART left closed", off);
+        ESP_LOGE(TAG, "receiver link off (%s): GNSS UART left closed", off);
         return ESP_ERR_INVALID_STATE;
     }
     sync_init();

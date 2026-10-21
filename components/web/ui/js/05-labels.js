@@ -307,7 +307,7 @@ const J = {
   kind: { boot: 'Start', session: 'Previous uptime', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
     live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at the start', fixed_check: 'Fixed position',
-    wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected' },
+    wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected', board: 'Board' },
   /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',
@@ -451,6 +451,11 @@ function sameWiring(a, b) {
 /* The link stays closed this start (receiver.link.off): the saved wiring fails the board's check. */
 const LINK_OFF = 'The receiver link is off: the saved receiver wiring cannot be used';
 
+/* The link stays closed because of the board choice (off_by 'board'): its reason says what to do. */
+function linkOffBoard(l) {
+  return 'The receiver link is off: ' + l.off;
+}
+
 /** "RX GPIO1, TX GPIO2, receiver COM1". */
 function wiringText(w) {
   return 'RX GPIO' + w.rx_gpio + ', TX GPIO' + w.tx_gpio + ', receiver COM' + w.port;
@@ -461,7 +466,7 @@ function noReceiverText(a, link) {
   const next = a.next_detect_in_s === null || a.next_detect_in_s === undefined ? '' :
     a.next_detect_in_s <= 0 ? ' Searching now.' : ' Next search in ' + inMinutes(a.next_detect_in_s) + '.';
   const l = link || receiverLink();
-  if (l.off) return LINK_OFF + ' (' + l.off.replace(/\.$/, '') + '). Change it under Settings → Receiver wiring.';
+  if (l.off) return l.off_by === 'board' ? linkOffBoard(l) : LINK_OFF + ' (' + l.off.replace(/\.$/, '') + '). Change it under Settings → Receiver wiring.';
   if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.' + next;
   return 'Nothing arrives from the receiver. Check its power and the cable from its COM' + l.port + ' to the station ' +
     '(receiver TX to GPIO' + l.rx_gpio + ', RX to GPIO' + l.tx_gpio + '). Wired otherwise? Settings → Receiver wiring.' + next;
@@ -469,9 +474,10 @@ function noReceiverText(a, link) {
 
 /* The Status page's no-receiver line (the pins are in the Receiver page's panel). */
 function noReceiverLead(a, link) {
-  if ((link || receiverLink()).off) return LINK_OFF + '. Change it under Settings → Receiver wiring.';
+  const l = link || receiverLink();
+  if (l.off) return l.off_by === 'board' ? linkOffBoard(l) : LINK_OFF + '. Change it under Settings → Receiver wiring.';
   if (a.saw_bytes) return 'Data arrives, but the station cannot read it. Check the wiring and the receiver\'s port speed.';
-  return 'Nothing arrives from the receiver. Check its power and the COM' + (link || receiverLink()).port + ' cable.';
+  return 'Nothing arrives from the receiver. Check its power and the COM' + l.port + ' cable.';
 }
 
 /* "next search in 23 s", or null. */
