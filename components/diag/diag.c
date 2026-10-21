@@ -73,7 +73,8 @@ static void coredump_check(void)
     if (esp_core_dump_image_check() == ESP_OK && esp_core_dump_image_get(&addr, &size) == ESP_OK && size > 0) {
         cd.present = true;
         cd.size = size;
-#if CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+        /* ELF is ESP-IDF v6's only core dump format (CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF is no longer
+         * defined there: a guard on it left every summary out). */
         esp_core_dump_summary_t sum;
         if (esp_core_dump_get_summary(&sum) == ESP_OK) {
             strlcpy(cd.task, sum.exc_task, sizeof(cd.task));
@@ -84,8 +85,9 @@ static void coredump_check(void)
             }
             memcpy(cd.backtrace, sum.exc_bt_info.bt, depth * sizeof(cd.backtrace[0]));
             cd.backtrace_depth = (uint8_t)depth;
+        } else {
+            ESP_LOGW(TAG, "core dump summary not readable");
         }
-#endif
         ESP_LOGW(TAG, "core dump stored: %u bytes, task \"%s\", PC 0x%08lx", (unsigned)cd.size, cd.task,
                  (unsigned long)cd.pc);
     }

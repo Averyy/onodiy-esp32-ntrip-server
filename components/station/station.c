@@ -4044,6 +4044,9 @@ bool station_wiring_pending(void)
 
 const char *station_flash_reason(void)
 {
+    if (pkg_store_capacity() == 0) {
+        return "no_package_area";   /* this board's partition table has none (a board with 8 MB flash) */
+    }
     if (!um98x_flash_enabled()) {
         return "not_enabled_in_build";
     }

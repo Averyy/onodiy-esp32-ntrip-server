@@ -6,6 +6,15 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Boards: the firmware knows which board it runs on and names it on Logs (Chip and
+  Wi-Fi). GNS NTRIP-X support, untested (no NTRIP-X has run it yet): its own install
+  with 8 MB flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on
+  GPIO16/15. Receiver firmware updates are not available on it yet.
+- Release: one image per board to write at 0x0 after an erase
+  (`onodiy-install-16mb.bin` for the UM982 and UM980 boards), with the commands in the
+  notes.
+- Logs: a crash's core dump names the crashed task, its address and a backtrace (they
+  were always empty: ESP-IDF v6.1 no longer defines the setting the firmware checked).
 - Status: the "Update available" banner shows here too, and its button says where it
   goes: "Settings page".
 - The dot beside a tab (an update is waiting) lines up with the tab's name.

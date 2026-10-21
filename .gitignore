@@ -3,6 +3,8 @@ build/
 # Other build directories: build-qemu/ (QEMU development build,
 # tools/qemu/run.sh), build-bench/ (sdkconfig.bench)
 build-*/
+# Every board's install files (tools/ci/install_files.sh build install)
+install/
 sdkconfig.old
 
 # IDE

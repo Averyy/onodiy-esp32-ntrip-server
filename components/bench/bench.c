@@ -68,6 +68,7 @@ static const char *TAG = "bench";
 #define TOK_HEAP    "FRAGMENT-HEAP"
 #define TOK_UART    "CLOSE-UART"
 #define TOK_SAFE    "ENTER-SAFE-MODE"
+#define TOK_CRASH   "CRASH-ESP32"
 
 #define RUN_TIMEOUT_MS (20u * 60u * 1000u)
 #define RACE_MAX_MS    10000u
@@ -417,6 +418,18 @@ static int cmd_safemode(int argc, char **argv)
     say("BENCH %s\n", err == ESP_OK ? "restart into safe mode requested (a failed boot at the crash limit)"
                                     : esp_err_to_name(err));
     return err == ESP_OK ? 0 : 1;
+}
+
+/* A crash on request: the panic handler saves a core dump, then the chip restarts (the dump's size against the
+ * coredump partition, the crash's journal and boot record). */
+static int cmd_crash(int argc, char **argv)
+{
+    if (argc != 2 || !confirmed(argc, argv, TOK_CRASH)) {
+        return 1;
+    }
+    say("BENCH crash requested: abort() now, a core dump and a restart follow\n");
+    vTaskDelay(pdMS_TO_TICKS(200));   /* the reply reaches the console first */
+    abort();
 }
 
 /* Names next to the numbers in `status`: the station state, the update phase
@@ -1341,6 +1354,7 @@ esp_err_t bench_start(void)
     reg("jclear", "Clear the receiver update journal: jclear " TOK_CLEAR, cmd_jclear);
     reg("restart", "Software restart of the ESP32: restart " TOK_RESTART, cmd_restart);
     reg("safemode", "Restart into safe mode (a failed boot at the crash limit): safemode " TOK_SAFE, cmd_safemode);
+    reg("crash", "Crash now (abort: a core dump, then a restart): crash " TOK_CRASH, cmd_crash);
     reg("status", "Station state, journal and the last session", cmd_status);
     reg("capture", "Print the byte capture (last KB): capture [KB]", cmd_capture);
 #if CONFIG_GNSS_LINK_BENCH_HOOKS

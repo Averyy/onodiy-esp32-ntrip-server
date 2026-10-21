@@ -27,9 +27,14 @@ Release with:
   its `SHA256SUMS`);
 - `manifest.json`, written by [`tools/release_manifest.py`](../tools/release_manifest.py):
   the version, and every file with its size and SHA-256;
-- `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` and an `esptool`
-  command line in the release notes, for the first flash of a new board, and
-  `THIRD_PARTY_NOTICES.md`.
+- for the first flash of a new board, one image per board to write at 0x0 after
+  an erase: `onodiy-install-16mb.bin` (UM982 board, UM980 board) and
+  `onodiy-install-um980-ntrx.bin` (GNS NTRIP-X: the 8 MB table, the bootloader set
+  for 8 MB flash), with the commands in the release notes
+  ([`tools/ci/install_files.sh`](../tools/ci/install_files.sh)); the same 16 MB
+  install as `bootloader.bin`, `partition-table.bin`, `ota_data_initial.bin` with
+  its `esptool` command line, and `partition-table-8mb.bin`;
+- `THIRD_PARTY_NOTICES.md`.
 
 The release is published only once every file is attached. Stations read only the
 release GitHub marks Latest; the job gives that mark to the highest `vX.Y.Z`, so a

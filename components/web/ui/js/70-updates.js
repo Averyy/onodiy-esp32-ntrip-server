@@ -749,13 +749,23 @@ const updatesPart = {
       if (staged) stagedTimer = setInterval(tick, 1000);
     }
 
+    /* The receiver package upload; a board without a package area (pkg_max_bytes null) says so instead. */
+    const pkgRow = h('div', null, settingRow('Receiver package (.pkg)', 'Checked first. Nothing reaches the receiver until you confirm.', pkgPick.b),
+      pkgPick.input, P.gnss_upload.el, pkgErr, stagedBox);
+    const noPkgRow = settingRow('Receiver package (.pkg)', notEnabled('no_package_area'), null);
+    noPkgRow.hidden = true;
+    function renderPkgRow() {
+      const none = !!u && u.pkg_max_bytes === null && !staged;
+      pkgRow.hidden = none;
+      noPkgRow.hidden = !none;
+    }
+
     /* Install manually: every way in besides the offered release, one list, always shown. */
     const manualBox = h('div', null, h('h3', { class: 'sub' }, 'Install manually'),
       h('div', { class: 'rows' },
         h('div', null, settingRow('App file (.bin)', 'For pre-releases, older versions and your own builds.', appPick.b), appPick.input,
           P.app_upload.el, appUploadErr),
-        h('div', null, settingRow('Receiver package (.pkg)', 'Checked first. Nothing reaches the receiver until you confirm.', pkgPick.b),
-          pkgPick.input, P.gnss_upload.el, pkgErr, stagedBox),
+        pkgRow, noPkgRow,
         maintBox,
         rolledBox));
     const updCard = h('section', { class: 'card' }, headBox, h('div', { class: 'rows' }, appBox, gnssBox, manualBox));
@@ -795,6 +805,7 @@ const updatesPart = {
       const key = JSON.stringify([u, flash, rflow]);
       if (periodic && (key === shownKey || interacting(updCard) || interacting(sessionCard))) return;
       shownKey = key;
+      renderPkgRow();
       renderCheck();
       renderApp();
       renderGnss();

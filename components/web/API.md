@@ -2010,7 +2010,7 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
  "setup_done": true, "settings_available": true,
  "version": "v0.3.0", "project": "onodiy-esp32-ntrip-server", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
  "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8},
- "board": {"id": "um982-aliexpress", "name": "UM982 board (AliExpress)", "source": "default"},
+ "board": {"id": "um982-alix", "name": "UM982 board (AliExpress)", "source": "default"},
  "wiring": {"rx_gpio": 1, "tx_gpio": 2, "port": 1,
             "saved": {"rx_gpio": 17, "tx_gpio": 18, "port": 2, "problem": null},
             "default": {"rx_gpio": 1, "tx_gpio": 2, "port": 1},
@@ -2020,8 +2020,8 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
 `board` is the board this start runs on (`components/board/board_table.c`):
 its `id`, `name` and where that came from, `source`: `marker` (the partition
 table's `board.<id>` partition, written by the board's install, e.g.
-`ntrip-x` for the GNS NTRIP-X) or `default` (no marker: the original board,
-`um982-aliexpress`). A marker that cannot be used (the chip's flash size is
+`um980-ntrx` for the GNS NTRIP-X) or `default` (no marker: the original board,
+`um982-alix`). A marker that cannot be used (the chip's flash size is
 not the board's, or a board this firmware does not know) still names the
 marked board, or the original one for an unknown id, keeps the receiver link
 closed (`receiver.link.off`, `off_by` `board`) and is journalled (`board`).
@@ -2102,7 +2102,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
 | `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: the rest of the trial (confirmation plus crash watch; for a reinstall of the running image the confirmation only) |
-| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
+| `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `no_package_area` (the board's partition table has no receiver package partition: a board with 8 MB flash such as the GNS NTRIP-X; `pkg_max_bytes` is then `null`, no receiver build is offered and an upload is refused), `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
 ### `GET /api/update` (adm)
@@ -2139,7 +2139,7 @@ until a newer version appears; the server keeps no "later" state.
 | `last_check_result` | how that check went (`fw_update_check_result_t`): `ok`, `no_release` (HTTP 404: no public release with a manifest at `release_repo`), `http_error` (another status: `last_http_status`), `no_response` (offline, DNS, TLS, timeout, no trusted clock yet; retried after 1 h), `untrusted_redirect`, `bad_manifest` (an answer, but no manifest this build accepts); `null` before the first check of this boot. A field of its own because `last_result` already names job outcomes |
 | `last_http_status` | the check's final HTTP status, `null` when no answer came |
 | `next_check_in_s` | until the next automatic check is due (`0` = due, it waits for the network), `null` when this build cannot check |
-| `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it |
+| `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it. `pkg_max_bytes` is `null` on a board without a receiver package partition (`gnss_flash_reason` `no_package_area`): the UI offers no package upload there, and `POST /api/upload/gnss` answers `413 too_large` |
 | `running_elf_sha256` | the running app's ELF SHA-256 (`esp_app_desc_t.app_elf_sha256`): an app image with the same one is the code running now |
 | `app.latest` | the latest release's version, `null` before a check found one; the last check's manifest is kept over a restart (`ota/manifest`), so a restart does not forget it |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching`; `left_s` is the stage's time left, `ends_in_s` the whole trial's (to the crash watch's end; both 0 without a trial) |
@@ -2150,7 +2150,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
-| `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason (`not_enabled_in_build`, `receiver_port`) when it is `false`, else `null` |
+| `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason (`no_package_area`, `not_enabled_in_build`, `receiver_port`) when it is `false`, else `null` |
 
 **Result codes** (`last_result.result`, final `progress` messages): `ok`,
 `not_available_yet`, `refused` (the state changed between click and start),

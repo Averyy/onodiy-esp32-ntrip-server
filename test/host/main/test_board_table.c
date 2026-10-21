@@ -43,7 +43,7 @@ TEST_CASE("board table: the original board is today's Kconfig defaults, first in
 
 TEST_CASE("board table: the GNS NTRIP-X as found on the unit", "[board]")
 {
-    const board_entry_t *e = board_table_find("ntrip-x");
+    const board_entry_t *e = board_table_find("um980-ntrx");
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", e->name);
     TEST_ASSERT_EQUAL(8, e->flash_mb);
@@ -88,10 +88,8 @@ TEST_CASE("board table: every board's pins exist, are free of the module's and o
         TEST_ASSERT_EQUAL_PTR(e, board_table_find(e->id));
         TEST_ASSERT_NOT_EQUAL(0, e->uart_num);   /* UART0 is the console */
         TEST_ASSERT_TRUE(e->port >= 1 && e->port <= 3);
-        /* The original board is never marked; every other one is, by "board." + id in a 16-character label. */
-        if (b > 0) {
-            TEST_ASSERT_TRUE_MESSAGE(strlen(e->id) <= BOARD_ID_MAX, e->id);
-        }
+        /* "board." + id fits a 16-character partition label (the original board is never marked, its id fits too). */
+        TEST_ASSERT_TRUE_MESSAGE(strlen(e->id) <= BOARD_ID_MAX, e->id);
         int pins[16];
         size_t n = board_pins_of(e, pins);
         for (size_t i = 0; i < n; i++) {
@@ -110,15 +108,15 @@ TEST_CASE("board table: every board's pins exist, are free of the module's and o
 
 TEST_CASE("board marker: a label board.<id>, nothing else", "[board]")
 {
-    TEST_ASSERT_EQUAL_STRING("ntrip-x", board_marker_id("board.ntrip-x"));
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", board_marker_id("board.um980-ntrx"));
     TEST_ASSERT_EQUAL_STRING("x", board_marker_id("board.x"));
     TEST_ASSERT_NULL(board_marker_id("board."));
     TEST_ASSERT_NULL(board_marker_id("board"));
-    TEST_ASSERT_NULL(board_marker_id("Board.ntrip-x"));
+    TEST_ASSERT_NULL(board_marker_id("Board.um980-ntrx"));
     TEST_ASSERT_NULL(board_marker_id("storage"));
     TEST_ASSERT_NULL(board_marker_id(""));
     TEST_ASSERT_NULL(board_marker_id(NULL));
-    TEST_ASSERT_NULL(board_table_find("board.ntrip-x"));
+    TEST_ASSERT_NULL(board_table_find("board.um980-ntrx"));
     TEST_ASSERT_NULL(board_table_find(NULL));
 }
 
@@ -147,26 +145,26 @@ TEST_CASE("board choice: no marker is the original board, whatever the flash", "
 
 TEST_CASE("board choice: the NTRIP-X marker on 8 MB flash, or not read", "[board]")
 {
-    const char *m[] = { "board.ntrip-x" };
+    const char *m[] = { "board.um980-ntrx" };
     board_choice_t c;
     board_choose(orig(), m, 1, 8u * MB, &c);
-    TEST_ASSERT_EQUAL_STRING("ntrip-x", c.entry->id);
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", c.entry->id);
     TEST_ASSERT_EQUAL(BOARD_FROM_MARKER, c.from);
     TEST_ASSERT_EQUAL(BOARD_OK, c.issue);
     TEST_ASSERT_TRUE(c.trusted);
     TEST_ASSERT_EQUAL_STRING("", c.why);
     board_choose(orig(), m, 1, 0, &c);
-    TEST_ASSERT_EQUAL_STRING("ntrip-x", c.entry->id);
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", c.entry->id);
     TEST_ASSERT_TRUE(c.trusted);
 }
 
 TEST_CASE("board choice: a marker on another flash size, an unknown or a second marker closes the link", "[board]")
 {
-    const char *m[] = { "board.ntrip-x" };
+    const char *m[] = { "board.um980-ntrx" };
     board_choice_t c;
     /* A self-built N16R8 given the NTRIP-X install must not drive the NTRIP-X's pins. */
     board_choose(orig(), m, 1, 16u * MB, &c);
-    TEST_ASSERT_EQUAL_STRING("ntrip-x", c.entry->id);   /* named, so the user sees which install it got */
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", c.entry->id);   /* named, so the user sees which install it got */
     TEST_ASSERT_EQUAL(BOARD_FROM_MARKER, c.from);
     TEST_ASSERT_EQUAL(BOARD_BAD_FLASH, c.issue);
     TEST_ASSERT_FALSE(c.trusted);
@@ -182,7 +180,7 @@ TEST_CASE("board choice: a marker on another flash size, an unknown or a second 
     TEST_ASSERT_FALSE(c.trusted);
     TEST_ASSERT_EQUAL_STRING("This firmware does not know the board \"rtk-z9\". Update it or install it again.", c.why);
 
-    const char *two[] = { "board.ntrip-x", "board.ntrip-x" };
+    const char *two[] = { "board.um980-ntrx", "board.um980-ntrx" };
     board_choose(orig(), two, 2, 8u * MB, &c);
     TEST_ASSERT_EQUAL_PTR(orig(), c.entry);
     TEST_ASSERT_EQUAL(BOARD_BAD_TWO, c.issue);
@@ -202,7 +200,7 @@ TEST_CASE("board choice: the journal's issue numbers keep their meaning", "[boar
 
 TEST_CASE("board wiring: the NTRIP-X's LEDs, status input and undriven pins are not the link's", "[board]")
 {
-    const board_entry_t *e = board_table_find("ntrip-x");
+    const board_entry_t *e = board_table_find("um980-ntrx");
     const board_pin_use_t uses[] = {
         { "button", e->button_gpio },          { "red LED", e->rgb_gpio[0] },     { "green LED", e->rgb_gpio[1] },
         { "blue LED", e->rgb_gpio[2] },        { "Wi-Fi LED", e->wifi_led_gpio }, { "GNSS LED", e->gnss_led_gpio },

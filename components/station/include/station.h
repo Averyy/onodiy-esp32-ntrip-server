@@ -709,7 +709,10 @@ esp_err_t station_request_flash(const station_flash_request_t *req);
  */
 bool station_flash_available(void);
 
-/** Why station_flash_available() is false: "not_enabled_in_build" or "receiver_port"; NULL when it is true. */
+/**
+ * Why station_flash_available() is false: "no_package_area" (the board's partition table has no package
+ * partition), "not_enabled_in_build" or "receiver_port"; NULL when it is true.
+ */
 const char *station_flash_reason(void);
 
 /**

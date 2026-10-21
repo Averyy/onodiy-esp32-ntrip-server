@@ -194,10 +194,16 @@ esp_err_t pkg_store_init(void)
     s_have_hdr = false;
     s_next_slot = 0;
     s_part = esp_partition_find_first(PKG_STORE_PARTITION_TYPE, PKG_STORE_PARTITION_SUBTYPE, PKG_STORE_PARTITION_LABEL);
-    if (s_part == NULL || s_part->size <= PKG_STORE_HEADER_SIZE) {
+    if (s_part == NULL) {
+        unlock();
+        /* A partition table without one (a board with 8 MB flash): receiver packages cannot be kept. */
+        ESP_LOGI(TAG, "no partition '%s' on this board: receiver packages cannot be staged", PKG_STORE_PARTITION_LABEL);
+        return ESP_OK;
+    }
+    if (s_part->size <= PKG_STORE_HEADER_SIZE) {
         s_part = NULL;
         unlock();
-        ESP_LOGE(TAG, "partition '%s' not found", PKG_STORE_PARTITION_LABEL);
+        ESP_LOGE(TAG, "partition '%s' too small", PKG_STORE_PARTITION_LABEL);
         return ESP_ERR_NOT_FOUND;
     }
     esp_err_t err = load_header();

@@ -433,6 +433,7 @@ function notEnabled(reason) {
   const u = typeof S !== 'undefined' && S.status && S.status.update;
   const why = reason || (u && u.gnss_flash_reason);
   return why === 'receiver_port' ? 'Receiver firmware updates work only with the receiver wired by its COM1.' :
+    why === 'no_package_area' ? 'Receiver firmware updates are not available on this board yet.' :
     'Receiver firmware updates are not enabled in this build yet.';
 }
 

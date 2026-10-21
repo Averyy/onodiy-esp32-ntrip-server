@@ -2300,7 +2300,7 @@ def test_chip_card_names_the_access_point_and_the_transmit_power():
                                                                                     "Moves to another access point"]
     assert dict(gone)["Wi-Fi"] == "Home, offline for 30s"
     # The board, first, once the station names it (GET /api/system's board).
-    marked = dict(sys, board={"id": "ntrip-x", "name": "GNS NTRIP-X", "source": "marker"})
+    marked = dict(sys, board={"id": "um980-ntrx", "name": "GNS NTRIP-X", "source": "marker"})
     (named,) = run_editor([{"fn": "chip", "sys": marked, "status": status, "wifi": qemu, "net": {}}])
     assert named[0] == ["Board", "GNS NTRIP-X"] and [r[0] for r in named[1:]] == [r[0] for r in bare]
 

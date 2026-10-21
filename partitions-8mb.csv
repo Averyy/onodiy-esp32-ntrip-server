@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# Partition table for boards with 8 MB flash: the GNS NTRIP-X
+# (ESP32-S3-WROOM-1U N8R8). The same app and bootloader as the 16 MB boards
+# (partitions.csv); only the install differs: this table at 0x10000 and
+# --flash-size 8MB, which esptool writes into the bootloader's header.
+#
+# Permanent once installed, like partitions.csv: OTA replaces only the app.
+# Up to nvs it is the 16 MB table, so the app's settings, its update and
+# rollback work the same.
+#
+# otadata   2 sectors, required by OTA.
+# phy_init  standard (unused while PHY init data comes from the app).
+# nvs       112 KB, as on 16 MB.
+# ota_0/1   2.5 MB each, 64 KB aligned: the size limit of every app build
+#           (CI fails a larger one; the 16 MB slots are 4 MB).
+#           No package partition: there is no room for a receiver package
+#           (up to 3 MB). Receiver updates on this board will stage the
+#           package in PSRAM instead (pkg_store reports capacity 0 until then).
+# journal   128 KB raw event journal (custom type 0x40, subtype 0x01), as on 16 MB.
+# coredump  128 KB (16 MB: 256 KB): ELF core dumps without full DRAM capture.
+# board.um980-ntrx  the board marker (custom type 0x40, subtype 0x02, one empty
+#           sector, never written): the app reads which board this is from its
+#           label (components/board/board_table.h). A table without one is the
+#           original UM982 board.
+# storage   2.56 MB reserved, unformatted (LittleFS subtype), as on 16 MB.
+#           Ends exactly at 8 MB.
+#
+# Name,           Type,  SubType,  Offset,    Size,      Flags
+otadata,          data,  ota,      0x11000,   0x2000,
+phy_init,         data,  phy,      0x13000,   0x1000,
+nvs,              data,  nvs,      0x14000,   0x1C000,
+ota_0,            app,   ota_0,    0x30000,   0x280000,
+ota_1,            app,   ota_1,    0x2B0000,  0x280000,
+journal,          0x40,  0x01,     0x530000,  0x20000,
+coredump,         data,  coredump, 0x550000,  0x20000,
+board.um980-ntrx, 0x40,  0x02,     0x570000,  0x1000,
+storage,          data,  littlefs, 0x571000,  0x28F000,

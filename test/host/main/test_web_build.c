@@ -2821,7 +2821,7 @@ TEST_CASE("system: the board, its id, name and whether the partition table marke
         .idf = "v6.1",
         .chip_model = "esp32s3",
         .flash_mb = 8,
-        .board_id = "ntrip-x",
+        .board_id = "um980-ntrx",
         .board_name = "GNS NTRIP-X",
         .board_marked = true,
         .reboot_required = -1,
@@ -2832,18 +2832,18 @@ TEST_CASE("system: the board, its id, name and whether the partition table marke
     TEST_ASSERT_TRUE(wj_ok(&w));
     cJSON *root = cJSON_Parse(s_out);
     const cJSON *b = at(root, "board");
-    TEST_ASSERT_EQUAL_STRING("ntrip-x", at(b, "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("um980-ntrx", at(b, "id")->valuestring);
     TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", at(b, "name")->valuestring);
     TEST_ASSERT_EQUAL_STRING("marker", at(b, "source")->valuestring);
     TEST_ASSERT_EQUAL(8, at(at(root, "chip"), "flash_mb")->valueint);
     cJSON_Delete(root);
-    s.board_id = "um982-aliexpress";
+    s.board_id = "um982-alix";
     s.board_name = "UM982 board (AliExpress)";
     s.board_marked = false;
     wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
     web_build_system(&w, &s);
     root = cJSON_Parse(s_out);
-    TEST_ASSERT_EQUAL_STRING("um982-aliexpress", at(at(root, "board"), "id")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("um982-alix", at(at(root, "board"), "id")->valuestring);
     TEST_ASSERT_EQUAL_STRING("default", at(at(root, "board"), "source")->valuestring);
     cJSON_Delete(root);
 }

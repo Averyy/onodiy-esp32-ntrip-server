@@ -71,7 +71,10 @@ typedef struct pkg_store_writer *pkg_store_writer_t;
 
 /**
  * Locate the partition and read the header (once at boot). A write that a
- * reset cut short is forgotten: the slot is then empty.
+ * reset cut short is forgotten: the slot is then empty. A partition table
+ * without the partition (a board with 8 MB flash) is not an error: ESP_OK,
+ * pkg_store_capacity() 0, and every other call refuses (ESP_ERR_NOT_FOUND,
+ * ESP_ERR_INVALID_STATE).
  */
 esp_err_t pkg_store_init(void);
 

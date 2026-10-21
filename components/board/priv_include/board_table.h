@@ -34,11 +34,11 @@ extern "C" {
 #define BOARD_KEEP_MAX        4u      /**< pins a board leaves undriven */
 
 /** The original board's id: the board of a table without a marker. */
-#define BOARD_ID_DEFAULT      "um982-aliexpress"
+#define BOARD_ID_DEFAULT      "um982-alix"
 
 /** One board. GPIO -1 = not on this board. */
 typedef struct {
-    const char *id;                    /**< "ntrip-x"; the marker is "board." + id */
+    const char *id;                    /**< "um980-ntrx"; the marker is "board." + id */
     const char *name;                  /**< for people: "GNS NTRIP-X" */
     uint8_t flash_mb;                  /**< the module's flash */
     int8_t uart_num;                   /**< the receiver link's UART (never 0: the console) */
@@ -63,7 +63,7 @@ const board_entry_t *board_table_at(size_t i);
 /** The board with this id, NULL when there is none. */
 const board_entry_t *board_table_find(const char *id);
 
-/** The board id of a marker label ("board.ntrip-x" -> "ntrip-x"), NULL when `label` is not a marker. */
+/** The board id of a marker label ("board.um980-ntrx" -> "um980-ntrx"), NULL when `label` is not a marker. */
 const char *board_marker_id(const char *label);
 
 /** Where this station's board came from. */

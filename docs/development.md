@@ -73,7 +73,14 @@ Notes:
   fixed when CMake configures; run `idf.py reconfigure` before a local build whose
   version matters.
 - The partition table is permanent once a station is deployed (see the comments in
-  `partitions.csv`).
+  `partitions.csv`). Boards with 8 MB flash (the GNS NTRIP-X) run the same build with
+  `partitions-8mb.csv`, whose board marker tells the app which board it is. Every board's
+  install files from a build, checked (the app within the 2.5 MB slot of the 8 MB table,
+  each bootloader valid for its flash size), as CI makes them for a release:
+
+  ```sh
+  tools/ci/install_files.sh build install   # install/onodiy-install-16mb.bin, ...-um980-ntrx.bin
+  ```
 - Receiver firmware updates are off in the default build until they have been tested
   on a bench unit: a package can be uploaded and checked against every rule, but
   nothing is sent to the receiver. A bench build turns them on together with a bench

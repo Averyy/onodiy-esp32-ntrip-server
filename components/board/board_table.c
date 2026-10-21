@@ -34,7 +34,7 @@ static const board_entry_t s_boards[] = {
      * an RGB LED lit low, a Wi-Fi LED and a GNSS LED that follows the receiver's status output on GPIO11. GPIO1/2
      * (a flow-control pair, unused) and GPIO40/41 reach parts of the board whose use is not known. */
     {
-        .id = "ntrip-x",
+        .id = "um980-ntrx",
         .name = "GNS NTRIP-X",
         .flash_mb = 8,
         .uart_num = 1,

@@ -285,7 +285,7 @@ def test_build_yml_jobs_run_here_are_accepted():
     kinds = {name: [kind for kind, _ in ci.plan(wf, name)] for name in ("host-tests", "qemu-smoke", "qemu-bench-console")}
     assert kinds["host-tests"] == ["checkout", "run"]
     assert kinds["qemu-smoke"] == ["checkout", "setup-uv", "run", "run", "run", "upload"]
-    assert kinds["qemu-bench-console"] == ["checkout", "setup-uv", "run", "run", "upload"]
+    assert kinds["qemu-bench-console"] == ["checkout", "setup-uv", "run", "run", "run", "upload"]
     # qemu-smoke's container bounds TCP send buffers (e2e.py's stuck rover); the others take none. One image.
     containers = {name: ci.container(wf["jobs"][name]) for name in ("host-tests", "qemu-smoke", "qemu-bench-console")}
     assert containers["qemu-smoke"][1] == ["--sysctl", "net.ipv4.tcp_wmem=4096 16384 65536"]

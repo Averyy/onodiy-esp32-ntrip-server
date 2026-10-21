@@ -696,7 +696,7 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
     esp_err_t err = ESP_ERR_INVALID_STATE;
     fw_lock();
     const fw_manifest_gnss_t *entry =
-        g_fw.have_manifest
+        g_fw.have_manifest && pkg_store_capacity() > 0   /* no package area on this board: nothing to offer */
             ? fw_policy_gnss_offer(&g_fw.manifest, running_version(), st->receiver.model, st->receiver.build)
             : NULL;
     if (block != FW_GNSS_BLOCK_NONE) {
@@ -758,7 +758,7 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
         out->app_update_available = offer.available;
         out->latest_rolled_back = offer.rolled_back;
         const fw_manifest_gnss_t *g =
-            st_ok && st->receiver.valid
+            st_ok && st->receiver.valid && pkg_store_capacity() > 0
                 ? fw_policy_gnss_offer(&g_fw.manifest, out->running_version, st->receiver.model, st->receiver.build)
                 : NULL;
         if (g != NULL) {

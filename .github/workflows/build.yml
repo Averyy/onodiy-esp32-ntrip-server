@@ -43,11 +43,12 @@ concurrency:
 # the two QEMU jobs run on tags, pull requests, the weekly run and on request
 # (Actions > build > Run workflow), and a release needs every job.
 #
-# Jobs: firmware (the station image, uploaded), firmware-bench (the
+# Jobs: firmware (the station image and every board's install files, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
 # that only bench builds compile cannot rot; nothing uploaded), host-tests,
 # bench-tools (pytest), qemu-smoke, qemu-bench-console (the bench overlay
-# run in QEMU: its console answers), and release (tags only).
+# run in QEMU: its console answers; then installed as on the 8 MB board),
+# and release (tags only).
 # Every action is pinned to a full commit SHA, with its version tag in a
 # comment; to move one, look up the new tag's commit and change both.
 
@@ -125,12 +126,24 @@ jobs:
             exit 1
           fi
 
+      # Every board's install: the 8 MB table and one image per flash size for
+      # 0x0. Fails when the app outgrows the smallest app slot (2.5 MB, the
+      # 8 MB board's) or a bootloader does not validate for its flash size.
+      - name: Install files
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          tools/ci/install_files.sh build install
+
       - name: Upload firmware
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: firmware-${{ github.sha }}
           if-no-files-found: error
           path: |
+            install/partition-table-8mb.bin
+            install/onodiy-install-16mb.bin
+            install/onodiy-install-um980-ntrx.bin
             build/onodiy-esp32-ntrip-server.bin
             build/onodiy-esp32-ntrip-server.elf
             build/onodiy-esp32-ntrip-server.map
@@ -328,6 +341,16 @@ jobs:
           . "$IDF_PATH/export.sh"
           uv run tools/qemu/bench_console.py --out qemu-bench-console
 
+      # The same build installed as on the GNS NTRIP-X (partitions-8mb.csv,
+      # 8 MB flash): the board found by its marker, no package area, and a
+      # crash's core dump in its 128 KB partition (tools/qemu/board_8mb.py).
+      - name: 8 MB board
+        if: always()
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          uv run tools/qemu/board_8mb.py --out qemu-board-8mb
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
@@ -337,13 +360,15 @@ jobs:
           path: |
             qemu-bench-build.log
             qemu-bench-console/
+            qemu-board-8mb/
 
   # A tag vX.Y.Z[-PRE] becomes a GitHub Release with what stations download:
   # the app image the firmware job built as that release version, the receiver
   # package(s) from firmware/um982/ and manifest.json listing each with its
   # size and SHA-256 (tools/release_manifest.py; signed only when the
   # MANIFEST_SIGNING_KEY secret is set), plus the files for a first flash
-  # over USB and THIRD_PARTY_NOTICES.md; its notes start with the tag's
+  # over USB (one image per board's flash size, tools/ci/install_files.sh,
+  # and the 16 MB install as separate files) and THIRD_PARTY_NOTICES.md; its notes start with the tag's
   # CHANGELOG.md section. A tag with "-PRE" is a pre-release:
   # stations read releases/latest only, so it is installed by manual upload.
   # The release is created as a draft and published once every file is
@@ -456,7 +481,23 @@ jobs:
             echo
             echo "### Install"
             echo
-            echo "$offer A new board: flash it over USB."
+            echo "$offer A new board: erase it, then write its image at 0x0 over USB."
+            echo
+            echo "UM982 board (AliExpress), UM980 board (Alibaba):"
+            echo
+            echo '```'
+            echo "esptool --chip esp32s3 erase-flash"
+            echo "esptool --chip esp32s3 write-flash 0x0 onodiy-install-16mb.bin"
+            echo '```'
+            echo
+            echo "GNS NTRIP-X (8 MB flash):"
+            echo
+            echo '```'
+            echo "esptool --chip esp32s3 erase-flash"
+            echo "esptool --chip esp32s3 write-flash 0x0 onodiy-install-um980-ntrx.bin"
+            echo '```'
+            echo
+            echo "The same 16 MB install as separate files:"
             echo
             echo '```'
             echo "esptool --chip esp32s3 write-flash $settings $flash"
@@ -466,7 +507,8 @@ jobs:
             --notes-file "$RUNNER_TEMP/notes.md" ${pre[@]+"${pre[@]}"} \
             "$a/onodiy-esp32-ntrip-server.bin" firmware/um982/*.pkg release/manifest.json \
             "$a/bootloader/bootloader.bin" "$a/partition_table/partition-table.bin" "$a/ota_data_initial.bin" \
-            artifact/THIRD_PARTY_NOTICES.md
+            artifact/install/partition-table-8mb.bin artifact/install/onodiy-install-16mb.bin \
+            artifact/install/onodiy-install-um980-ntrx.bin artifact/THIRD_PARTY_NOTICES.md
           # Always explicit: without it GitHub makes any newly published
           # release Latest, a lower one included.
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false "${latest[@]}"

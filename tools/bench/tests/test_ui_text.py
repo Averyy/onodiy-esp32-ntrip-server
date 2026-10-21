@@ -2210,8 +2210,8 @@ def test_no_receiver_texts_name_the_wiring_in_use():
 
 
 def test_receiver_updates_off_says_why():
-    """Receiver firmware updates off: a build without them, or (in a build with them) a receiver wired by another port
-    than COM1, which the station's update status names (gnss_flash_reason)."""
+    """Receiver firmware updates off: a board without a package area, a build without them, or (in a build with them)
+    a receiver wired by another port than COM1, which the station's update status names (gnss_flash_reason)."""
     build, port, none, answer = run_ui([
         ("notEnabled", [status(update={"gnss_flash_reason": "not_enabled_in_build"}), None]),
         ("notEnabled", [status(update={"gnss_flash_reason": "receiver_port"}), None]),
@@ -2220,6 +2220,9 @@ def test_receiver_updates_off_says_why():
         ("notEnabled", [None, "receiver_port"])])
     assert build == none == "Receiver firmware updates are not enabled in this build yet."
     assert port == answer == "Receiver firmware updates work only with the receiver wired by its COM1."
+    # A board whose partition table has no receiver package area (8 MB flash).
+    (board,) = run_ui([("notEnabled", [status(update={"gnss_flash_reason": "no_package_area"}), None])])
+    assert board == "Receiver firmware updates are not available on this board yet."
     (pending,) = run_ui([("refusalText", {"status": 409, "error": {"code": "busy", "reason": "wiring_pending",
                                                                      "message": "busy"}})])
     assert pending == "The receiver wiring changes at the next restart. Restart the station first, then update the receiver."

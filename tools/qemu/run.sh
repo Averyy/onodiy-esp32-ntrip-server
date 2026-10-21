@@ -47,6 +47,10 @@ password, default settings).
   --pcap FILE         write every Ethernet frame between the emulated station
                       and QEMU's user-mode network to FILE (pcap, both
                       directions; QEMU's filter-dump on the NIC's netdev)
+  --table 8mb         install the image as on a board with 8 MB flash (the GNS
+                      NTRIP-X): partitions-8mb.csv (its board marker
+                      included) and --flash-size 8MB, in an 8 MB flash image;
+                      the same build (default: the build's own 16 MB table)
   --no-wdt            turn off the emulated timer-group watchdogs (the task
                       and interrupt watchdogs never fire then): only for a
                       debugger session that stops the CPUs; never for checks
@@ -83,11 +87,13 @@ console="file"
 wdt=1
 overlay=""
 pcap=""
+table=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-build) build=0 ;;
         --overlay) [ $# -ge 2 ] || die "--overlay needs a file"; overlay="$2"; shift ;;
         --no-wdt) wdt=0 ;;
+        --table) [ $# -ge 2 ] || die "--table needs a size"; [ "$2" = 8mb ] || die "--table: only 8mb"; table="$2"; shift ;;
         --build-only) run=0 ;;
         --headless) [ $# -ge 2 ] || die "--headless needs a log file"; headless="$2"; shift ;;
         --seconds) [ $# -ge 2 ] || die "--seconds needs a number"; seconds="$2"; shift ;;
@@ -185,8 +191,24 @@ grep -q '^#define CONFIG_NETWORK_QEMU_ETHERNET 1' "$bdir/config/sdkconfig.h" ||
 # it), never into this run's image.
 flash_size=$(sed -n 's/^CONFIG_ESPTOOLPY_FLASHSIZE="\(.*\)"$/\1/p' "$bdir/sdkconfig")
 [ -n "$flash_size" ] || die "no CONFIG_ESPTOOLPY_FLASHSIZE in $bname/sdkconfig"
+flash_args="flash_args"
+if [ "$table" = 8mb ]; then
+    # The 8 MB board's install of the same build: its own table at the table's
+    # offset and the flash size in the bootloader's header (esptool writes it
+    # there and updates the image's digest), as the release's install does.
+    table_off=$(sed -n 's/^CONFIG_PARTITION_TABLE_OFFSET=\(.*\)$/\1/p' "$bdir/sdkconfig")
+    [ -n "$table_off" ] || die "no CONFIG_PARTITION_TABLE_OFFSET in $bname/sdkconfig"
+    "$idf_python" "$IDF_PATH/components/partition_table/gen_esp32part.py" --quiet --flash-size 8MB \
+        --offset "$table_off" "$root/partitions-8mb.csv" "$bdir/partition-table-8mb.bin"
+    sed -e "s/--flash-size [0-9A-Za-z]*/--flash-size 8MB/" \
+        -e "s|^$table_off .*|$table_off partition-table-8mb.bin|" "$bdir/flash_args" > "$bdir/flash_args_8mb"
+    grep -q "^$table_off partition-table-8mb.bin$" "$bdir/flash_args_8mb" || die "no partition table line in flash_args"
+    flash_args="flash_args_8mb"
+    flash_size="8MB"
+    echo "Table:   partitions-8mb.csv (8 MB flash, the GNS NTRIP-X's install)"
+fi
 (cd "$bdir" && rm -f qemu_flash.bin.new && "$idf_python" -m esptool --chip=esp32s3 merge-bin \
-    --output=qemu_flash.bin.new --pad-to-size="$flash_size" @flash_args >/dev/null &&
+    --output=qemu_flash.bin.new --pad-to-size="$flash_size" "@$flash_args" >/dev/null &&
     mv -f qemu_flash.bin.new qemu_flash.bin)
 if [ ! -f "$bdir/qemu_efuse.bin" ]; then
     "$idf_python" - "$bdir/qemu_efuse.bin" <<'EOF'

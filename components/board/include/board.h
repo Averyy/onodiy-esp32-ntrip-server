@@ -34,7 +34,7 @@ typedef enum {
  * partition table, see board_table.h). Pin value -1 means "not connected".
  */
 typedef struct {
-    const char *id;            /**< "um982-aliexpress", "ntrip-x" */
+    const char *id;            /**< "um982-alix", "um980-ntrx" */
     const char *name;          /**< Human-readable board name: "GNS NTRIP-X" */
     board_source_t source;
     unsigned flash_mb;         /**< the board's flash (its install's) */

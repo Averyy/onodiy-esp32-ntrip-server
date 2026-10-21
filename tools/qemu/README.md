@@ -33,7 +33,9 @@ console on a socket a script listens on, so it can type commands; the log
 file still gets everything the firmware prints), `--seconds N`,
 `--http-port N`, `--ntrip-port N` (a host port forwarded to the station's
 caster for a rover, port 2101, which then sees the client as 10.0.2.2),
-`--uart1 MODE`, `--no-wdt`, `--pcap FILE` (every Ethernet
+`--uart1 MODE`, `--table 8mb` (the same build installed as on the GNS
+NTRIP-X: `partitions-8mb.csv` and `--flash-size 8MB`, in an 8 MB flash
+image; see "The 8 MB board" below), `--no-wdt`, `--pcap FILE` (every Ethernet
 frame between the station and QEMU's user-mode network, both ways, in pcap
 form: QEMU's `filter-dump` on the NIC's netdev). `--overlay FILE` adds one more sdkconfig overlay after
 `sdkconfig.qemu` and builds into `build-qemu-<name>/` (`--overlay
@@ -41,10 +43,16 @@ sdkconfig.hold` builds into `build-qemu-hold/`, where the receiver's first
 configuration waits for the user).
 
 The emulated watchdogs are live: unlike `idf.py qemu`, `run.sh` does not
-turn off the timer groups' watchdogs, so the task watchdog (TIMG0, 10 s,
-both IDLE tasks watched, panic) and the interrupt watchdog (TIMG1) fire as
-on a board. `--no-wdt` turns them off, for a debugger session that stops
-the CPUs only.
+turn off the timer groups' watchdogs (TIMG0 for the task watchdog, 10 s,
+both IDLE tasks watched, panic; TIMG1 for the interrupt watchdog).
+`--no-wdt` turns them off, for a debugger session that stops the CPUs
+only. One thing does not happen here as on a board: a task subscribed to
+the task watchdog that stops feeding it does not panic. The bench
+console's `stall 15000 TWDT-PANIC` stalled the receiver link's task for
+15 s, with the task subscribed (`esp_task_wdt_status` ESP_OK during the
+stall), and no task watchdog report came, on either partition table
+(2026-10-21). On a board that stall is the bench runbook's watchdog test;
+in QEMU a crash comes from `crash CRASH-ESP32` instead.
 
 Never flash anything from `build-qemu/` to a board. Configure refuses a
 release version with the overlay, the CI firmware job fails if the station
@@ -559,6 +567,35 @@ stops with the script as with `smoke.py`. The `qemu-bench-console` CI job
 runs it with `--out qemu-bench-console` and uploads that directory and the
 build log; `tools/ci/qemu_linux.sh --job bench-console` runs that job on this
 computer.
+
+## The 8 MB board
+
+The GNS NTRIP-X gets the same app and bootloader with another partition
+table (`partitions-8mb.csv`: 2.5 MB app slots, no receiver package
+partition, a 128 KB core dump partition and the `board.um980-ntrx` marker)
+and `--flash-size 8MB`. `board_8mb.py` runs that install of the bench
+overlay's build:
+
+```sh
+tools/qemu/run.sh --overlay sdkconfig.bench --build-only
+uv run tools/qemu/board_8mb.py        # logs in build-qemu-bench/board-8mb/
+```
+
+It starts `run.sh --overlay sdkconfig.bench --table 8mb` headless with the
+console and UART1 on sockets it listens on, and checks: the console names
+the board (`board: GNS NTRIP-X (marked in the partition table)`), puts the
+receiver link on its pins (RX GPIO16, TX GPIO15, COM1) and says the board
+has no package partition, and the start has no failed step; the receiver
+detection arrives on UART1; `GET /api/system` names the board
+(`um980-ntrx`, source `marker`), 8 MB flash, the board's wiring as the
+default and none of the board's own pins among the link's choices; `GET
+/api/update` gives `app_max_bytes` 2621440 and `pkg_max_bytes` null, and
+`GET /api/status` `gnss_flash_reason` `no_package_area`; `crash
+CRASH-ESP32` aborts, the core dump is saved in the 128 KB partition (48,576
+bytes on 2026-10-21) and, after the restart, `GET /api/health` has it with
+its summary (the crashed task, its PC, a backtrace); two boots and no other
+panic. The `qemu-bench-console` CI job runs it after the bench console
+checks, with `--out qemu-board-8mb`.
 
 ## One host thread for both cores
 
