@@ -15,6 +15,7 @@ static const board_entry_t s_boards[] = {
     {
         .id = BOARD_ID_DEFAULT,
         .name = "UM982 board (AliExpress)",
+        .antenna = "on the socket marked M",
         .flash_mb = 16,
         .uart_num = 1,
         .rx_gpio = 1,
@@ -36,6 +37,7 @@ static const board_entry_t s_boards[] = {
     {
         .id = "um980-ntrx",
         .name = "GNS NTRIP-X",
+        .antenna = "on the port marked GNSS",
         .flash_mb = 8,
         .uart_num = 1,
         .rx_gpio = 16,

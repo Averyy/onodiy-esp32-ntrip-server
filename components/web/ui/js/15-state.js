@@ -129,6 +129,8 @@ function alertText(a, rcv) {
   const r = rcv || ((typeof S !== 'undefined' && S.status) || {}).receiver || {};
   if (a.source === 'station' && a.id === 'no_receiver') text = noReceiverText(a, r.link);
   if (a.source === 'station' && a.id === 'fixed_far') text = fixedFarText(a);
+  /* Where this board's antenna goes (receiver.antenna, e.g. "on the socket marked M"). */
+  if (a.source !== 'station' && (a.id === 'no_rtcm' || a.id === 'no_satellites')) text = antennaCheck(r.antenna);
   if (a.source !== 'station' && a.id === 'no_rtcm' && r.responding !== false) text = 'The receiver answers. ' + text;
   return [title, text];
 }

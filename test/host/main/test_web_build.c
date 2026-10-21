@@ -2858,7 +2858,17 @@ TEST_CASE("status: the receiver's link, its pins and port, in the admin form onl
     TEST_ASSERT_EQUAL(18, at(link, "tx_gpio")->valueint);
     TEST_ASSERT_EQUAL(2, at(link, "port")->valueint);
     TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(link, "off"));   /* the link opens: no reason */
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "receiver"), "antenna")));   /* not named */
     cJSON_Delete(root);
+    /* Where the board's antenna goes (the no-RTCM hints; visitors see no alerts, so not theirs). */
+    s_snap.antenna = "on the port marked GNSS";
+    root = build_status(false);
+    TEST_ASSERT_EQUAL_STRING("on the port marked GNSS", at(at(root, "receiver"), "antenna")->valuestring);
+    cJSON_Delete(root);
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "receiver"), "antenna"));
+    cJSON_Delete(root);
+    s_snap.antenna = NULL;
     /* A saved wiring the board refuses keeps the link closed: the reason. */
     s_snap.link_off = "GPIO26 is used by flash/PSRAM.";
     root = build_status(false);

@@ -21,6 +21,7 @@ TEST_CASE("board table: the original board is today's Kconfig defaults, first in
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_PTR(board_table_at(0), e);
     TEST_ASSERT_EQUAL_STRING("UM982 board (AliExpress)", e->name);
+    TEST_ASSERT_EQUAL_STRING("on the socket marked M", e->antenna);   /* the board has two: M and S */
     TEST_ASSERT_EQUAL(16, e->flash_mb);
     /* components/board/Kconfig: UART1, RX GPIO1, TX GPIO2, COM1, no reset line, the BOOT button on GPIO0, no LED. */
     TEST_ASSERT_EQUAL(1, e->uart_num);
@@ -46,6 +47,7 @@ TEST_CASE("board table: the GNS NTRIP-X as found on the unit", "[board]")
     const board_entry_t *e = board_table_find("um980-ntrx");
     TEST_ASSERT_NOT_NULL(e);
     TEST_ASSERT_EQUAL_STRING("GNS NTRIP-X", e->name);
+    TEST_ASSERT_EQUAL_STRING("on the port marked GNSS", e->antenna);
     TEST_ASSERT_EQUAL(8, e->flash_mb);
     TEST_ASSERT_EQUAL(1, e->uart_num);
     TEST_ASSERT_EQUAL(16, e->rx_gpio);

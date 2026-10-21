@@ -741,6 +741,13 @@ static bool power_tick(void)
 }
 
 /* The ladder's reason in words, once when it changes. */
+/* Where the board's antenna goes, for the no-RTCM hints. */
+static const char *antenna_where(void)
+{
+    const char *a = board_get()->antenna;
+    return a != NULL ? a : "connected";
+}
+
 static void log_why(uint8_t why)
 {
     if (why == s_prev_why) {
@@ -755,12 +762,12 @@ static void log_why(uint8_t why)
         ESP_LOGW(TAG, "no RTCM and nothing usable from the receiver, no answer to commands: power-cycle the station");
         break;
     case HL_WHY_NO_SKY:
-        ESP_LOGW(TAG, "no RTCM: the receiver answers but uses no satellites; check that the antenna is on the socket "
-                      "marked M and sees the sky");
+        ESP_LOGW(TAG, "no RTCM: the receiver answers but uses no satellites; check that the antenna is %s and sees "
+                      "the sky", antenna_where());
         break;
     case HL_WHY_NO_RTCM:
-        ESP_LOGW(TAG, "no RTCM although the receiver answers: check that the antenna is on the socket marked M and "
-                      "sees the sky");
+        ESP_LOGW(TAG, "no RTCM although the receiver answers: check that the antenna is %s and sees the sky",
+                 antenna_where());
         break;
     default:
         break;   /* none, or 6b (its own log line) */

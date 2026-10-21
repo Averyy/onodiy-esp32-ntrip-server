@@ -514,6 +514,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
     }
     wj_uint(w, "best_bands", s->obs_valid ? s->best_bands : 0);
     if (!pub) {
+        wj_str_or_null(w, "antenna", s->antenna);
         /* Onocoy's quality score needs GLONASS with its message 1230: both from
          * what the station has (the signal summary, the last apply's answer). */
         wj_bool(w, "glonass", s->obs_valid && s->glonass);

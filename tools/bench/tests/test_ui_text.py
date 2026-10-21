@@ -546,7 +546,7 @@ def status(**kw) -> dict:
          "receiver": {"state": "streaming", "model": "UM982", "rtcm_age_ms": 180, "journal": "none", "uart_closed": False,
                       "rx_maintenance": False, "maintenance_left_s": 0, "first_apply_held": False, "best_sys": "galileo",
                       "best_bands": 4, "glonass": True, "rtcm1230_supported": True, "position_locked": True,
-                      "profile_applied": True, "signal_test": None},
+                      "profile_applied": True, "signal_test": None, "antenna": "on the socket marked M"},
          "casters": [caster(0, "Onocoy", "streaming")],
          "health": {"level": "ok", "last_step": "none", "recovery_mode": "full"},
          "alerts": [], "availability": {"protected_down_today_s": 10, "budget_left_s": 463}, "update": {}}
@@ -749,6 +749,14 @@ def test_recovery_says_what_it_does_now():
     lines = [h["line"] for h in heroes(quiet, answering)]
     assert lines == ["Check that the antenna is on the socket marked M and sees the open sky.",
                      "The receiver answers. Check that the antenna is on the socket marked M and sees the open sky."], lines
+    # The board names where its antenna goes (receiver.antenna); a board without one place says "connected".
+    ntrx = status(receiver={"rtcm_age_ms": None, "responding": False, "antenna": "on the port marked GNSS"},
+                  casters=wait_data, alerts=no_rtcm, health=quiet["health"])
+    other = status(receiver={"rtcm_age_ms": None, "responding": False, "antenna": None}, casters=wait_data,
+                   alerts=no_rtcm, health=quiet["health"])
+    assert [h["line"] for h in heroes(ntrx, other)] == [
+        "Check that the antenna is on the port marked GNSS and sees the open sky.",
+        "Check that the antenna is connected and sees the open sky."]
     # Visitors: the state, no step and no alert.
     pub = heroes(antenna, admin=False)[0]
     assert (pub["key"], pub["line"], pub["plan"]) == ("rx_stopped", "The station is fixing it.", None)

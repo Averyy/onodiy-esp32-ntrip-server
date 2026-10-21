@@ -40,6 +40,8 @@ extern "C" {
 typedef struct {
     const char *id;                    /**< "um980-ntrx"; the marker is "board." + id */
     const char *name;                  /**< for people: "GNS NTRIP-X" */
+    const char *antenna;               /**< where the GNSS antenna goes, for "the antenna is <antenna>": "on the
+                                            socket marked M"; NULL: no one place to name */
     uint8_t flash_mb;                  /**< the module's flash */
     int8_t uart_num;                   /**< the receiver link's UART (never 0: the console) */
     int8_t rx_gpio;                    /**< ESP32 RX <- the receiver's TXD */

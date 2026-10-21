@@ -96,8 +96,8 @@ const L = {
     receiver_silent: ['Nothing from the receiver', 'The receiver sends nothing and does not answer. Unplug the station for a few seconds; ' +
       'if that does not help, check the receiver\'s power and cable.'],
     /* The Status page's words (alertText adds "The receiver answers." to no_rtcm while receiver.responding says so). */
-    no_satellites: ['Antenna sees no satellites', 'Check that the antenna is on the socket marked M and sees the open sky.'],
-    no_rtcm: ['Receiver sends no corrections', 'Check that the antenna is on the socket marked M and sees the open sky.'],
+    no_satellites: ['Antenna sees no satellites', 'Check that the antenna is connected and sees the open sky.'],
+    no_rtcm: ['Receiver sends no corrections', 'Check that the antenna is connected and sees the open sky.'],
     rx_held: ['Receiver not configured yet', 'Confirm its configuration on the Receiver page. Until then it sends no corrections.'],
   },
   /* After a failed receiver configuration: the station's own retry (automatic setup), or only the user's (configFailedText). */
@@ -447,6 +447,11 @@ function receiverLink() {
 
 function sameWiring(a, b) {
   return !!a && !!b && a.rx_gpio === b.rx_gpio && a.tx_gpio === b.tx_gpio && a.port === b.port;
+}
+
+/** The antenna check of the no-RTCM alerts; where: the status's receiver.antenna ("on the socket marked M"), may be null. */
+function antennaCheck(where) {
+  return 'Check that the antenna is ' + (where || 'connected') + ' and sees the open sky.';
 }
 
 /* The link stays closed this start (receiver.link.off): the saved wiring fails the board's check. */

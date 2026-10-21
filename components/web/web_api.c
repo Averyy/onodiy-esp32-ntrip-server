@@ -230,6 +230,7 @@ void web_snap_status(web_status_snap_t *s)
     board_wiring_active(&s->link);
     s->link_off = board_link_off_reason();
     s->link_off_board = board_problem() != NULL;
+    s->antenna = board_get()->antenna;
     monitor_get_status(&s->mon);   /* a copy of the summary the monitor keeps: no summing here */
 }
 

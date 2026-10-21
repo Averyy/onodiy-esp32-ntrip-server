@@ -89,6 +89,7 @@ static void pick_board(void)
     s_board = (board_desc_t){
         .id = e->id,
         .name = e->name,
+        .antenna = e->antenna,
         .source = s_choice.from == BOARD_FROM_MARKER ? BOARD_SOURCE_MARKER : BOARD_SOURCE_DEFAULT,
         .flash_mb = e->flash_mb,
         .gnss_uart_num = e->uart_num,

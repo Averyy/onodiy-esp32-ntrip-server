@@ -36,6 +36,7 @@ typedef enum {
 typedef struct {
     const char *id;            /**< "um982-alix", "um980-ntrx" */
     const char *name;          /**< Human-readable board name: "GNS NTRIP-X" */
+    const char *antenna;       /**< where the GNSS antenna goes ("on the socket marked M"), or NULL */
     board_source_t source;
     unsigned flash_mb;         /**< the board's flash (its install's) */
     int gnss_uart_num;         /**< UART controller for the GNSS link (never 0: console) */

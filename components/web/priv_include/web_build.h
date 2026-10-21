@@ -147,6 +147,7 @@ typedef struct {
     board_wiring_t link;           /**< the receiver wiring this start uses (receiver.link) */
     const char *link_off;          /**< why the link stays closed (board_link_off_reason), NULL = it opens */
     bool link_off_board;           /**< it stays closed because of the board choice (board_problem), not the saved wiring */
+    const char *antenna;           /**< where the board's antenna goes ("on the socket marked M"), NULL = not named */
     monitor_status_t mon;          /**< the latest sample and the running 24 h (monitor) */
 } web_status_snap_t;
 
