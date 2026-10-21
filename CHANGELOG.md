@@ -4,7 +4,7 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.5
 
 - Wi-Fi: no more "sta is connecting, cannot set config" error in the log at every join
   (ESP-IDF's supplicant made a call the Wi-Fi driver refuses at that moment; it changed
