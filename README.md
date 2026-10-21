@@ -118,7 +118,7 @@ More: [development](docs/development.md).
 | `test/` | Host unit tests and recorded data |
 | `tools/bench/`, `tools/qemu/`, `tools/ci/` | Board tools, the emulator, CI run locally |
 | `firmware/um982/`, `firmware/um980/` | Unicore receiver firmware |
-| `firmware/ntripx/` | The GNS NTRIP-X's stock firmware, for restoring one |
+| `firmware/ntrip-x/` | The GNS NTRIP-X's stock firmware, for restoring one |
 | `gnss-splitter/` | The antenna splitter (EasyEDA) |
 | `docs/`, `reference/` | Hardware, development, releases; board and antenna notes |
 
@@ -128,4 +128,4 @@ More: [development](docs/development.md).
 FreeRTOS, lwIP, Mbed TLS, cJSON and others under their own licenses
 ([`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)). The receiver firmware in
 `firmware/um982/` and `firmware/um980/` is Unicore's, redistributed for convenience and not covered by
-this license; `firmware/ntripx/` is GNS-Electronics' GPLv3 firmware ([its notes](firmware/ntripx/README.md)).
+this license; `firmware/ntrip-x/` is GNS-Electronics' GPLv3 firmware ([its notes](firmware/ntrip-x/README.md)).
