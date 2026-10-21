@@ -27,7 +27,8 @@ a 128 KB core dump partition and the board.um980-ntrx marker) and --flash-size
   2. the console: the board line ("board: GNS NTRIP-X (marked in the
      partition table)"), the receiver link on the board's pins ("GNS
      NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"),
-     the package store's note that the board has no package partition, and
+     its LEDs driven (status, Wi-Fi and GNSS LED), the package store's note
+     that the board has no package partition, and
      "startup complete" without a failed step;
   3. UART1: the receiver detection arrives (the link opened on the board);
   4. the web API, with the first admin password: GET /api/system names the
@@ -72,6 +73,7 @@ BUILD = bench_console.BUILD
 BOARD_LINE = "board: GNS NTRIP-X (marked in the partition table)"
 LINK_LINE = "GNS NTRIP-X: GNSS on UART1 (RX GPIO16, TX GPIO15) to the receiver's COM1"
 NO_PKG_LINE = "no partition 'gnss_pkg' on this board"
+LEDS_LINE = "leds: GNS NTRIP-X: status LED on, Wi-Fi LED on, GNSS LED on"
 SAVED = "Core dump has been saved to flash."
 NO_ROOM = "Not enough space to save core dump"
 COREDUMP_BYTES = 0x20000     # partitions-8mb.csv
@@ -172,7 +174,7 @@ class Board8mb(bench_console.BenchConsole):
 
     def console_checks(self) -> None:
         text = self.wait_text(0, lambda t: "startup complete" in t, self.args.timeout)
-        for want in (BOARD_LINE, LINK_LINE, NO_PKG_LINE):
+        for want in (BOARD_LINE, LINK_LINE, NO_PKG_LINE, LEDS_LINE):
             self.check(want in text, f"the console says \"{want}\"")
         line = next((x.strip() for x in text.splitlines() if "startup complete" in x), None)
         self.check(line is not None and "failed" not in line, f"startup: {line or 'no startup line'}")

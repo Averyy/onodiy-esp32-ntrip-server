@@ -16,6 +16,7 @@ idf_component_register(
         diag
         lifecycle
         ledger
+        leds
         health
         monitor
         gnss_link

@@ -31,6 +31,7 @@
 #include "health_ladder.h"
 #include "health_mon.h"
 #include "ledger.h"
+#include "leds.h"
 #include "lifecycle.h"
 #include "network.h"
 #include "ntrip_server.h"
@@ -404,8 +405,10 @@ static void loss_tick(const gnss_link_stats_t *link, const rtcm_hub_stats_t *hub
  * longest run of failures that never reached a caster for the network
  * ladder, and whether any slot streams (upstream evidently works). */
 static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool *any_streaming,
-                         uint32_t *unreached_s)
+                         uint32_t *unreached_s, unsigned *n_enabled, unsigned *n_streaming)
 {
+    *n_enabled = 0;
+    *n_streaming = 0;
     *any_down = false;
     *protected_down = false;
     *any_streaming = false;
@@ -446,8 +449,12 @@ static void casters_tick(int64_t now, bool *any_down, bool *protected_down, bool
         if (hm_slot_down(&si)) {
             *any_down = true;
         }
+        if (si.enabled) {
+            (*n_enabled)++;
+        }
         if (si.enabled && s_cst.state == NTRIP_STATE_STREAMING) {
             *any_streaming = true;
+            (*n_streaming)++;
         }
         if (si.enabled && s_cst.unreached_s > *unreached_s) {
             *unreached_s = s_cst.unreached_s;
@@ -777,6 +784,22 @@ static void log_changes(const health_status_t *o)
     }
 }
 
+/* What the board's LEDs show (a no-op on a board without them). */
+static void leds_tick(bool have_net, uint32_t alerts, unsigned n_enabled, unsigned n_streaming)
+{
+    led_state_t ls = {
+        .wifi = !have_net || !s_net.sta_configured ? LED_WIFI_NONE : s_net.online ? LED_WIFI_UP : LED_WIFI_DOWN,
+        .servers = n_enabled == 0 ? LED_SERVERS_NONE : n_streaming == n_enabled ? LED_SERVERS_ALL : LED_SERVERS_SOME,
+        .button = !s_button.down ? LED_BUTTON_NONE : s_button.reached >= 2 ? LED_BUTTON_FACTORY
+                  : s_button.reached == 1                                ? LED_BUTTON_ADMIN
+                                                                         : LED_BUTTON_NONE,
+        .alerts = alerts,
+        .online = have_net && s_net.online,
+        .rssi = have_net && s_net.online ? s_net.rssi : 0,
+    };
+    leds_set(&ls);
+}
+
 static void tick(void)
 {
     int64_t now = now_ms();
@@ -861,7 +884,9 @@ static void tick(void)
     bool protected_down;
     bool any_streaming;
     uint32_t unreached_s;
-    casters_tick(now, &any_down, &protected_down, &any_streaming, &unreached_s);
+    unsigned n_enabled;
+    unsigned n_streaming;
+    casters_tick(now, &any_down, &protected_down, &any_streaming, &unreached_s, &n_enabled, &n_streaming);
     bool casters_down = hm_deb(&s_deb_casters, any_down, now, CASTER_ON_MS, CASTER_OFF_MS);
     bool no_upstream = network_tick(have_net, &hub, protected_down, any_streaming, unreached_s);
     bool power_lost = power_tick();
@@ -981,6 +1006,7 @@ static void tick(void)
     s_pub_valid = true;
     portEXIT_CRITICAL(&s_lock);
     log_changes(&o);
+    leds_tick(have_net, alerts, n_enabled, n_streaming);
 }
 
 static void health_task(void *arg)

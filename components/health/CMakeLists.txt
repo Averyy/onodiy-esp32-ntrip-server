@@ -18,6 +18,7 @@ idf_component_register(
         settings
         lifecycle
         ledger
+        leds
         gnss_link
         gnss_obs
         rtcm_hub

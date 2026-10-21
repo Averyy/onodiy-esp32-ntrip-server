@@ -56,6 +56,7 @@
 #include "gnss_obs.h"
 #include "health.h"
 #include "ledger.h"
+#include "leds.h"
 #include "lifecycle.h"
 #include "local_caster.h"
 #include "monitor.h"
@@ -138,6 +139,7 @@ static esp_err_t board_step(void)
 static const boot_step_t s_init_steps[] = {
     { "fw_update",    fw_update_init,    false }, /* app trial bookkeeping, revert */
     { "board",        board_step,        false }, /* which board, its pins */
+    { "leds",         leds_init,         false }, /* the start pattern until health's first tick */
     { "ledger",       ledger_step,       false }, /* first shutdown hook; planned-reboot accounting */
     { "pkg_store",    pkg_store_init,    false },
     { "rtcm_hub",     rtcm_hub_init,     true  },

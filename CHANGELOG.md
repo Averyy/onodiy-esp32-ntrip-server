@@ -9,7 +9,11 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
   Wi-Fi). GNS NTRIP-X support, untested (no NTRIP-X has run it yet): its own install
   with 8 MB flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on
-  GPIO16/15. Receiver firmware updates are not available on it yet.
+  GPIO16/15, and its LEDs: the status LED blinks the codes of GNS's quick guide (white,
+  then blue for Wi-Fi and green for the servers; fast red for a new alert; fast yellow
+  and pink while the button is held to 10 s and 20 s), the Wi-Fi LED brightens with the
+  signal and the GNSS LED shows a fix. Receiver firmware updates are not available on
+  it yet.
 - Release: one image per board to write at 0x0 after an erase
   (`onodiy-install-16mb.bin` for the UM982 and UM980 boards), with the commands in the
   notes.
