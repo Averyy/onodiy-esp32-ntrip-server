@@ -837,7 +837,7 @@ function roverSummary(d, s) {
       ['Mountpoint', copyable(c.mountpoint)], ['Username', copyable(c.username)], ['Password', c.password_set ? 'Set' : 'Not set'],
       ['NTRIP version', '1.0 or 2.0']]),
     list.map(oneRover),
-    h('p', { class: 'muted small' }, 'At most ' + (st.max_clients || 2) + ' rovers at once. ' +
+    h('p', { class: 'muted small' }, 'At most ' + (st.max_clients || 4) + ' rovers at once. ' +
       'Only devices on your home network can connect.'),
     refused.length ? h('p', { class: 'muted small' }, 'Refused since the station started: ' + refused.join(', ') + '.') : null,
   ];

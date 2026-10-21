@@ -231,7 +231,7 @@ def test_reply_builders_match_the_documented_bytes():
     assert station_error(429, V2_CHUNKED, "v1.2.3", date, retry_s=8).startswith(
         b"HTTP/1.1 429 Too Many Requests\r\nNtrip-Version: Ntrip/2.0\r\nServer: NTRIP onodiy/v1.2.3\r\nDate: ")
     assert station_error(503, V2_RAW, "v1.2.3").startswith(b"HTTP/1.0 503 Service Unavailable\r\nNtrip-Version")
-    assert station_error(503, V2_RAW, "v1.2.3").endswith(b"\r\n\r\nAt most 2 rovers at a time\r\n")
+    assert station_error(503, V2_RAW, "v1.2.3").endswith(b"\r\n\r\nAt most 4 rovers at a time\r\n")
     assert station_error(403, V1, "v").endswith(b"Content-Length: 22\r\n\r\nNot for web browsers\r\n")
     assert station_error(400, V1, "v").endswith(b"Content-Length: 13\r\n\r\nBad request\r\n")
     assert [reply_flavour(False, True), reply_flavour(True, True), reply_flavour(True, False)] == [V1, V2_CHUNKED,

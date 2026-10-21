@@ -698,8 +698,9 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   (aligned at the loop nearest in time) over at least 50 s; `GET
   /api/local-caster` lists both (10.0.2.2, versions 2 and 1, chunked, the
   client's agent, `bytes_sent` within 5 % of what each counted),
-  `/api/status` 2 rovers, `hub.consumers` 6. A third rover gets 503 with
-  the right login and 401 with a wrong one. B leaves, and rover C
+  `/api/status` 2 rovers, `hub.consumers` 6. Two more rovers fill the 4
+  places for a few seconds; a fifth gets 503 with the right login and 401
+  with a wrong one. B leaves, and rover C
   (`SO_RCVBUF` 4096) never reads: the station closes C (`stalled` + 1)
   10 s after its `bytes_sent` stopped growing (QEMU's user network buffers
   128 KiB per connection and this computer's sockets more, so that comes

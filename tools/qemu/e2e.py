@@ -72,8 +72,9 @@ What it does:
      each record frame for frame the upstream's (aligned at the nearest
      loop) over 50 s; GET /api/local-caster lists both (10.0.2.2, versions
      2 and 1, chunked, the agent, bytes_sent within 5 % of what each
-     counted), /api/status 2 rovers, hub.consumers 6; a third rover gets
-     503 after a good login, 401 after a wrong one; B leaves and C
+     counted), /api/status 2 rovers, hub.consumers 6; two more fill the
+     4 places for a few seconds, and a fifth gets 503 after a good login,
+     401 after a wrong one; B leaves and C
      (SO_RCVBUF 4096) never reads: the station closes C 10 s after its
      bytes_sent stopped growing (stalled +1; on Linux only with
      net.ipv4.tcp_wmem's max at most 256 KiB, as CI's container sets it,
@@ -237,7 +238,7 @@ STOP_REASONS = ["none", "rejected", "login_blocked", "in_use", "kicked", "duplic
 LCAST_PORT = 2101                 # CONFIG_LOCAL_CASTER_PORT
 LCAST_MOUNT = "ROVER"
 LCAST_USER = "rover"              # LOCAL_CASTER_DEFAULT_USER
-LCAST_MAX_ROVERS = 2              # LOCAL_CASTER_MAX_CLIENTS
+LCAST_MAX_ROVERS = 4              # LOCAL_CASTER_MAX_CLIENTS
 LCAST_RUN_S = 60.0                # rovers A and B read together at least this long
 LCAST_MATCH_S = 50.0              # ... and each record equals the upstream's, frame for frame, over at least this
 LCAST_TAIL_S = 5.0                # rover frames past the end of the upstream record read just after (still arriving)
@@ -2016,11 +2017,26 @@ class E2E:
                        f"rover {name}: bytes_sent {sent}, it counted {counted:.0f} (within "
                        f"{LCAST_BYTES_TOLERANCE * 100:.0f} %) after {time.monotonic() - rovers[-1].t_start:.0f} s")
 
-        # 6. Full: the right login gets 503, a wrong one 401 (the occupancy is not shown without a login).
+        # 6. Full: rovers fill the other places (gone again within 10 s, so the journal never lists them); then
+        # the right login gets 503, a wrong one 401 (the occupancy is not shown without a login).
         refused = self.lc_refused()
-        self.lc_error(self.lc_open(1), 503, V1, f"a third rover with the right login ({LCAST_MAX_ROVERS} streaming)")
-        self.lc_error(self.lc_open(1, password=wrong), 401, V1, "a third rover with a wrong login", LCAST_MOUNT)
-        self.lc_counts(refused, {"full": 1, "login": 1}, "the third rover")
+        fillers = []
+        for k in range(LCAST_MAX_ROVERS - 2):
+            f = self.lc_open(1)
+            if self.check(f.reply.accepted, f"filler rover {k + 1} of {LCAST_MAX_ROVERS - 2} streams: {f.reply.status_line!r}"):
+                fillers.append(Rover(f, f"F{k + 1}").start())
+            else:
+                f.close()
+        self.lc_error(self.lc_open(1), 503, V1, f"one more rover with the right login ({LCAST_MAX_ROVERS} streaming)")
+        self.lc_error(self.lc_open(1, password=wrong), 401, V1, "one more rover with a wrong login", LCAST_MOUNT)
+        self.lc_counts(refused, {"full": 1, "login": 1}, "the rover over the limit")
+        for f in fillers:
+            f.stop()
+            f.st.close()
+            self.check(time.monotonic() - f.t_start < 10, f"filler rover {f.name} closed within 10 s of its login "
+                                                          f"(so the journal never lists it)")
+        back = self.poll(lambda: len(self.lc_state().get("clients", [])) == 2, 15, every=0.5)
+        self.check(back is not None, "the filler rovers closed: A and B listed again")
 
         # 7. B leaves; C logs in and never reads. A and the upstream go on.
         rb.stop()

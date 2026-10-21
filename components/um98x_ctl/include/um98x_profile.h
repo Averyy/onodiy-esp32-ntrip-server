@@ -29,7 +29,9 @@
  *    1087, 1097, 1117, 1127 and 1230, each once, in any order, every one
  *    every 1 s): today's default list, Onocoy's, instead of a "custom" one;
  *  - written under 1 or 2 with sat_view_output off (its default then):
- *    on, today's default.
+ *    on, today's default;
+ *  - without the elevation mask (a byte appended after the defaults byte;
+ *    the receiver kept its own 5 degrees then): today's default, 0.
  * Any other value, and any blob written since (the old set or the output
  * off chosen again on purpose, or a defaults byte this firmware does not
  * know), decodes as stored. Nothing is written for it: the next save stores
@@ -67,12 +69,16 @@ extern "C" {
 #define UM98X_SURVEY_MAX_S       3600u    /**< longest survey-in the receiver accepts */
 #define UM98X_DEFAULT_SURVEY_S   600u
 #define UM98X_DEFAULT_COM1_BAUD  460800u
+#define UM98X_DEFAULT_MASK_DEG   0u       /**< elevation mask: every satellite above the horizon */
+#define UM98X_RX_DEFAULT_MASK_DEG 5u      /**< the receiver's own elevation mask (what it ran before the mask was a setting) */
 
 /**
  * Onocoy default profile: signal group 3/6 (adds Galileo E6 on the UM982),
- * survey-in 600 s, COM1 at 460800, RTCM 1005, 1033, MSM7
- * 1077/1087/1097/1117/1127/1137 and 1230, all every 1 s: the list Onocoy's
- * station connection guide asks for (1005 at 1 s too, which it allows).
+ * survey-in 600 s, COM1 at 460800, elevation mask 0 degrees (every
+ * satellite above the horizon; the receiver's own default is 5), RTCM
+ * 1005, 1033, MSM7 1077/1087/1097/1117/1127/1137 and 1230, all every 1 s:
+ * the list Onocoy's station connection guide asks for (1005 at 1 s too,
+ * which it allows).
  * 1137 (NavIC) and 1230 may be refused by a receiver firmware without them;
  * the apply tolerates that (um98x_rtcm_optional). NavIC and QZSS are
  * regional: outside their area no MSM of theirs arrives, which the station
@@ -138,6 +144,7 @@ bool um98x_profile_decode(const uint8_t *buf, size_t len, um98x_base_profile_t *
 #define UM98X_PROFILE_UPGRADED_RTCM 0x01u   /**< the old default message set, read as Onocoy's list */
 #define UM98X_PROFILE_UPGRADED_SKY  0x02u   /**< satellite-in-view output off from before it was the default, read as on */
 #define UM98X_PROFILE_UPGRADED_BAUD 0x04u   /**< COM1 at 115200 from before 460800 was the default, read as 460800 */
+#define UM98X_PROFILE_UPGRADED_MASK 0x08u   /**< no elevation mask stored (from before it was a setting), read as the default */
 
 /** um98x_profile_decode(); *upgraded (may be NULL) says which old defaults were read as today's (0 = none). */
 bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_t *out, unsigned *upgraded);

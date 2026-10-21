@@ -869,7 +869,7 @@ TEST_CASE("lcast replies: errors and the source table, byte for byte", "[lcast]"
                              "Content-Type: text/plain\r\n"
                              "Content-Length: 28\r\n"
                              "\r\n"
-                             "At most 2 rovers at a time\r\n",
+                             "At most 4 rovers at a time\r\n",
                              b);
     /* every code and flavour: a body as long as it says, nothing secret */
     static const lcast_action_t codes[] = { LCAST_ACT_E400, LCAST_ACT_E401, LCAST_ACT_E403, LCAST_ACT_E429,
@@ -1202,7 +1202,7 @@ TEST_CASE("lcast throttle: the latest logins' addresses skip the global bucket, 
 {
     lcast_throttles_t t;
     lcast_throttles_init(&t, 1000);
-    const uint64_t owner = 0x0A000232, rover2 = 0x0A000233, third = 0x0A000234;
+    const uint64_t owner = 0x0A000232, rover2 = 0x0A000233, third = 0x0A000234, fourth = 0x0A000235, fifth = 0x0A000236;
     lcast_throttles_ok(&t, owner);
     /* someone else empties the bucket and keeps it empty with one failure per 120 s */
     for (uint32_t k = 0; k < LCAST_THROTTLE_BURST; k++) {
@@ -1218,15 +1218,21 @@ TEST_CASE("lcast throttle: the latest logins' addresses skip the global bucket, 
     }
     TEST_ASSERT_EQUAL_UINT32(2, lcast_throttles_wait_s(&t, owner, 1200));
     TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1202));
-    /* two are trusted, newest first: a third login pushes the oldest out; a repeat moves up */
+    /* four are trusted, newest first: a fifth login pushes the oldest out; a repeat moves up */
+    TEST_ASSERT_EQUAL_UINT32(4, LCAST_THROTTLE_TRUSTED);
     lcast_throttles_ok(&t, rover2);
     TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, rover2, 1300));
     TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1300));
     lcast_throttles_ok(&t, owner);   /* owner newest, rover2 second */
-    lcast_throttles_ok(&t, third);   /* rover2 goes */
-    TEST_ASSERT_EQUAL_UINT32(2, t.trusted_n);
-    TEST_ASSERT_EQUAL_UINT64(third, t.trusted[0]);
-    TEST_ASSERT_EQUAL_UINT64(owner, t.trusted[1]);
+    lcast_throttles_ok(&t, third);
+    lcast_throttles_ok(&t, fourth);
+    TEST_ASSERT_EQUAL_UINT32(4, t.trusted_n);
+    lcast_throttles_ok(&t, fifth);   /* rover2 goes */
+    TEST_ASSERT_EQUAL_UINT32(4, t.trusted_n);
+    TEST_ASSERT_EQUAL_UINT64(fifth, t.trusted[0]);
+    TEST_ASSERT_EQUAL_UINT64(fourth, t.trusted[1]);
+    TEST_ASSERT_EQUAL_UINT64(third, t.trusted[2]);
+    TEST_ASSERT_EQUAL_UINT64(owner, t.trusted[3]);
     lcast_throttles_fail(&t, 9998, 1300);   /* the token that came back meanwhile: used again */
     TEST_ASSERT_NOT_EQUAL(0, lcast_throttles_wait_s(&t, rover2, 1300));
     TEST_ASSERT_EQUAL_UINT32(0, lcast_throttles_wait_s(&t, owner, 1300));

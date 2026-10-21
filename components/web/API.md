@@ -774,13 +774,14 @@ oldest.
     "station_id": 1234, "com1_baud": 115200,
     "rtcm": [{"msg": 1005, "period_s": 1}, {"msg": 1033, "period_s": 1}, {"msg": 1077, "period_s": 1}],
     "sat_view_output": true,
-    "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0
+    "antenna_model": "", "antenna_serial": "", "antenna_setup_id": 0, "elevation_mask_deg": 0
   },
   "rx_settings": {"valid": true, "age_s": 3600, "read_unix": 1760000000,
                   "b1cb2a": "on", "mmp": "off", "mask_deg": 10.0,
                   "antenna": {"model": "TRM59800.00     SCIS", "serial": "5000123", "setup_id": 0}},
   "apply_steps": {"antenna": {"sent": false, "ok": false, "reply": null},
-                  "b1cb2a": {"sent": true, "ok": true, "reply": null}},
+                  "b1cb2a": {"sent": true, "ok": true, "reply": null},
+                  "mask": {"sent": true, "ok": true, "reply": null}},
   "rtcm1033": {"valid": true, "station_id": 1234, "antenna": "TRM59800.00     SCIS", "setup_id": 0,
                "antenna_serial": "5000123", "receiver_type": "...", "receiver_fw": "...",
                "receiver_serial": "...", "age_ms": 400, "bad_frames": 0},
@@ -820,8 +821,9 @@ oldest.
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
 | `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode, its own position) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
 | `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one). UM982 build 25164 stores the name with every run of spaces collapsed to one: the IGS form `TRM59800.00     SCIS` (the name padded to 16 characters, then the radome) reads back as `TRM59800.00 SCIS` (our bench, 2026-10-14). The station therefore compares names (and serial numbers) with runs of spaces read as one and leading and trailing spaces dropped, so a receiver that holds the collapsed form is not sent the antenna again on every apply. The 1033 the receiver then sends may carry the collapsed name rather than the IGS padded form, which rovers and casters look up by; `rtcm1033.antenna` shows what it sends (to be checked with sky before a real antenna name goes to a caster) |
-| `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°); `antenna` the descriptor the receiver holds, as it reads it back (`null` = not read): when the session sent the antenna, the dump is read again right after that step, so this is the receiver's own form (collapsed spaces on build 25164), never the profile's text; `null` if that read failed. `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP and the mask are shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
-| `apply_steps` | outcome of the antenna and B1C/B2a steps of the last apply session (sent only when the read-back asked for them; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>" |
+| `profile.elevation_mask_deg` | satellites below this elevation are not tracked, whole degrees 0-90; `0` (the default) every satellite above the horizon. The receiver's own default is 5°. Sent as `MASK <deg>` in every apply session (the UM982 lists no mask in its configuration dump, so there is nothing to compare with). A profile stored before the mask was a setting reads as 0 and is applied once (the receiver ran its own 5° until then); a profile at 5 hashes as one from before it |
+| `rx_settings` | what the receiver's configuration dump said at the last apply session this boot (`station_status_t.rx_settings`): `valid` false and every value unknown (`unknown` / `null`) after a reboot until the next apply. `b1cb2a`, `mmp` (`um98x_setting_t`): BeiDou B1C/B2a observations in RTCM, multipath mitigation; `mask_deg` the elevation mask (0.1°): from the dump where it lists one, and the profile's after a saved session that set it (`null` = not known: UM982 build 25164's dump has no mask); `antenna` the descriptor the receiver holds, as it reads it back (`null` = not read): when the session sent the antenna, the dump is read again right after that step, so this is the receiver's own form (collapsed spaces on build 25164), never the profile's text; `null` if that read failed. `age_s` since the read-back, `read_unix` its time (`null` without a clock then). MMP is shown only, never sent (PROVISIONAL, to be confirmed on hardware) |
+| `apply_steps` | outcome of the antenna, B1C/B2a and elevation-mask steps of the last apply session (the first two sent only when the read-back asked for them, the mask in every session; a refusal does not fail the session): `sent`, `ok` (accepted), `reply` the receiver's refusal text or `"timeout"` (`null` unless refused). The UI words an antenna refusal "antenna model rejected: <reply>", a mask refusal "Elevation mask rejected: <reply>" |
 | `rtcm1033` | the latest CRC-valid 1033 the receiver published (`gnss_obs_get_1033`), strings as received; `{"valid": false, "bad_frames": n}` before the first that decoded; `bad_frames` counts 1033 frames that did not decode since boot |
 | `maintenance` | receiver maintenance (below): `left_s`, `chosen_s` 0 when off; `choices_s` the durations offered, `max_left_s` the most time left after extensions |
 | `rx_signal_group` | the signal group the receiver runs as its last configuration read-back this boot showed (`CONFIG SIGNALGROUP`; after a change, the new one); `null` before an apply session read it |
@@ -845,7 +847,8 @@ reads it every tick, a step already running completes).
              "fixed": {"lat_deg": 45.123456789, "lon_deg": -75.123456789, "height_m": 85.1234},
              "station_id": 1234, "com1_baud": 115200,
              "rtcm": [{"msg": 1005, "period_s": 1}], "sat_view_output": true,
-             "antenna_model": "TRM59800.00     SCIS", "antenna_serial": "5000123", "antenna_setup_id": 0},
+             "antenna_model": "TRM59800.00     SCIS", "antenna_serial": "5000123", "antenna_setup_id": 0,
+             "elevation_mask_deg": 0},
  "autocfg": true, "recovery": "full"}
 ```
 
@@ -886,7 +889,8 @@ never reach a caster); ephemeris types (1019, 1020, 1042, 1045, 1046) need
 `com1_baud` >= 460800; `antenna_model` and `antenna_serial` lose their
 trailing spaces (the stored form) and must then be at most 31 printable
 ASCII characters without `"` (inner spaces stay: the IGS name pads the
-antenna type to 16 characters before the radome); `antenna_setup_id` 0-255.
+antenna type to 16 characters before the radome); `antenna_setup_id` 0-255;
+`elevation_mask_deg` a whole number 0-90.
 The UI's hint: only for an antenna in the IGS list, its name and radome as
 listed; empty keeps the receiver's value; `ADVNULLANTENNA` (the null-antenna
 name) clears a model the receiver already holds.
@@ -960,6 +964,7 @@ write). Nothing is sent.
            {"text": "ANT1GROUPA", "kind": "query", "when": "always", "saved": false},
            {"text": "MODE BASE 1234 TIME 600 0", "kind": "write", "when": "if_differs", "saved": false},
            {"text": "CONFIG RTCMB1CB2A ENABLE", "kind": "write", "when": "if_off", "saved": false},
+           {"text": "MASK 0", "kind": "write", "when": "always", "saved": false},
            {"text": "RTCM1005 COM1 1", "kind": "write", "when": "always", "saved": false},
            {"text": "SAVECONFIG", "kind": "write", "when": "always", "saved": true}],
  "saveconfig": true}
@@ -967,7 +972,7 @@ write). Nothing is sent.
 
 | Field | Notes |
 |---|---|
-| `steps[].text` | the command as the session writes it (the plan builder's own text); `ANT1GROUPA` is the signal-group query after the signal-group step (`rx_bands`), sent in every session; `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, followed by the dump query `CONFIG` again (`if_differs`: only when the antenna was sent and accepted; the name as the receiver stores it, for `rx_settings.antenna`), `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
+| `steps[].text` | the command as the session writes it (the plan builder's own text); `ANT1GROUPA` is the signal-group query after the signal-group step (`rx_bands`), sent in every session; `RTCM<msg> COM1 <period>` once per profile message, `CONFIG COM1 <baud>` only when the profile's baud is not the link's, `CONFIG BASEANTENNAMODEL ...` only with an antenna model, followed by the dump query `CONFIG` again (`if_differs`: only when the antenna was sent and accepted; the name as the receiver stores it, for `rx_settings.antenna`), `MASK <deg>` the profile's elevation mask, `GPGSV COM1 10` only with satellite-in-view output in the profile; a fixed position is sent as ECEF with 4 decimals |
 | `steps[].kind` | `um98x_preview_kind_t`: `query` (reads the receiver), `write` (changes its running configuration) |
 | `steps[].when` | `um98x_preview_when_t`: `always`; `if_differs` (only when the read-back differs from the profile); `if_off` (only when the read-back shows the setting off) |
 | `steps[].saved` | the command saves to the receiver's stored configuration by itself: `CONFIG SIGNALGROUP` (the receiver saves it and restarts) and `SAVECONFIG` |
@@ -1769,7 +1774,7 @@ removes it. The slot reconnects. `200` with the slot entry. Errors:
 The station serves its own RTCM to the owner's rover on the home network
 (`local_caster.h`; the UI calls it "Local server", beside the remote NTRIP
 servers). NTRIP 1.0 and 2.0 on TCP port 2101 (`CONFIG_LOCAL_CASTER_PORT`,
-fixed), one mountpoint, one username and password, at most 2 rovers at
+fixed), one mountpoint, one username and password, at most 4 rovers at
 once (`LOCAL_CASTER_MAX_CLIENTS`). Only peers with a private, link-local
 or loopback address connect, never the station's IPv4 gateway (a router
 that masquerades a port forward) and never over the setup hotspot: neither
@@ -1779,8 +1784,8 @@ either interface, so a hotspot client could reach the home-network
 address). Off by default. The rover's sessions are journalled
 (`rover_connect`, `rover_disconnect`, section 14).
 
-Connections: at most 4 at once. One that sends nothing within 2 s is
-closed without a reply, and when all 4 are taken a new one takes the place
+Connections: at most 6 at once. One that sends nothing within 2 s is
+closed without a reply, and when all 6 are taken a new one takes the place
 of one that cannot be a rover's (one lingering after its answer, one that
 has sent nothing, the same client's earlier request, a request of a client
 holding another connection), so idle connections from the LAN cannot keep
@@ -1790,7 +1795,7 @@ defence in depth only, since a browser sends neither on every request (no
 address); the login is what protects the stream. Wrong logins are
 throttled as the web Login is (per address: 5 free, then 2^(n-4) s up to
 300 s; in total: 30 in a burst, then one per 120 s); the addresses of the
-last 2 successful logins since boot skip the total, so failures elsewhere
+last 4 successful logins since boot skip the total, so failures elsewhere
 never lock the owner's rover out.
 
 ### `GET /api/local-caster` (adm)
@@ -1799,7 +1804,7 @@ never lock the owner's rover out.
 {
   "config": {"enabled": true, "mountpoint": "onodiy", "username": "rover", "password_set": true},
   "status": {
-    "state": "listening", "port": 2101, "max_clients": 2,
+    "state": "listening", "port": 2101, "max_clients": 4,
     "clients": [
       {"addr": "192.168.2.50", "ntrip_version": 2, "chunked": true, "connected_s": 3725,
        "bytes_sent": 6172000, "epochs_dropped": 0, "agent": "NTRIP RTKLIB/2.4.3"}
@@ -1814,11 +1819,11 @@ never lock the owner's rover out.
 |---|---|
 | `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the build's), the username `rover`, no password. The password is never returned: `password_set` says whether one is stored |
 | `status.state` | `local_caster_state_t`: `off`; `wait_network` (on, but the station has no IPv4 address on the home network); `listening`; `error` (the port could not be opened; tried again every 10 s) |
-| `status.port`, `status.max_clients` | the build's: 2101 and 2 |
+| `status.port`, `status.max_clients` | the build's: 2101 and 4 |
 | `status.clients[]` | the rovers streaming now, oldest first: `addr` (IPv6 in RFC 5952 form, an IPv4-mapped address as IPv4), `ntrip_version` (2 when its request said `Ntrip-Version: Ntrip/2.0`, else 1), `chunked` (its data goes in HTTP chunks: NTRIP 2.0 over HTTP/1.1), `connected_s` (since its success reply), `bytes_sent` (RTCM bytes its socket took; no reply header, no chunk framing), `epochs_dropped` (whole epochs the hub dropped because it read too slowly), `agent` (its `User-Agent`, printable ASCII cut to 47; `null` when it sent none) |
 | `status.sessions`, `status.bytes_sent`, `status.stalled` | since boot: sessions started, RTCM bytes sent in all of them, sessions closed because the rover took no data for 10 s |
 | `status.listen_errno` | the `errno` of the socket, bind or listen that failed (`ENOMEM`: no task or no memory); `null` unless `state` is `error` |
-| `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, over the setup hotspot or from its subnet), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 2 rovers streaming or no free hub consumer, or closed at once: all 4 connections rovers or answers being written), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser; or closed without a reply: nothing sent within 2 s) |
+| `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, over the setup hotspot or from its subnet), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 4 rovers streaming or no free hub consumer, or closed at once: all 6 connections rovers or answers being written), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser; or closed without a reply: nothing sent within 2 s) |
 
 ### `PUT /api/local-caster` (adm)
 

@@ -276,11 +276,12 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  * re-survey; fixed positions as ECEF, 4 decimals); the antenna descriptor
  * only when the profile has one and the read-back differs or is unknown;
  * BeiDou B1C/B2a in RTCM turned on only when the read-back shows it off
- * (both not fatal: rejections are recorded in the result); the RTCM
- * messages in profile order (a rejected 1230 or NavIC MSM is not fatal:
- * um98x_rtcm_optional; every refusal is listed in result->rtcm_refused); the
- * satellite-view sentence if enabled; one SAVECONFIG. The elevation mask
- * and multipath mitigation are read back and reported, never sent.
+ * (both not fatal: rejections are recorded in the result); the elevation
+ * mask, always (not fatal either); the RTCM messages in profile order (a
+ * rejected 1230 or NavIC MSM is not fatal: um98x_rtcm_optional; every
+ * refusal is listed in result->rtcm_refused); the satellite-view sentence
+ * if enabled; one SAVECONFIG. Multipath mitigation is read back and
+ * reported, never sent.
  *
  * Success: gnss/applied_hash, gnss/applied_fw (this session's firmware),
  * gnss/rtcm1230_ok and, if it changed, gnss/baud are written in one

@@ -351,7 +351,7 @@ typedef struct {
     uint32_t last_s;            /**< the last counted failure */
 } lcast_throttle_client_t;
 
-#define LCAST_THROTTLE_TRUSTED   2u     /**< addresses of the latest logins, exempt from the global bucket */
+#define LCAST_THROTTLE_TRUSTED   4u     /**< addresses of the latest logins, exempt from the global bucket */
 
 typedef struct {
     lcast_throttle_client_t c[LCAST_THROTTLE_CLIENTS];

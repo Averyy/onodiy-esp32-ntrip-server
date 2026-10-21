@@ -9,6 +9,10 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Status: the "Update available" banner shows here too, and its button says where it
   goes: "Settings page".
 - The dot beside a tab (an update is waiting) lines up with the tab's name.
+- Receiver: an elevation mask setting under Signals. The default is 0°, so the receiver
+  tracks every satellite above the horizon (its own default was 5°). Existing stations
+  switch to 0° and configure the receiver once after the update.
+- Local server: up to 4 rovers at once (was 2).
 
 ## v0.1.5
 

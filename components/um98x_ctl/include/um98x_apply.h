@@ -90,8 +90,9 @@ typedef struct {
      * read-back; after a saved session that changed the antenna
      * descriptor, the descriptor as the receiver read it back right after
      * that step (its own form: build 25164 collapses runs of spaces;
-     * unknown if that read failed), and B1C/B2a on when the session turned
-     * it on (a failed session's RESET brings back the read values).
+     * unknown if that read failed), B1C/B2a on when the session turned it
+     * on, and the elevation mask it set (a failed session's RESET brings
+     * back the read values).
      */
     um98x_rx_settings_t settings;
     bool antenna_sent;          /**< the antenna descriptor was sent (the read-back differed or was unknown) */
@@ -100,6 +101,9 @@ typedef struct {
     bool b1cb2a_sent;           /**< BeiDou B1C/B2a in RTCM was turned on (it read back off) */
     bool b1cb2a_ok;             /**< ... and accepted */
     char b1cb2a_reply[UM98X_APPLY_REASON_MAX];    /**< its rejection text, or "timeout" ("" when accepted) */
+    bool mask_sent;             /**< the elevation mask was sent (every session that gets that far) */
+    bool mask_ok;               /**< ... and accepted */
+    char mask_reply[UM98X_APPLY_REASON_MAX];      /**< its rejection text, or "timeout" ("" when accepted) */
 
     /**
      * The signal-group query of this session (ANT1GROUPA, after the
@@ -116,12 +120,12 @@ typedef struct {
 
 #define UM98X_PREVIEW_TEXT_MAX UM98X_APPLY_CMD_MAX
 /**
- * Most steps of a preview: one per RTCM message plus the rest (13 today:
+ * Most steps of a preview: one per RTCM message plus the rest (14 today:
  * UNLOG COM1, VERSIONA, CONFIG, MODE, the signal group, ANT1GROUPA, the
  * baud, the base mode, the antenna and the dump read after it, B1C/B2a,
- * the satellite view, SAVECONFIG), with one to spare.
+ * the elevation mask, the satellite view, SAVECONFIG), with one to spare.
  */
-#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 14u)
+#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 15u)
 
 /** um98x_preview_step_t.kind */
 typedef enum {

@@ -27,16 +27,20 @@
  *   5. CONFIG RTCMB1CB2A ENABLE              only if the read-back shows
  *      BeiDou B1C/B2a in RTCM turned off; unknown = not sent (non-fatal).
  *      Not a profile field: B1C/B2a is always wanted
- *   6. RTCM<msg> COM1 <period>               every profile message, in
+ *   6. MASK <deg>                            always (non-fatal: a rejection
+ *      is recorded and shown). The UM982 has no MASK item in its
+ *      configuration dump (build 25164 answers it only to its own query),
+ *      so there is nothing to compare with; sent again it changes nothing
+ *   7. RTCM<msg> COM1 <period>               every profile message, in
  *      profile order (the optional ones non-fatal: um98x_rtcm_optional)
- *   7. GPGSV COM1 10                         only with satellite-view output
+ *   8. GPGSV COM1 10                         only with satellite-view output
  *                                            (non-fatal)
- *   8. SAVECONFIG                            the only save of the session
+ *   9. SAVECONFIG                            the only save of the session
  *
  * Never sent: anything for the receiver's other ports (the user's), the vendor RTCM
- * encryption settings, the elevation mask and multipath mitigation (read
- * back and shown only), FRESET, comma-separated command forms. Commands are
- * the manual's space-separated upper-case form.
+ * encryption settings, multipath mitigation (read back and shown only), a
+ * mask of a constellation, frequency or satellite, FRESET, comma-separated
+ * command forms. Commands are the manual's space-separated upper-case form.
  *
  * Satellite-in-view output outside the profile (the live view, never
  * saved): "GPGSV COM1 <period>" on, "UNLOG COM1 GPGSV" off
@@ -121,6 +125,7 @@ typedef enum {
     UM98X_STEP_SAVE,
     UM98X_STEP_ANTENNA,     /**< base antenna descriptor (non-fatal) */
     UM98X_STEP_B1CB2A,      /**< BeiDou B1C/B2a in RTCM on (non-fatal) */
+    UM98X_STEP_MASK,        /**< elevation mask (non-fatal) */
 } um98x_step_kind_t;
 
 typedef struct {
@@ -130,7 +135,7 @@ typedef struct {
     uint16_t period_s;   /**< RTCM: period */
 } um98x_step_t;
 
-#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 7)
+#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 8)
 
 typedef struct {
     uint8_t count;
@@ -204,6 +209,7 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
  *   CONFIG BASEANTENNAMODEL ...    write, only with an antenna model, if
  *                                  the read-back differs
  *   CONFIG RTCMB1CB2A ENABLE       write, if the read-back shows it off
+ *   MASK <deg>                     write, always
  *   RTCM<msg> COM1 <period>        write, always, one per profile message
  *   GPGSV COM1 10                  write, always, only with satellite-view
  *                                  output in the profile

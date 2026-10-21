@@ -611,7 +611,8 @@ function matchLine(g) {
 function stepsRefused(g) {
   const s = g.apply_steps || {};
   const no = (x, what) => (x && x.sent && !x.ok ? msg('warn', what + ': ' + (x.reply || 'no reason given') + '.') : null);
-  return [no(s.antenna, 'Antenna model rejected'), no(s.b1cb2a, 'BeiDou B1C/B2a output rejected')];
+  return [no(s.antenna, 'Antenna model rejected'), no(s.b1cb2a, 'BeiDou B1C/B2a output rejected'),
+    no(s.mask, 'Elevation mask rejected')];
 }
 
 /** Whether "Use the current position" has a position to copy: a 1005 that is not the locked position (a fixed base sends
@@ -650,7 +651,7 @@ function editRow(line, box, onToggle) {
  */
 function receiverForms(g, latest, done, onCompare, fold) {
   const p = Object.assign({ signal_group_master: 3, signal_group_slave: 6, base_mode: 'survey_in', survey_in_s: 600, fixed: null,
-    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true }, g.profile || {});
+    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true, elevation_mask_deg: 0 }, g.profile || {});
   const folds = fold || { advanced: false };
   let profDirty = false;
 
@@ -679,6 +680,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud' + (b === DEFAULT_BAUD ? ' (default)' : '')]), p.com1_baud);
   const satView = checkbox('Sky map', p.sat_view_output, 'On (default): the receiver sends where each satellite is every 10s, so ' +
     'the Receiver page shows them on a sky map. Off: no sky map.');
+  const maskIn = numInput(p.elevation_mask_deg, { inputmode: 'numeric', maxlength: 2 });
   const antModel = textInput(p.antenna_model || '', { maxlength: 64, class: 'ant' });
   const antSerial = textInput(p.antenna_serial || '', { maxlength: 64 });
   const antSetup = numInput(p.antenna_setup_id || 0, { inputmode: 'numeric', maxlength: 3 });
@@ -695,6 +697,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
       'server asks for a number.'),
     com1_baud: field('Receiver link speed (COM' + receiverLink().port + ')', baud, '460800 (default) brings each epoch out sooner. Ephemeris messages ' +
       'need 460800 or more.'),
+    elevation_mask_deg: field('Elevation mask (°)', maskIn, '0 (default): every satellite above the horizon.'),
     rtcm: { el: h('div'), input: null, error: null },
     antenna_model: field('Antenna model (IGS name)', antModel, ['Only for an antenna in the IGS list: name and radome as listed. ' +
       'Empty keeps the receiver\'s value; ADVNULLANTENNA clears it. ', extLink('IGS antenna list', IGS_ANTENNAS)]),
@@ -890,7 +893,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   }
   function collectProfile() {
     const c = checker(['signal_group_master', 'signal_group_slave', 'station_id', 'com1_baud', 'rtcm', 'antenna_model', 'antenna_serial',
-      'antenna_setup_id']);
+      'antenna_setup_id', 'elevation_mask_deg']);
     const pick = sgCustom.input.checked ? null : (sgChoice.value() || '').split(' ');
     const out = {
       signal_group_master: pick && pick.length === 2 ? Number(pick[0]) : int(sgm.value, 0, 255),
@@ -902,6 +905,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
       antenna_model: '',
       antenna_serial: '',
       antenna_setup_id: int(antSetup.value, 0, 255),
+      elevation_mask_deg: int(maskIn.value, 0, 90),
     };
     /* Trailing spaces are dropped (the stored form); inner spaces stay. */
     const antenna = (input, k) => {
@@ -915,6 +919,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     out.antenna_model = antenna(antModel, 'antenna_model');
     out.antenna_serial = antenna(antSerial, 'antenna_serial');
     if (out.antenna_setup_id === null) c.fail('antenna_setup_id', 'A number from 0 to 255.');
+    if (out.elevation_mask_deg === null) c.fail('elevation_mask_deg', 'Whole degrees from 0 to 90.');
     if (out.signal_group_master === null) c.fail('signal_group_master', 'A number from 0 to 255.');
     if (out.signal_group_slave === null) c.fail('signal_group_slave', 'A number from 0 to 255.');
     if (out.station_id === null) c.fail('station_id', 'A number from 0 to 4095.');
@@ -986,9 +991,10 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const actions = h('div', { class: 'form-actions' }, saveBtn);
   const antLine = p.antenna_model ? h('span', { class: 'ant' }, p.antenna_model) :
     h('span', null, 'Not set (default; set it only for an antenna in the IGS list)');
-  /* The antenna step's refusal above Advanced (in view while it is closed), the B1C/B2a step's under the messages
-   * (stepsRefused). */
-  const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true })];
+  /* The antenna step's refusal above Advanced (in view while it is closed), the B1C/B2a step's under the messages, the
+   * mask's under Signals (stepsRefused). */
+  const refused = [h('div', { class: 'stack', hidden: true }), h('div', { class: 'stack', hidden: true }),
+    h('div', { class: 'stack', hidden: true })];
   /* Hidden while there is no comparison to go to (manual setup). */
   const cmpLink = h('button', { type: 'button', class: 'linkbtn', onclick: onCompare }, 'Not sure? Compare two groups');
   /* Advanced: closed until opened (the only fold on this page), as the page last left it across rebuilds. */
@@ -1007,7 +1013,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     e.preventDefault();
     save('profile', saveBtn, err);
   } },
-  pgroup('Signals', null, sgChoice.el, cmpLink, satView.el),
+  pgroup('Signals', null, sgChoice.el, cmpLink, satView.el, F.elevation_mask_deg.el, refused[2]),
   pgroup('Correction messages', setChip, editRow(summary, msgBox, open => {
     msgList.hidden = open;
   }), msgList, refused[1]),

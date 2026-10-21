@@ -123,6 +123,7 @@ bool um98x_plan_build(const um98x_base_profile_t *p, const um98x_readback_t *rb,
     if (rb->config_ok && rb->config.rx.b1cb2a == UM98X_SETTING_OFF) {
         add(out, UM98X_STEP_B1CB2A, false, 0, 0);
     }
+    add(out, UM98X_STEP_MASK, false, 0, 0);
     add_rtcm(p, out);
     if (p->sat_view_output) {
         add(out, UM98X_STEP_SAT_VIEW, false, 0, 0);
@@ -182,6 +183,9 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
     }
     case UM98X_STEP_B1CB2A:
         n = snprintf(buf, cap, "CONFIG RTCMB1CB2A ENABLE");
+        break;
+    case UM98X_STEP_MASK:
+        n = snprintf(buf, cap, "MASK %u", (unsigned)p->elevation_mask_deg);
         break;
     default:
         return 0;
@@ -243,7 +247,8 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
         ok = preview_step(p, out, cap, &n, UM98X_STEP_ANTENNA, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false) &&
              preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_IF_DIFFERS, false);
     }
-    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false);
+    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false) &&
+         preview_step(p, out, cap, &n, UM98X_STEP_MASK, 0, 0, UM98X_PREVIEW_ALWAYS, false);
     for (size_t i = 0; ok && i < p->rtcm_count; i++) {
         ok = preview_step(p, out, cap, &n, UM98X_STEP_RTCM, p->rtcm[i].msg, p->rtcm[i].period_s, UM98X_PREVIEW_ALWAYS,
                           false);

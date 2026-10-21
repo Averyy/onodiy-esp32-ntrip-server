@@ -166,6 +166,9 @@ TEST_CASE("profile field rules name the field", "[web_parse]")
         { "{\"profile\":{\"rtcm\":[{\"msg\":1005,\"period_s\":1},{\"msg\":1005,\"period_s\":5}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":{}}}", "rtcm" },
         { "{\"profile\":{\"sat_view_output\":1}}", "sat_view_output" },
+        { "{\"profile\":{\"elevation_mask_deg\":91}}", "elevation_mask_deg" },
+        { "{\"profile\":{\"elevation_mask_deg\":-1}}", "elevation_mask_deg" },
+        { "{\"profile\":{\"elevation_mask_deg\":2.5}}", "elevation_mask_deg" },
         { "{\"profile\":[]}", "profile" },
         { "{\"autocfg\":\"yes\"}", "autocfg" },
     };
@@ -216,6 +219,18 @@ static bool caster_put(const char *json, ntrip_caster_cfg_t *out, web_bad_t *b)
     bool ok = web_parse_caster_put(root, &st, out, b);
     cJSON_Delete(root);
     return ok;
+}
+
+TEST_CASE("elevation mask: whole degrees 0 to 90, kept when left out", "[web_parse]")
+{
+    um98x_base_profile_t p;
+    web_bad_t b = { 0 };
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"elevation_mask_deg\":90}}", &p, &b));
+    TEST_ASSERT_EQUAL_UINT8(90, p.elevation_mask_deg);
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"elevation_mask_deg\":0}}", &p, &b));
+    TEST_ASSERT_EQUAL_UINT8(0, p.elevation_mask_deg);
+    TEST_ASSERT_TRUE(profile_put("{\"profile\":{\"station_id\":7}}", &p, &b));
+    TEST_ASSERT_EQUAL_UINT8(UM98X_DEFAULT_MASK_DEG, p.elevation_mask_deg);   /* the stored profile's */
 }
 
 TEST_CASE("antenna descriptor: trailing spaces dropped, inner kept, the profile's character rule", "[web_parse]")

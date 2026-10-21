@@ -122,9 +122,9 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 # ---- Networking -------------------------------------------------------------
 # Sockets in use at most: the web server 13 (max_open_sockets 10 + 3 internal),
 # the caster slots 4 (8 in an 8-slot build), captive DNS 1 (while the AP is
-# up), the upstream probe 1, the update client 1, the local caster for a
-# rover 5 (listener + 4 connections): 25 (29: an 8-slot build needs both
-# limits below raised to at least 29). A build directory made before
+# up), the upstream probe 1, the update client 1, the local caster for
+# rovers 7 (listener + 6 connections): 27 (31: an 8-slot build needs both
+# limits below raised to at least 31). A build directory made before
 # 28 keeps its old value in its own sdkconfig; local_caster.c refuses to
 # build with less (set both to 28 there, or start a new build directory).
 CONFIG_LWIP_MAX_SOCKETS=28

@@ -73,6 +73,7 @@ static void canonical(const um98x_base_profile_t *p, um98x_base_profile_t *out)
         memcpy(out->antenna_serial, p->antenna_serial, k);
         out->antenna_setup_id = p->antenna_setup_id;
     }
+    out->elevation_mask_deg = p->elevation_mask_deg;
 }
 
 bool um98x_antenna_str_valid(const char *s, size_t cap)
@@ -200,6 +201,7 @@ void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
     out->rtcm_count = (uint8_t)(sizeof(k_onocoy_set) / sizeof(k_onocoy_set[0]));
     memcpy(out->rtcm, k_onocoy_set, sizeof(k_onocoy_set));
     out->sat_view_output = true;    /* the sky map: satellite positions every 10 s */
+    out->elevation_mask_deg = UM98X_DEFAULT_MASK_DEG;
     /* antenna: empty, so the receiver keeps its own descriptor */
 }
 
@@ -224,7 +226,8 @@ bool um98x_profile_valid(const um98x_base_profile_t *p)
     if (p == NULL || p->rtcm_count > UM98X_MAX_RTCM_MSGS) {
         return false;
     }
-    if (p->station_id > UM98X_STATION_ID_MAX || !um98x_baud_supported(p->com1_baud)) {
+    if (p->station_id > UM98X_STATION_ID_MAX || !um98x_baud_supported(p->com1_baud) ||
+        p->elevation_mask_deg > UM98X_MASK_MAX_DEG) {
         return false;
     }
     /* NaN or infinity is invalid in every mode, used or not. */
@@ -285,6 +288,10 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
     blob_put_u8(&w, p->antenna_setup_id);
     /* Appended after them: whatever this holds is the one wanted. */
     blob_put_u8(&w, PROFILE_DEFAULTS);
+    /* Appended after the defaults byte (a reader from before it stops ahead
+     * of it): a blob that ends before it was written before the mask was a
+     * setting. */
+    blob_put_u8(&w, p->elevation_mask_deg);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -332,6 +339,11 @@ bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
         defaults = blob_get_u8(&r);
     }
+    bool mask_stored = false;
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        p.elevation_mask_deg = blob_get_u8(&r);
+        mask_stored = true;
+    }
     if (!blob_reader_ok(&r) || !um98x_profile_valid(&p)) {
         return false;
     }
@@ -354,6 +366,12 @@ bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_
         /* 115200 was the default then: the default it stood for is 460800 now. */
         p.com1_baud = UM98X_DEFAULT_COM1_BAUD;
         up |= UM98X_PROFILE_UPGRADED_BAUD;
+    }
+    if (!mask_stored) {
+        /* Written before the mask was a setting: the receiver kept its own
+         * (5 degrees), a value nobody chose. Today's default is wanted. */
+        p.elevation_mask_deg = UM98X_DEFAULT_MASK_DEG;
+        up |= UM98X_PROFILE_UPGRADED_MASK;
     }
     canonical(&p, out);
     if (upgraded != NULL) {
@@ -399,6 +417,12 @@ uint32_t um98x_profile_hash(const um98x_base_profile_t *profile)
         blob_put_str(&w, c.antenna_model);
         blob_put_str(&w, c.antenna_serial);
         blob_put_u8(&w, c.antenna_setup_id);
+    }
+    /* The mask only when it is not the receiver's own default: a profile
+     * with 5 degrees hashes as it did before the mask was a setting (the
+     * receiver ran at 5 then), any other differs, so the receiver gets it. */
+    if (c.elevation_mask_deg != UM98X_RX_DEFAULT_MASK_DEG) {
+        blob_put_u8(&w, c.elevation_mask_deg);
     }
     return blob_writer_ok(&w) ? blob_hash32(buf, w.len) : 0;
 }

@@ -64,12 +64,12 @@ TEST_CASE("plan: nothing differs -> outputs and one save only", "[um98x_plan]")
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     /* The default sends the satellite positions for the sky map. */
-    TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+    TEST_ASSERT_EQUAL_STRING("MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     for (size_t i = 0; i < plan.count; i++) {
         bool optional = (plan.step[i].kind == UM98X_STEP_RTCM && (plan.step[i].msg == 1230 || plan.step[i].msg == 1137)) ||
-                        plan.step[i].kind == UM98X_STEP_SAT_VIEW;
+                        plan.step[i].kind == UM98X_STEP_SAT_VIEW || plan.step[i].kind == UM98X_STEP_MASK;
         TEST_ASSERT_EQUAL(!optional, plan.step[i].fatal);
     }
 
@@ -77,7 +77,7 @@ TEST_CASE("plan: nothing differs -> outputs and one save only", "[um98x_plan]")
     p.sat_view_output = false;
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
-    TEST_ASSERT_EQUAL_STRING("RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+    TEST_ASSERT_EQUAL_STRING("MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|SAVECONFIG",
                              text);
 }
@@ -118,7 +118,7 @@ TEST_CASE("plan: signal group first, then baud, base mode, outputs, save", "[um9
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, 115200, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 3 6|CONFIG COM1 460800|MODE BASE 1234 TIME 600 0|"
-                             "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+                             "MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[plan.count - 2].fatal);   /* satellite view is optional */
@@ -215,7 +215,9 @@ TEST_CASE("plan: each step only when its read-back differs", "[um98x_plan]")
     um98x_plan_build(&p, &rb, 115200, true, &plan);
     TEST_ASSERT_EQUAL(UM98X_STEP_MODE, plan.step[0].kind);
     um98x_plan_build(&p, &rb, 115200, false, &plan);
-    TEST_ASSERT_EQUAL(UM98X_STEP_RTCM, plan.step[0].kind);
+    TEST_ASSERT_EQUAL(UM98X_STEP_MASK, plan.step[0].kind);   /* always sent: nothing to compare with */
+    TEST_ASSERT_FALSE(plan.step[0].fatal);
+    TEST_ASSERT_EQUAL(UM98X_STEP_RTCM, plan.step[1].kind);
 
     /* Baud: only when the link runs at another baud. */
     um98x_plan_build(&p, &rb, 460800, false, &plan);
@@ -510,7 +512,7 @@ TEST_CASE("plan: the antenna descriptor only with a model that the receiver does
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING("MODE BASE 1234 TIME 600 0|"
                              "CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000112233\" 3 USER|"
-                             "RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
+                             "MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|"
                              "RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
     TEST_ASSERT_FALSE(plan.step[step_index(&plan, UM98X_STEP_ANTENNA)].fatal);
@@ -573,7 +575,7 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     rb.config.rx.b1cb2a = UM98X_SETTING_OFF;
     um98x_plan_build(&p, &rb, 115200, false, &plan);
     plan_text(&p, &plan, text, sizeof(text));
-    TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|"
+    TEST_ASSERT_EQUAL_STRING("CONFIG RTCMB1CB2A ENABLE|MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|RTCM1077 COM1 1|"
                              "RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|RTCM1137 COM1 1|"
                              "RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
                              text);
@@ -591,7 +593,7 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     um98x_plan_build(&p, &rb, 115200, false, &plan);
     TEST_ASSERT_EQUAL_INT(-1, step_index(&plan, UM98X_STEP_B1CB2A));
 
-    /* Order with everything: signal group, baud, base mode, antenna, B1C/B2a, outputs, save. */
+    /* Order with everything: signal group, baud, base mode, antenna, B1C/B2a, mask, outputs, save. */
     snprintf(p.antenna_model, sizeof(p.antenna_model), "%s", PLAN_IGS_NAME);
     p.com1_baud = 460800;
     matching_readback(&p, &rb);
@@ -604,7 +606,8 @@ TEST_CASE("plan: B1C/B2a in RTCM is turned on only when it reads back off", "[um
     TEST_ASSERT_EQUAL_INT(2, step_index(&plan, UM98X_STEP_MODE));
     TEST_ASSERT_EQUAL_INT(3, step_index(&plan, UM98X_STEP_ANTENNA));
     TEST_ASSERT_EQUAL_INT(4, step_index(&plan, UM98X_STEP_B1CB2A));
-    TEST_ASSERT_EQUAL_INT(5, step_index(&plan, UM98X_STEP_RTCM));
+    TEST_ASSERT_EQUAL_INT(5, step_index(&plan, UM98X_STEP_MASK));
+    TEST_ASSERT_EQUAL_INT(6, step_index(&plan, UM98X_STEP_RTCM));
 
     /* Neither belongs to the RTCM-only restore. */
     TEST_ASSERT_TRUE(um98x_plan_rtcm_only(&p, &plan));
@@ -729,12 +732,12 @@ TEST_CASE("plan preview: the default profile's exact list", "[um98x_plan]")
                              "wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|wd- CONFIG COM1 460800|"
                              "wd- MODE BASE 1234 TIME 600 0|"
                              "wo- CONFIG RTCMB1CB2A ENABLE|"
-                             "wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
+                             "wa- MASK 0|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- RTCM1077 COM1 1|wa- RTCM1087 COM1 1|"
                              "wa- RTCM1097 COM1 1|wa- RTCM1117 COM1 1|wa- RTCM1127 COM1 1|wa- RTCM1137 COM1 1|"
                              "wa- RTCM1230 COM1 1|wa- GPGSV COM1 10|"
                              "was SAVECONFIG",
                              text);
-    TEST_ASSERT_EQUAL_size_t(20, n);
+    TEST_ASSERT_EQUAL_size_t(21, n);
 
     /* Not for an invalid profile; a short buffer never holds a cut list's SAVECONFIG out of place. */
     p.survey_in_s = 0;
@@ -764,7 +767,7 @@ TEST_CASE("plan preview: fixed position, antenna model, satellite view, baud cha
              "wa- UNLOG COM1|qa- VERSIONA|qa- CONFIG|qa- MODE|wds CONFIG SIGNALGROUP 3 6|qa- ANT1GROUPA|"
              "wd- CONFIG COM1 460800|"
              "wd- %s|wd- CONFIG BASEANTENNAMODEL \"TRM59800.00     SCIS\" \"5000123\" 2 USER|qd- CONFIG|"
-             "wo- CONFIG RTCMB1CB2A ENABLE|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- GPGSV COM1 10|was SAVECONFIG",
+             "wo- CONFIG RTCMB1CB2A ENABLE|wa- MASK 0|wa- RTCM1005 COM1 1|wa- RTCM1033 COM1 1|wa- GPGSV COM1 10|was SAVECONFIG",
              mode);
     preview_text(s_prev, n, text, sizeof(text));
     TEST_ASSERT_EQUAL_STRING(want, text);

@@ -42,7 +42,7 @@
  * logins are throttled per address and in total, as the web Login is (5
  * free, then 2^(n-4) s up to 300 s; 30 in a burst, then one per 120 s); a
  * throttled request gets 429 and its login is not checked. The addresses of
- * the last 2 successful logins (since boot) are exempt from the total, so
+ * the last 4 successful logins (since boot) are exempt from the total, so
  * failures elsewhere never lock the owner's rover out.
  *
  * Data: one rtcm_hub consumer per streaming rover, attached after its login
@@ -89,8 +89,8 @@
 extern "C" {
 #endif
 
-#define LOCAL_CASTER_MAX_CLIENTS        2u     /**< streaming rovers at once */
-#define LOCAL_CASTER_MAX_CONNS          4u     /**< open connections at once: rovers plus requests being read or answered */
+#define LOCAL_CASTER_MAX_CLIENTS        4u     /**< streaming rovers at once */
+#define LOCAL_CASTER_MAX_CONNS          6u     /**< open connections at once: rovers plus requests being read or answered */
 #define LOCAL_CASTER_MOUNT_LEN          48u    /**< mountpoint buffer: 1-47 of [A-Za-z0-9._-] */
 #define LOCAL_CASTER_USER_LEN           32u    /**< username buffer: 1-31 of [A-Za-z0-9._-] */
 #define LOCAL_CASTER_PASS_LEN           64u    /**< password buffer: 8-63 bytes of 0x21-0x7E */

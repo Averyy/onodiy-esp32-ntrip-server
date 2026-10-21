@@ -303,6 +303,9 @@ static char s_ant_reply[64];
 static bool s_b1c_sent;
 static bool s_b1c_ok;
 static char s_b1c_reply[64];
+static bool s_mask_sent;
+static bool s_mask_ok;
+static char s_mask_reply[64];
 static char s_sky_reply[64];             /* the last failed satellite-in-view toggle */
 static bool s_rx_sg_valid;               /* the latest read-back named the receiver's signal group */
 static station_sg_t s_rx_sg;
@@ -704,6 +707,10 @@ static void load_profile(void)
             }
             if ((upgraded & UM98X_PROFILE_UPGRADED_BAUD) != 0) {
                 ESP_LOGI(TAG, "profile: the receiver link reads as 460800 baud, the current default");
+            }
+            if ((upgraded & UM98X_PROFILE_UPGRADED_MASK) != 0) {
+                ESP_LOGI(TAG, "profile: the elevation mask reads as %u degrees, the current default",
+                         (unsigned)UM98X_DEFAULT_MASK_DEG);
             }
         }
     } else {
@@ -1414,6 +1421,12 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     s_b1c_sent = s_apply.b1cb2a_sent;
     s_b1c_ok = s_apply.b1cb2a_ok;
     snprintf(s_b1c_reply, sizeof(s_b1c_reply), "%s", s_apply.b1cb2a_reply);
+    s_mask_sent = s_apply.mask_sent;
+    s_mask_ok = s_apply.mask_ok;
+    snprintf(s_mask_reply, sizeof(s_mask_reply), "%s", s_apply.mask_reply);
+    if (s_mask_sent && !s_mask_ok) {
+        ESP_LOGW(TAG, "elevation mask rejected: %s", s_mask_reply);
+    }
     if (s_ant_sent && !s_ant_ok) {
         ESP_LOGW(TAG, "antenna model rejected: %s", s_ant_reply);
     }
@@ -2392,6 +2405,9 @@ static void publish_status(const stn_in_t *in)
     o->b1cb2a_sent = s_b1c_sent;
     o->b1cb2a_ok = s_b1c_ok;
     memcpy(o->b1cb2a_reply, s_b1c_reply, sizeof(o->b1cb2a_reply));
+    o->mask_sent = s_mask_sent;
+    o->mask_ok = s_mask_ok;
+    memcpy(o->mask_reply, s_mask_reply, sizeof(o->mask_reply));
 
     o->rx_sg_valid = s_rx_sg_valid;
     o->rx_sg = s_rx_sg;

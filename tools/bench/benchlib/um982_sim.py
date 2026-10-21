@@ -15,8 +15,8 @@ switches its signal group:
                               RTCMB1CB2A, MASK, BASEANTENNAMODEL
   MODE                        OK and the base-mode log (what MODE BASE set)
   MODE BASE ..., RTCMxxxx COM1 n, CONFIG COM1 n, CONFIG RTCMB1CB2A ...,
-  CONFIG BASEANTENNAMODEL ..., GPGSV COM1 n, UNLOG COM1 GPGSV
-                              OK (RTCMxxxx turns the RTCM output on;
+  CONFIG BASEANTENNAMODEL ..., GPGSV COM1 n, UNLOG COM1 GPGSV,
+  MASK n (elevation, 0-90)    OK (RTCMxxxx turns the RTCM output on;
                               CONFIG COM1 n puts n in the dump's COM1
                               line: the replay's TCP link has no speed)
   SAVECONFIG                  OK; what runs is saved
@@ -167,6 +167,7 @@ class Um982Responder:
         self.mode = "MODE ROVER"
         self.b1c = "ENABLE"
         self.antenna = '"" "" 0'
+        self.mask = "5.0"   # the factory elevation mask
         self.output = True
         self.station_out: dict[int, int] = {}   # station message -> period in epochs
         self.epochs = 0
@@ -182,13 +183,14 @@ class Um982Responder:
     # -- state --------------------------------------------------------------------
 
     def _state(self) -> dict:
-        return {"mode": self.mode, "b1c": self.b1c, "antenna": self.antenna, "output": self.output,
+        return {"mode": self.mode, "b1c": self.b1c, "antenna": self.antenna, "mask": self.mask, "output": self.output,
                 "station_out": dict(self.station_out), "baud": self.baud}
 
     def _restore(self) -> None:
         self.mode = self.saved["mode"]
         self.b1c = self.saved["b1c"]
         self.antenna = self.saved["antenna"]
+        self.mask = self.saved["mask"]
         self.output = self.saved["output"]
         self.station_out = dict(self.saved["station_out"])
         self.baud = self.saved["baud"]
@@ -356,7 +358,7 @@ class Um982Responder:
                       *(config_line(c, f"CONFIG {c} {self.baud if c == self.port else 115200}") for c in PORTS),
                       config_line("MMP", "CONFIG MMP ENABLE"),
                       config_line("RTCMB1CB2A", f"CONFIG RTCMB1CB2A {self.b1c}"),
-                      config_line("MASK", "CONFIG MASK 5.0"),
+                      config_line("MASK", f"CONFIG MASK {self.mask}"),
                       config_line("BASEANTENNAMODEL", f"CONFIG BASEANTENNAMODEL {self.antenna}"))
         elif up == "MODE":
             self._ack(cmd, now)
@@ -406,6 +408,9 @@ class Um982Responder:
             self._ack(cmd, now)
         elif len(words) == 3 and words[0] == "CONFIG" and words[1] in PORTS and words[2].isdigit():
             self._ack(cmd, now)   # another port's speed: not the link's
+        elif len(words) == 2 and words[0] == "MASK" and words[1].isdigit() and int(words[1]) <= 90:
+            self.mask = f"{int(words[1])}.0"
+            self._ack(cmd, now)
         elif words[:2] == ["CONFIG", "RTCMB1CB2A"] and len(words) == 3:
             self.b1c = words[2]
             self._ack(cmd, now)

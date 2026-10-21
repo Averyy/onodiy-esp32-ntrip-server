@@ -2928,7 +2928,7 @@ def lcast(enabled: bool = True, pw: bool = True, state: str = "listening", clien
     """GET /api/local-caster as API.md section 10a shows it."""
     ref = {"not_local": 0, "login": 0, "throttled": 0, "full": 0, "bad_request": 0, **(refused or {})}
     return {"config": {"enabled": enabled, "mountpoint": mount, "username": "rover", "password_set": pw},
-            "status": {"state": state, "port": 2101, "max_clients": 2, "clients": list(clients), "sessions": len(clients),
+            "status": {"state": state, "port": 2101, "max_clients": 4, "clients": list(clients), "sessions": len(clients),
                        "bytes_sent": 0, "stalled": 0, "listen_errno": errno, "refused": ref}}
 
 
@@ -2938,7 +2938,7 @@ ROVER_B = {"addr": "fd12:3456:789a:1:2c4f:9aff:fe31:7b2d", "ntrip_version": 1, "
            "bytes_sent": 577000, "epochs_dropped": 3, "agent": None}
 NET = {"mdns_host": "onodiy", "ip": "192.168.1.50"}
 RX_OK = {"rtcm_age_ms": 180}
-ROVER_LIMITS = "At most 2 rovers at once. Only devices on your home network can connect."
+ROVER_LIMITS = "At most 4 rovers at once. Only devices on your home network can connect."
 ROVER_OFF = "Stream location data locally so a rover or device can use it on your network without internet."
 NB = " "
 

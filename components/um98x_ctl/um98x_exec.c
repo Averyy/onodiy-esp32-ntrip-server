@@ -1097,6 +1097,15 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             }
             break;
         }
+        case UM98X_STEP_MASK: {
+            /* Not fatal: a rejection is recorded and shown, the session goes on. */
+            um98x_txn_status_t tst;
+            (void)step(s, UM98X_TXN_COMMAND, cmd, false, false, &tst);
+            s->r->mask_sent = true;
+            s->r->mask_ok = (tst == UM98X_TXN_OK);
+            txn_reason(ex, tst, s->r->mask_reply, sizeof(s->r->mask_reply));
+            break;
+        }
         default: { /* RTCM outputs and the satellite view */
             um98x_txn_status_t tst;
             res = step(s, UM98X_TXN_COMMAND, cmd, false, st->fatal, &tst);
@@ -1182,6 +1191,10 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         }
         if (r->saved && r->b1cb2a_ok) {
             r->settings.b1cb2a = UM98X_SETTING_ON;
+        }
+        if (r->saved && r->mask_ok) {
+            r->settings.mask_known = true;
+            r->settings.mask_ddeg = (int16_t)(p->elevation_mask_deg * 10);
         }
     }
     if (res == UM98X_OK || res == UM98X_E_LOST) {

@@ -1611,6 +1611,22 @@ TEST_CASE("receiver: a failed apply says whether the station retries it on its o
     cJSON_Delete(root);
 }
 
+TEST_CASE("receiver: the profile's elevation mask and the mask step's answer", "[web_build]")
+{
+    fixture();
+    station_status_t *st = &s_snap.st;
+    st->mask_sent = true;
+    st->mask_ok = false;
+    snprintf(st->mask_reply, sizeof(st->mask_reply), "PARSING FAILED");
+    cJSON *root = build_gnss_json(st);
+    TEST_ASSERT_EQUAL(0, at(at(root, "profile"), "elevation_mask_deg")->valueint);
+    const cJSON *m = at(at(root, "apply_steps"), "mask");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(m, "sent")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(m, "ok")));
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILED", at(m, "reply")->valuestring);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("receiver: message 1230 is null until it was ever applied", "[web_build]")
 {
     fixture();
@@ -2639,7 +2655,7 @@ TEST_CASE("GET /api/local-caster: config without the password, the rovers oldest
     const cJSON *s = at(root, "status");
     TEST_ASSERT_EQUAL_STRING("listening", at(s, "state")->valuestring);
     TEST_ASSERT_EQUAL(2101, at(s, "port")->valueint);
-    TEST_ASSERT_EQUAL(2, at(s, "max_clients")->valueint);
+    TEST_ASSERT_EQUAL(4, at(s, "max_clients")->valueint);
     const cJSON *list = at(s, "clients");
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(list));
     const cJSON *r0 = cJSON_GetArrayItem(list, 0);

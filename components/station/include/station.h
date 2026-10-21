@@ -543,6 +543,9 @@ typedef struct {
     bool b1cb2a_sent;                /**< the last apply session turned BeiDou B1C/B2a in RTCM on */
     bool b1cb2a_ok;                  /**< ... and the receiver accepted it */
     char b1cb2a_reply[64];           /**< its rejection text or "timeout" */
+    bool mask_sent;                  /**< the last apply session sent the elevation mask */
+    bool mask_ok;                    /**< ... and the receiver accepted it */
+    char mask_reply[64];             /**< its rejection text or "timeout" */
 
     /* After a power-on or brownout reset (read at the time of the call). */
     uint8_t rx_boot;                 /**< station_rx_boot_t */

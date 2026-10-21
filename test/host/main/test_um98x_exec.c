@@ -84,6 +84,7 @@ typedef struct {
     char ant[120], saved_ant[120];   /* antenna descriptor values ("" = not in the dump) */
     bool ant_collapse;    /* stores the descriptor with runs of spaces as one, as build 25164 does */
     unsigned gsv;         /* satellite-in-view output period, 0 = off */
+    int mask;             /* elevation mask set by MASK <deg> (-1 = never sent) */
     bool sg_quiet_only;   /* a signal-group command is taken (and acknowledged) only with COM1 output off */
     int64_t version_mute_ms;     /* after a restart, the version query is acknowledged without its log this long */
     int64_t version_mute_until;
@@ -304,6 +305,9 @@ static void receive(sim_t *s, const char *cmd)
             s->output = true;
             reply(s, cmd, "OK", 30);
         }
+    } else if (sscanf(up, "MASK %u", &a) == 1 && strchr(up + 5, ' ') == NULL) {
+        s->mask = (int)a;
+        reply(s, cmd, "OK", 30);
     } else if (sscanf(up, "GPGSV COM1 %u", &a) == 1) {
         s->gsv = a;
         reply(s, cmd, "OK", 30);
@@ -486,6 +490,7 @@ static sim_t *sim_init(void)
     strcpy(s->saved_mode, s->mode);
     s->output = s->saved_output = true;
     s->r1230 = true;
+    s->mask = -1;
     s->r1137 = true;
     s->b1c = s->saved_b1c = 'E';   /* the factory value per public dumps */
     s->version = TV_VERSIONA_UM982;
@@ -1644,6 +1649,41 @@ TEST_CASE("exec: a type the receiver refused in the failed apply is left out of 
 
 /* ---- antenna descriptor, B1C/B2a, the rollback's RESET timeline, sky view ---- */
 
+TEST_CASE("exec: the elevation mask goes out in every session before the outputs; a refusal is not fatal", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    um98x_base_profile_t p;
+    default_profile(&p);
+    p.elevation_mask_deg = 10;
+    gnss_versiona_t id;
+    known_identity(&id);
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "MASK 10"));
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "RTCM1005 COM1 1", 0), nth(s, "MASK 10", 0));
+    TEST_ASSERT_EQUAL_INT(10, s->mask);
+    TEST_ASSERT_TRUE(r.mask_sent);
+    TEST_ASSERT_TRUE(r.mask_ok);
+    TEST_ASSERT_EQUAL_STRING("", r.mask_reply);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_TRUE(r.settings.mask_known);
+    TEST_ASSERT_EQUAL_INT16(100, r.settings.mask_ddeg);
+
+    /* Refused: recorded, the rest applied and saved; the read-back value stays. */
+    s = sim_init();
+    configured(s);
+    snprintf(s->reject_prefix, sizeof(s->reject_prefix), "MASK ");
+    s->reject_n = 2;   /* a negative reply is resent once */
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.mask_sent);
+    TEST_ASSERT_FALSE(r.mask_ok);
+    TEST_ASSERT_NOT_EQUAL(0, strlen(r.mask_reply));
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_INT(-1, s->mask);
+    TEST_ASSERT_EQUAL_INT16(50, r.settings.mask_ddeg);
+}
+
 #define EXEC_IGS_NAME "TRM59800.00     SCIS"
 
 TEST_CASE("exec: B1C/B2a that reads back off is turned on; on or unknown is left alone", "[um98x_exec]")
@@ -1667,7 +1707,7 @@ TEST_CASE("exec: B1C/B2a that reads back off is turned on; on or unknown is left
     TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.b1cb2a);   /* as it runs now */
     TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.mmp);
     TEST_ASSERT_TRUE(r.settings.mask_known);
-    TEST_ASSERT_EQUAL_INT16(50, r.settings.mask_ddeg);
+    TEST_ASSERT_EQUAL_INT16(0, r.settings.mask_ddeg);   /* the dump said 5.0; the session set the profile's 0 */
 
     /* Already on: not sent. */
     s = sim_init();

@@ -81,7 +81,7 @@ NTRIP client to:
 | Username / password | the ones on the card (default username `rover`) |
 | NTRIP version | 2.0 (1.0 if the rover shows garbled data) |
 
-Up to 2 rovers, local network only.
+Up to 4 rovers, local network only.
 
 ## Updates
 

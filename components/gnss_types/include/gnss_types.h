@@ -46,6 +46,9 @@ typedef struct {
 /** Longest antenna descriptor or antenna serial number (characters, without the terminator). */
 #define UM98X_ANTENNA_STR_MAX 31
 
+/** Highest elevation mask a profile holds (degrees; the receiver takes -90 to 90). */
+#define UM98X_MASK_MAX_DEG 90
+
 /**
  * Base-station profile stored in settings and applied by the station.
  *
@@ -63,6 +66,9 @@ typedef struct {
  * profile is stored. The serial number and setup ID only matter with a
  * model. UM982 build 25164 stores the name with runs of spaces collapsed
  * to one, so names are compared that way (um98x_antenna_str_same).
+ *
+ * Elevation mask: whole degrees, 0 (the default: every satellite above the
+ * horizon) to UM98X_MASK_MAX_DEG. The receiver's own default is 5 degrees.
  */
 typedef struct {
     uint8_t signal_group_master;     /**< e.g. 3 */
@@ -80,6 +86,7 @@ typedef struct {
     char antenna_model[UM98X_ANTENNA_STR_MAX + 1];   /**< IGS antenna name with radome; "" = leave the receiver's value */
     char antenna_serial[UM98X_ANTENNA_STR_MAX + 1];  /**< antenna serial number, may be empty */
     uint8_t antenna_setup_id;        /**< antenna setup ID 0..255 */
+    uint8_t elevation_mask_deg;      /**< satellites below this elevation are not tracked: 0..UM98X_MASK_MAX_DEG (MASK <deg>) */
 } um98x_base_profile_t;
 
 /** A receiver on/off setting as read back from its configuration dump. */

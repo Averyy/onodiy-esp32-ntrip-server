@@ -336,7 +336,7 @@ def parse_sourcetable(text: str) -> list[dict]:
 V1 = "v1"                  # no "Ntrip-Version: Ntrip/2.0": "ICY 200 OK", raw data
 V2_CHUNKED = "v2-chunked"  # NTRIP 2.0 over HTTP/1.1: chunked data, one chunk of whole frames per read
 V2_RAW = "v2-raw"          # NTRIP 2.0 over HTTP/1.0: an HTTP/1.0 status line, raw data
-STATION_MAX_ROVERS = 2     # LOCAL_CASTER_MAX_CLIENTS
+STATION_MAX_ROVERS = 4     # LOCAL_CASTER_MAX_CLIENTS
 STATION_SERVER = "NTRIP onodiy/{ver}"
 
 STATION_ERRORS = {

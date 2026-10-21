@@ -346,6 +346,11 @@ static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, 
     } else if (m == M_OK) {
         p->antenna_setup_id = (uint8_t)v;
     }
+    if ((m = get_int(obj, "elevation_mask_deg", 0, UM98X_MASK_MAX_DEG, &v)) == M_BAD) {
+        return invalid(bad, "elevation_mask_deg");
+    } else if (m == M_OK) {
+        p->elevation_mask_deg = (uint8_t)v;
+    }
 
     if (p->base_mode == UM98X_BASE_SURVEY_IN) {
         /* survey_in_s matters only here; a stored 0 (a fixed profile) falls back to the default. */
