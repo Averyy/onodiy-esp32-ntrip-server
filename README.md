@@ -19,10 +19,12 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 <tr>
 <td align="center"><img src="docs/images/board.png" height="350" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
 <td align="center"><img src="docs/images/board-um980.png" height="350" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
+<td align="center"><img src="docs/images/splitter.png" height="350" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
 <td align="center"><b>UM980</b> (support coming)</td>
+<td align="center"><b>GNSS splitter</b> (optional)</td>
 </tr>
 </table>
 
@@ -30,6 +32,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 |---|---|---|---|
 | **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$145 (C$200) | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html) |
 | **UM980** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna); ask the seller for WROOM-1U-N16R8 (external antenna), same price | US$150 (C$212) | [Alibaba](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html) |
+| **GNSS splitter** (optional) | – (shares one antenna between two receivers) | about C$15 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
 
 - **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board).
   Plug or unplug it only with the power off: the socket powers the antenna.
@@ -76,11 +79,6 @@ NTRIP client to:
 | NTRIP version | 2.0 (1.0 if the rover shows garbled data) |
 
 Up to 2 rovers, local network only.
-
-## GNSS splitter
-
-An optional board that shares one antenna between two receivers, about C$15 assembled
-at JLCPCB: [gnss-splitter/](gnss-splitter/README.md).
 
 ## Updates
 
