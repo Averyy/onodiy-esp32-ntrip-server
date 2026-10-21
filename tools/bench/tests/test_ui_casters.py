@@ -192,7 +192,7 @@ vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterEvidence, casterSummary, turnCaster, onOffSwitch, stationState, adminDashboard, heroAlso,\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
-  '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive, roverSummary, roverEditor,\n' +
+  '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive, roverSummary, roverEditor, noticeItems,\n' +
   '  settingsPage: (el, arg) => Views.settings.create(el, arg), ntripPage: (el, arg) => Views.ntrip.create(el, arg),\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
   '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
@@ -888,6 +888,10 @@ for (const c of JSON.parse(casesJson)) {
     /* A card's state line (its words, and the class of its state word) and its address line. */
     const parts = ui.casterSummary(Object.assign({ slot: 0 }, c.cfg), c.st, { port: 2101 }).filter(Boolean);
     out.push({ line: parts[0].textContent, tone: parts[0].kids[0].className, address: parts[1].textContent });
+    continue;
+  }
+  if (c.fn === 'notices') {
+    out.push(ui.noticeItems(c.status, c.page).map(i => [i.key, i.title, i.text, [].concat(i.action || i.actions || []).map(b => b && b.textContent)]));
     continue;
   }
   if (c.fn === 'dashboard') {
@@ -3202,3 +3206,22 @@ def test_status_performance_card():
     (one,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "buckets": 1, "router_avg": [4], "router_lost": [0]})
     assert one["cards"]["Performance"]["sparks"][0]["viewBox"] == "0 0 1 32"
     assert one["cards"]["Performance"]["sparks"][0]["paths"][-1] == ["spark-line", "M1 18.6h0"]
+
+
+def test_update_banner_shows_on_the_status_page_too():
+    """An update shows as the "Update available" banner on every page but Settings (whose Updates card has it), the
+    Status page included: its Station card only names the version. Its button says where it goes ("Settings page"):
+    it opens the Updates card and starts nothing. A stopped Onocoy slot stays the Status page's own
+    (its top card says it)."""
+    st = over(BASE, update={"app_available": True, "app_version": "v0.1.5"})
+    out = run_editor([{"fn": "notices", "status": st, "page": p} for p in ("", "ntrip", "settings")])
+    update = [[n for n in o if n[0] == "update"] for o in out]
+    assert [n[:3] for n in update[0]] == [["update", "Update available", "App v0.1.5."]]
+    assert update[1] == update[0]
+    assert update[0][0][3] == ["Later", "Settings page"]   # it opens the Updates card; it starts nothing
+    assert update[2] == []
+    stopped = over(BASE, casters=[st_caster(0, "Onocoy", "stopped", stop_reason="in_use"), RTK])
+    (home, ntrip_page, logs) = run_editor([{"fn": "notices", "status": stopped, "page": p} for p in ("", "ntrip", "logs")])
+    assert not [n for n in home if n[0].startswith("onocoy_stopped")]
+    assert not [n for n in ntrip_page if n[0].startswith("onocoy_stopped")]
+    assert [n[0] for n in logs if n[0].startswith("onocoy_stopped")] == ["onocoy_stopped:0"]

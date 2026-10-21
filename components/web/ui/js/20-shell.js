@@ -548,10 +548,12 @@ function noticeItems(st, page) {
         shell.noticeKey = '';
         renderNotices();
       }, 'small ghost'),
-      go('Update', '#/settings/updates')]);
+      go('Settings page', '#/settings/updates')]);   /* it opens the Updates card; the update starts there */
   }
   const covered = page === '' ? stationState(st, true).notice : page === 'logs' && healthCardShown ? healthNotice(st) : null;
-  const statusSays = i => page === '' && (i.key === 'update' || i.key.indexOf('onocoy_stopped:') === 0);
+  /* The Status page says a stopped Onocoy slot in its top card; an update shows as the banner there too (its Station
+   * card only names the version, easy to miss). */
+  const statusSays = i => page === '' && i.key.indexOf('onocoy_stopped:') === 0;
   return items.filter(i => i.key !== covered && !statusSays(i)).sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
 }
 

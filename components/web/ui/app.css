@@ -303,7 +303,7 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
   width: 7px;
   height: 7px;
   margin-left: 0.3rem;
-  vertical-align: middle;
+  vertical-align: 0.14em;   /* its centre on the capitals' (middle would centre it on the lower case, a px or two low) */
   border-radius: 50%;
   background: var(--warn);
 }
