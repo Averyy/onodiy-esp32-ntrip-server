@@ -31,7 +31,9 @@
  *  - written under 1 or 2 with sat_view_output off (its default then):
  *    on, today's default;
  *  - without the elevation mask (a byte appended after the defaults byte;
- *    the receiver kept its own 5 degrees then): today's default, 0.
+ *    the receiver kept its own 5 degrees then): today's default, 0;
+ *  - without the UM980 signal group (the byte after the mask): 2, the
+ *    default (no UM980 was configured before it existed).
  * Any other value, and any blob written since (the old set or the output
  * off chosen again on purpose, or a defaults byte this firmware does not
  * know), decodes as stored. Nothing is written for it: the next save stores
@@ -71,6 +73,9 @@ extern "C" {
 #define UM98X_DEFAULT_COM1_BAUD  460800u
 #define UM98X_DEFAULT_MASK_DEG   0u       /**< elevation mask: every satellite above the horizon */
 #define UM98X_RX_DEFAULT_MASK_DEG 5u      /**< the receiver's own elevation mask (what it ran before the mask was a setting) */
+/** A UM980's default signal group: 2, every signal it tracks (GPS L1C/A, L1C, L2C, L2P(Y) and L5; GLONASS G1-G3;
+ *  Galileo E1, E5a, E5b, E6; BeiDou B1I, B3I, B1C, B2a, B2b; QZSS; NavIC L5; SBAS: the N4 manual's table). */
+#define UM98X_DEFAULT_UM980_GROUP 2u
 
 /**
  * Onocoy default profile: signal group 3/6 (adds Galileo E6 on the UM982),

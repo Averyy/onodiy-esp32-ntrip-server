@@ -74,6 +74,7 @@ static void canonical(const um98x_base_profile_t *p, um98x_base_profile_t *out)
         out->antenna_setup_id = p->antenna_setup_id;
     }
     out->elevation_mask_deg = p->elevation_mask_deg;
+    out->signal_group_um980 = p->signal_group_um980;
 }
 
 bool um98x_antenna_str_valid(const char *s, size_t cap)
@@ -202,6 +203,7 @@ void um98x_profile_default(um98x_base_profile_t *out, uint16_t station_id)
     memcpy(out->rtcm, k_onocoy_set, sizeof(k_onocoy_set));
     out->sat_view_output = true;    /* the sky map: satellite positions every 10 s */
     out->elevation_mask_deg = UM98X_DEFAULT_MASK_DEG;
+    out->signal_group_um980 = UM98X_DEFAULT_UM980_GROUP;
     /* antenna: empty, so the receiver keeps its own descriptor */
 }
 
@@ -227,7 +229,7 @@ bool um98x_profile_valid(const um98x_base_profile_t *p)
         return false;
     }
     if (p->station_id > UM98X_STATION_ID_MAX || !um98x_baud_supported(p->com1_baud) ||
-        p->elevation_mask_deg > UM98X_MASK_MAX_DEG) {
+        p->elevation_mask_deg > UM98X_MASK_MAX_DEG || p->signal_group_um980 == 0) {
         return false;
     }
     /* NaN or infinity is invalid in every mode, used or not. */
@@ -292,6 +294,8 @@ size_t um98x_profile_encode(const um98x_base_profile_t *profile, uint8_t *buf, s
      * of it): a blob that ends before it was written before the mask was a
      * setting. */
     blob_put_u8(&w, p->elevation_mask_deg);
+    /* Then the UM980's signal group: a blob that ends before it reads as the default. */
+    blob_put_u8(&w, p->signal_group_um980);
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -343,6 +347,10 @@ bool um98x_profile_decode_ex(const uint8_t *buf, size_t len, um98x_base_profile_
     if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
         p.elevation_mask_deg = blob_get_u8(&r);
         mask_stored = true;
+    }
+    p.signal_group_um980 = UM98X_DEFAULT_UM980_GROUP;
+    if (blob_reader_ok(&r) && blob_reader_remaining(&r) > 0) {
+        p.signal_group_um980 = blob_get_u8(&r);
     }
     if (!blob_reader_ok(&r) || !um98x_profile_valid(&p)) {
         return false;
@@ -423,6 +431,13 @@ uint32_t um98x_profile_hash(const um98x_base_profile_t *profile)
      * receiver ran at 5 then), any other differs, so the receiver gets it. */
     if (c.elevation_mask_deg != UM98X_RX_DEFAULT_MASK_DEG) {
         blob_put_u8(&w, c.elevation_mask_deg);
+    }
+    /* The UM980's group only when it is not the default: profiles keep the
+     * hash they had before it existed. A UM980 with the default group was
+     * never configured before, so nothing it ran is mistaken for it. */
+    if (c.signal_group_um980 != UM98X_DEFAULT_UM980_GROUP) {
+        blob_put_u8(&w, 0xA9);   /* a tag, so a group number never reads as a mask value */
+        blob_put_u8(&w, c.signal_group_um980);
     }
     return blob_writer_ok(&w) ? blob_hash32(buf, w.len) : 0;
 }

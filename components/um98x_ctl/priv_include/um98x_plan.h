@@ -27,6 +27,8 @@
  *   5. CONFIG RTCMB1CB2A ENABLE              only if the read-back shows
  *      BeiDou B1C/B2a in RTCM turned off; unknown = not sent (non-fatal).
  *      Not a profile field: B1C/B2a is always wanted
+ *   5b. CONFIG MMP ENABLE                    UM980 only, unless the read-back
+ *      shows it on (non-fatal)
  *   6. MASK <deg>                            always (non-fatal: a rejection
  *      is recorded and shown). The UM982 has no MASK item in its
  *      configuration dump (build 25164 answers it only to its own query),
@@ -99,8 +101,32 @@ const char *um98x_cmd_unlog(void);
  */
 uint32_t um98x_applied_hash(const um98x_base_profile_t *p);
 
-/** The only receiver model this layer configures (exact match). */
+/** The receiver models this layer configures (exact match). */
 #define UM98X_SUPPORTED_MODEL "UM982"
+#define UM98X_MODEL_NAME_UM980 "UM980"   /**< UNTESTED: configured from the N4 manual, never on hardware */
+
+/**
+ * Which model the plan is for. UM982 is 0, so a zeroed state plans for the
+ * UM982 as before. A UM980 (one antenna input, its own group numbers) gets
+ * "CONFIG SIGNALGROUP <n>" with the profile's signal_group_um980 (one
+ * number: the manual says a second one is an error on a single-antenna
+ * product) and "CONFIG MMP ENABLE" (multipath mitigation for its
+ * pseudoranges, a UM980-family command) unless the read-back shows it on.
+ */
+typedef enum {
+    UM98X_MODEL_UM982 = 0,
+    UM98X_MODEL_UM980,
+} um98x_model_t;
+
+/** The model of the receiver on the link, set from its identity (UM982 until then). */
+void um98x_link_model_set(um98x_model_t model);
+um98x_model_t um98x_link_model(void);
+
+/** The model a version log names: UM980 for "UM980", UM982 for anything else (only "UM982" is configured besides). */
+um98x_model_t um98x_model_of(const char *model);
+
+/** The signal group an apply sets for `model`: the profile's pair on a UM982, (signal_group_um980, 0) on a UM980. */
+void um98x_target_group(const um98x_base_profile_t *p, um98x_model_t model, uint8_t *master, uint8_t *slave);
 
 /** GLONASS code-phase biases: optional, its answer stored (gnss/rtcm1230_ok). */
 #define UM98X_RTCM_GLO_BIASES 1230u
@@ -126,6 +152,7 @@ typedef enum {
     UM98X_STEP_ANTENNA,     /**< base antenna descriptor (non-fatal) */
     UM98X_STEP_B1CB2A,      /**< BeiDou B1C/B2a in RTCM on (non-fatal) */
     UM98X_STEP_MASK,        /**< elevation mask (non-fatal) */
+    UM98X_STEP_MMP,         /**< multipath mitigation on, UM980 only (non-fatal) */
 } um98x_step_kind_t;
 
 typedef struct {
@@ -135,7 +162,7 @@ typedef struct {
     uint16_t period_s;   /**< RTCM: period */
 } um98x_step_t;
 
-#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 8)
+#define UM98X_PLAN_MAX (UM98X_MAX_RTCM_MSGS + 9)
 
 typedef struct {
     uint8_t count;
@@ -150,10 +177,10 @@ typedef struct {
     char mode_body[UM98X_MODE_BODY_MAX];
 } um98x_readback_t;
 
-/** True for the supported model (exactly "UM982"; UM982C, UM980, ... are not). */
+/** True for a supported model (exactly "UM982", or "UM980" (UNTESTED); UM982C, UM981, ... are not). */
 bool um98x_model_supported(const char *model);
 
-/** True if the read-back shows the profile's signal group (unknown = different). */
+/** True if the read-back shows the signal group the link's model gets (um98x_target_group; unknown = different). */
 bool um98x_signal_group_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb);
 
 /**
@@ -209,6 +236,7 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
  *   CONFIG BASEANTENNAMODEL ...    write, only with an antenna model, if
  *                                  the read-back differs
  *   CONFIG RTCMB1CB2A ENABLE       write, if the read-back shows it off
+ *   CONFIG MMP ENABLE              write, UM980 only, if the read-back differs
  *   MASK <deg>                     write, always
  *   RTCM<msg> COM1 <period>        write, always, one per profile message
  *   GPGSV COM1 10                  write, always, only with satellite-view

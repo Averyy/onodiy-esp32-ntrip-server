@@ -62,7 +62,8 @@
  * gnss_versiona_parse() (shared with the flasher). One try is one write plus
  * a 2000 ms window from the end of the write; up to 3 tries, 1000 ms apart.
  * After a known receiver restart: tries every 1000 ms with 1000 ms windows
- * for up to 20 s. Only model "UM982" (exact) gets configured or flashed.
+ * for up to 20 s. Only models "UM982" and "UM980" (exact; the UM980
+ * UNTESTED) get configured, and only "UM982" flashed.
  * Every successful identity is persisted (gnss/model, gnss/fw, written only
  * when they change).
  *
@@ -220,8 +221,22 @@ esp_err_t um98x_ctl_query_version(gnss_link_lease_t lease, bool after_restart, u
 /** Last identity this boot (from a query, a detection or an apply). ESP_ERR_NOT_FOUND before one. */
 esp_err_t um98x_ctl_get_info(um98x_info_t *out);
 
-/** True only for the model this firmware configures and flashes (exactly "UM982"). */
+/**
+ * True for a model this firmware configures: exactly "UM982", or "UM980"
+ * (UNTESTED: configured from the N4 manual, never on hardware). Receiver
+ * firmware updates stay UM982 only (their own package checks).
+ */
 bool um98x_ctl_model_supported(const um98x_info_t *info);
+
+/** True when the receiver identified this boot is a UM980 (UNTESTED). */
+bool um98x_ctl_is_um980(void);
+
+/**
+ * The signal group an apply sets on the receiver identified this boot: the
+ * profile's pair on a UM982 (and before any identity), (signal_group_um980,
+ * 0) on a UM980.
+ */
+void um98x_ctl_target_group(const um98x_base_profile_t *p, uint8_t *master, uint8_t *slave);
 
 /**
  * Base-mode query (lease == NULL while streaming, or COMMAND): the body of
@@ -263,8 +278,8 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  * the caller's COMMAND lease (the station pauses the casters first).
  *
  * Order (PROVISIONAL, to be confirmed on hardware): "\r\n"; identity (if
- * none is known this boot, VERSIONA first; only "UM982" is configured and
- * nothing is sent otherwise); UNLOG COM1; a known identity is confirmed
+ * none is known this boot, VERSIONA first; only "UM982" and "UM980" are
+ * configured and nothing is sent otherwise); UNLOG COM1; a known identity is confirmed
  * with VERSIONA now, so the applied firmware is this session's; read
  * back CONFIG and MODE; CONFIG SIGNALGROUP only when the read-back differs,
  * then wait for the receiver's restart (it saves itself; banner up to 15 s,

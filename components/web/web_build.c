@@ -918,6 +918,7 @@ void web_build_profile(wj_t *w, const char *key, const um98x_base_profile_t *p)
     str_arr(w, "antenna_serial", p->antenna_serial, sizeof(p->antenna_serial));
     wj_uint(w, "antenna_setup_id", p->antenna_setup_id);
     wj_uint(w, "elevation_mask_deg", p->elevation_mask_deg);
+    wj_uint(w, "signal_group_um980", p->signal_group_um980);
     wj_obj_close(w);
 }
 
@@ -1106,6 +1107,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_obj_open(w, "apply_steps");
     apply_step(w, "antenna", st->antenna_sent, st->antenna_ok, st->antenna_reply, sizeof(st->antenna_reply));
     apply_step(w, "b1cb2a", st->b1cb2a_sent, st->b1cb2a_ok, st->b1cb2a_reply, sizeof(st->b1cb2a_reply));
+    apply_step(w, "mmp", st->mmp_sent, st->mmp_ok, st->mmp_reply, sizeof(st->mmp_reply));
     apply_step(w, "mask", st->mask_sent, st->mask_ok, st->mask_reply, sizeof(st->mask_reply));
     wj_obj_close(w);
     rtcm1033(w, &g->rtcm1033);

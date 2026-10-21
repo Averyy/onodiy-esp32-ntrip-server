@@ -69,6 +69,11 @@ typedef struct {
  *
  * Elevation mask: whole degrees, 0 (the default: every satellite above the
  * horizon) to UM98X_MASK_MAX_DEG. The receiver's own default is 5 degrees.
+ *
+ * Signal groups: signal_group_master/slave are a UM982's pair (main and
+ * second antenna input); a UM980 has one input and its own group numbers
+ * (1, 2, 8, 10 in its manual), kept apart in signal_group_um980 so a
+ * profile keeps both when the receiver is swapped. UNTESTED on a UM980.
  */
 typedef struct {
     uint8_t signal_group_master;     /**< e.g. 3 */
@@ -87,6 +92,7 @@ typedef struct {
     char antenna_serial[UM98X_ANTENNA_STR_MAX + 1];  /**< antenna serial number, may be empty */
     uint8_t antenna_setup_id;        /**< antenna setup ID 0..255 */
     uint8_t elevation_mask_deg;      /**< satellites below this elevation are not tracked: 0..UM98X_MASK_MAX_DEG (MASK <deg>) */
+    uint8_t signal_group_um980;      /**< the signal group a UM980 gets (single antenna: one number, 1..255; default 2) */
 } um98x_base_profile_t;
 
 /** A receiver on/off setting as read back from its configuration dump. */

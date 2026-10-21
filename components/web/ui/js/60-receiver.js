@@ -611,8 +611,10 @@ function matchLine(g) {
 function stepsRefused(g) {
   const s = g.apply_steps || {};
   const no = (x, what) => (x && x.sent && !x.ok ? msg('warn', what + ': ' + (x.reply || 'no reason given') + '.') : null);
+  const mask = no(s.mask, 'Elevation mask rejected');
+  const mmp = no(s.mmp, 'Multipath mitigation rejected');
   return [no(s.antenna, 'Antenna model rejected'), no(s.b1cb2a, 'BeiDou B1C/B2a output rejected'),
-    no(s.mask, 'Elevation mask rejected')];
+    mask && mmp ? [mask, mmp] : mask || mmp];
 }
 
 /** Whether "Use the current position" has a position to copy: a 1005 that is not the locked position (a fixed base sends
@@ -651,7 +653,10 @@ function editRow(line, box, onToggle) {
  */
 function receiverForms(g, latest, done, onCompare, fold) {
   const p = Object.assign({ signal_group_master: 3, signal_group_slave: 6, base_mode: 'survey_in', survey_in_s: 600, fixed: null,
-    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true, elevation_mask_deg: 0 }, g.profile || {});
+    station_id: 0, com1_baud: DEFAULT_BAUD, rtcm: [], sat_view_output: true, elevation_mask_deg: 0, signal_group_um980: 2 },
+  g.profile || {});
+  /* A UM980 (untested) gets its own groups: one number, no second antenna, no comparison. */
+  const um980 = (g.receiver || {}).model === 'UM980';
   const folds = fold || { advanced: false };
   let profDirty = false;
 
@@ -676,6 +681,16 @@ function receiverForms(g, latest, done, onCompare, fold) {
   sgChoice.el.querySelector('legend').classList.add('sr-only');
   const sgCustom = checkbox('Use other signal group numbers', !named, 'Off by default. Only for receiver firmware with groups not ' +
     'listed above; a pair the receiver refuses is undone.');
+  const sg980Key = String(p.signal_group_um980);
+  const named980 = SG980_CHOICES.some(c => c[0] === sg980Key);
+  const sg980 = radios('Signal group', 'sgroup980', SG980_CHOICES.map(c => [c[0], h('span', { class: 'opt' },
+    h('span', null, c[0] + ' ' + c[1] + (c[0] === SG980_RECOMMENDED ? ' (default)' : '')), h('small', { class: 'hint' }, c[2]))]),
+  named980 ? sg980Key : null);
+  sg980.el.querySelector('.choices').classList.add('stacked', 'grid2');
+  sg980.el.querySelector('legend').classList.add('sr-only');
+  const sg980Custom = checkbox('Use another signal group number', !named980, 'Off by default. Only for receiver firmware with ' +
+    'groups not listed above.');
+  const sg980Num = numInput(p.signal_group_um980, { inputmode: 'numeric', maxlength: 3 });
   const sid = numInput(p.station_id, { inputmode: 'numeric', maxlength: 4 });
   const baud = selectInput(BAUDS.map(b => [b, b + ' baud' + (b === DEFAULT_BAUD ? ' (default)' : '')]), p.com1_baud);
   const satView = checkbox('Sky map', p.sat_view_output, 'On (default): the receiver sends where each satellite is every 10s, so ' +
@@ -693,6 +708,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
     height_m: field('Height (m)', hgt),
     signal_group_master: field('Main antenna', sgm),
     signal_group_slave: field('Second antenna', sgs, '0 turns it off.'),
+    signal_group_um980: field('Signal group number', sg980Num),
     station_id: field('Station ID', sid, 'In every message. The default comes from this device\'s MAC; change it only if a ' +
       'server asks for a number.'),
     com1_baud: field('Receiver link speed (COM' + receiverLink().port + ')', baud, '460800 (default) brings each epoch out sooner. Ephemeris messages ' +
@@ -779,6 +795,22 @@ function receiverForms(g, latest, done, onCompare, fold) {
     sgSync();
   });
   sgSync();
+  const sg980Sync = () => {
+    F.signal_group_um980.el.hidden = !sg980Custom.input.checked;
+    for (const r of sg980.el.querySelectorAll('input')) r.disabled = sg980Custom.input.checked;
+  };
+  sg980.onchange(() => {
+    if (sg980.value()) sg980Num.value = sg980.value();
+  });
+  sg980Custom.input.addEventListener('change', () => {
+    if (!sg980Custom.input.checked) {
+      const key = sg980Num.value.trim();
+      sg980.set(SG980_CHOICES.some(c => c[0] === key) ? key : SG980_RECOMMENDED);
+      sg980Num.value = sg980.value() || SG980_RECOMMENDED;
+    }
+    sg980Sync();
+  });
+  sg980Sync();
 
   /* Correction messages: how many, whether they are the Onocoy set (the chip: recommended, or custom) and each by number
    * and name (how often unless every second), kept up to date while rows change; the rows behind Edit, the list hidden
@@ -893,7 +925,7 @@ function receiverForms(g, latest, done, onCompare, fold) {
   }
   function collectProfile() {
     const c = checker(['signal_group_master', 'signal_group_slave', 'station_id', 'com1_baud', 'rtcm', 'antenna_model', 'antenna_serial',
-      'antenna_setup_id', 'elevation_mask_deg']);
+      'antenna_setup_id', 'elevation_mask_deg', 'signal_group_um980']);
     const pick = sgCustom.input.checked ? null : (sgChoice.value() || '').split(' ');
     const out = {
       signal_group_master: pick && pick.length === 2 ? Number(pick[0]) : int(sgm.value, 0, 255),
@@ -906,7 +938,16 @@ function receiverForms(g, latest, done, onCompare, fold) {
       antenna_serial: '',
       antenna_setup_id: int(antSetup.value, 0, 255),
       elevation_mask_deg: int(maskIn.value, 0, 90),
+      signal_group_um980: p.signal_group_um980,
     };
+    if (um980) {
+      /* The UM982 pair stays as stored; the UM980's group is its own field. */
+      out.signal_group_master = p.signal_group_master;
+      out.signal_group_slave = p.signal_group_slave;
+      const pick980 = sg980Custom.input.checked ? null : sg980.value();
+      out.signal_group_um980 = pick980 ? Number(pick980) : int(sg980Num.value, 1, 255);
+      if (out.signal_group_um980 === null) c.fail('signal_group_um980', 'A number from 1 to 255.');
+    }
     /* Trailing spaces are dropped (the stored form); inner spaces stay. */
     const antenna = (input, k) => {
       const v = input.value.replace(/ +$/, '');
@@ -1001,7 +1042,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const advanced = h('details', { class: 'pgroup more', ontoggle: () => {
     folds.advanced = advanced.open;
   } }, h('summary', null, 'Advanced'),
-  h('div', { class: 'stack' }, h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el), sgCustom.el, sgNumbers,
+  h('div', { class: 'stack' }, h('div', { class: 'cols c2' }, F.station_id.el, F.com1_baud.el),
+    um980 ? [sg980Custom.el, F.signal_group_um980.el] : [sgCustom.el, sgNumbers],
     h('h3', { class: 'sub' }, 'Antenna model'), editRow(antLine, antBox),
     h('p', { class: 'muted small' }, 'Goes to servers in message 1033. ', seeLine), applyRow));
   advanced.open = !!folds.advanced;
@@ -1013,7 +1055,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
     e.preventDefault();
     save('profile', saveBtn, err);
   } },
-  pgroup('Signals', null, sgChoice.el, cmpLink, satView.el, F.elevation_mask_deg.el, refused[2]),
+  um980 ? pgroup('Signals', badge('UM980 · untested', 'warn'), sg980.el, satView.el, F.elevation_mask_deg.el, refused[2]) :
+    pgroup('Signals', null, sgChoice.el, cmpLink, satView.el, F.elevation_mask_deg.el, refused[2]),
   pgroup('Correction messages', setChip, editRow(summary, msgBox, open => {
     msgList.hidden = open;
   }), msgList, refused[1]),
@@ -1210,6 +1253,7 @@ function sgtBlock(g) {
  * not with manual setup, which cannot start one, unless one still runs or waits for a choice, or a notice elsewhere points
  * to how one ended (sgTestNotice). */
 function sgtShown(g, t, st) {
+  if ((g.receiver || {}).model === 'UM980') return false;   /* one group number, not a pair: the comparison is the UM982's */
   return !manageOwn(g) || (!!t && SGT_RUNNING.indexOf(t.state) >= 0) || !!sgTestNotice(st);
 }
 

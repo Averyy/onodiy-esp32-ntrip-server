@@ -166,6 +166,8 @@ TEST_CASE("profile field rules name the field", "[web_parse]")
         { "{\"profile\":{\"rtcm\":[{\"msg\":1005,\"period_s\":1},{\"msg\":1005,\"period_s\":5}]}}", "rtcm" },
         { "{\"profile\":{\"rtcm\":{}}}", "rtcm" },
         { "{\"profile\":{\"sat_view_output\":1}}", "sat_view_output" },
+        { "{\"profile\":{\"signal_group_um980\":0}}", "signal_group_um980" },
+        { "{\"profile\":{\"signal_group_um980\":256}}", "signal_group_um980" },
         { "{\"profile\":{\"elevation_mask_deg\":91}}", "elevation_mask_deg" },
         { "{\"profile\":{\"elevation_mask_deg\":-1}}", "elevation_mask_deg" },
         { "{\"profile\":{\"elevation_mask_deg\":2.5}}", "elevation_mask_deg" },

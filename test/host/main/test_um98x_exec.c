@@ -85,6 +85,8 @@ typedef struct {
     bool ant_collapse;    /* stores the descriptor with runs of spaces as one, as build 25164 does */
     unsigned gsv;         /* satellite-in-view output period, 0 = off */
     int mask;             /* elevation mask set by MASK <deg> (-1 = never sent) */
+    bool um980;           /* a UM980: one antenna input, "CONFIG SIGNALGROUP <n>" (a second number is an error) */
+    char mmp;             /* multipath mitigation: 'E' enabled, 'D' disabled (saved only by SAVECONFIG) */
     bool sg_quiet_only;   /* a signal-group command is taken (and acknowledged) only with COM1 output off */
     int64_t version_mute_ms;     /* after a restart, the version query is acknowledged without its log this long */
     int64_t version_mute_until;
@@ -230,12 +232,16 @@ static void receive(sim_t *s, const char *cmd)
         if (s->sg_line_lost_left > 0) {
             s->sg_line_lost_left--;   /* the line is lost (a bad checksum is dropped the same way) */
         } else {
-            snprintf(item, sizeof(item), "CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP %u %u", s->sg_m, s->sg_s);
+            if (s->um980) {
+                snprintf(item, sizeof(item), "CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP %u", s->sg_m);
+            } else {
+                snprintf(item, sizeof(item), "CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP %u %u", s->sg_m, s->sg_s);
+            }
             emit_checked(s, '$', item, 60);
         }
         snprintf(item, sizeof(item), "CONFIG,COM1,CONFIG COM1 %u", (unsigned)s->rx_baud);
         emit_checked(s, '$', item, 90);
-        emit_checked(s, '$', "CONFIG,MMP,CONFIG MMP ENABLE", 120);
+        emit_checked(s, '$', s->mmp == 'D' ? "CONFIG,MMP,CONFIG MMP DISABLE" : "CONFIG,MMP,CONFIG MMP ENABLE", 120);
         if (s->b1c != 0) {
             snprintf(item, sizeof(item), "CONFIG,RTCMB1CB2A,CONFIG RTCMB1CB2A %s", s->b1c == 'E' ? "ENABLE" : "DISABLE");
             emit_checked(s, '$', item, 150);
@@ -250,6 +256,22 @@ static void receive(sim_t *s, const char *cmd)
         reply(s, cmd, "OK", 30);
         snprintf(log, sizeof(log), "MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", s->mode);
         emit_checked(s, '#', log, 50);
+    } else if (s->um980 && strncmp(up, "CONFIG SIGNALGROUP ", 19) == 0) {
+        /* One number only: anything else is refused, as the manual says. */
+        if (sscanf(up, "CONFIG SIGNALGROUP %u %u", &a, &b) == 2 || sscanf(up, "CONFIG SIGNALGROUP %u", &a) != 1 ||
+            !(a == 1 || a == 2 || a == 8 || a == 10)) {
+            reply(s, cmd, TV_SG_REFUSAL, 30);
+            return;
+        }
+        reply(s, cmd, "OK", 30);
+        if (a != s->sg_m) {
+            s->sg_m = (uint8_t)a;
+            s->sg_s = 0;
+            restart(s, s->restart_ms);
+        }
+    } else if (strcmp(up, "CONFIG MMP ENABLE") == 0) {
+        s->mmp = 'E';
+        reply(s, cmd, "OK", 30);
     } else if (sscanf(up, "CONFIG SIGNALGROUP %u %u", &a, &b) == 2) {
         if (s->sg_quiet_only && s->output) {
             return;   /* ignored while the port still streams */
@@ -491,6 +513,8 @@ static sim_t *sim_init(void)
     s->output = s->saved_output = true;
     s->r1230 = true;
     s->mask = -1;
+    s->mmp = 'E';
+    um98x_link_model_set(UM98X_MODEL_UM982);   /* the plan's model: set again by every apply from the identity */
     s->r1137 = true;
     s->b1c = s->saved_b1c = 'E';   /* the factory value per public dumps */
     s->version = TV_VERSIONA_UM982;
@@ -964,7 +988,7 @@ TEST_CASE("exec: silent at both bauds, the receiver is told to go back at the ne
 TEST_CASE("exec: an unsupported model is never configured", "[um98x_exec]")
 {
     sim_t *s = sim_init();
-    s->version = TV_VERSIONA_UM980;
+    s->version = TV_VERSIONA_UM981;
     um98x_base_profile_t p;
     default_profile(&p);
     gnss_versiona_t id;
@@ -973,15 +997,15 @@ TEST_CASE("exec: an unsupported model is never configured", "[um98x_exec]")
     TEST_ASSERT_EQUAL(UM98X_E_UNSUPPORTED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
     TEST_ASSERT_EQUAL_INT(1, s->nrx);
     TEST_ASSERT_EQUAL_STRING("VERSIONA", s->rx[0].cmd);
-    TEST_ASSERT_NOT_NULL(strstr(r.reason, "UM980"));
+    TEST_ASSERT_NOT_NULL(strstr(r.reason, "UM981"));
 
-    /* Known as a UM982, but a UM980 answers in the session: stopped and
+    /* Known as a UM982, but a UM981 answers in the session: stopped and
      * rolled back before anything else is configured. */
     s = sim_init();
-    s->version = TV_VERSIONA_UM980;
+    s->version = TV_VERSIONA_UM981;
     known_identity(&id);
     TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
-    TEST_ASSERT_EQUAL_STRING("unsupported model UM980", r.reason);
+    TEST_ASSERT_EQUAL_STRING("unsupported model UM981", r.reason);
     TEST_ASSERT_TRUE(r.rolled_back);
     TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG"));
     TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
@@ -1648,6 +1672,63 @@ TEST_CASE("exec: a type the receiver refused in the failed apply is left out of 
 }
 
 /* ---- antenna descriptor, B1C/B2a, the rollback's RESET timeline, sky view ---- */
+
+TEST_CASE("exec: a UM980 (untested on hardware) gets group 2 in its one-number form and multipath mitigation", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    configured(s);
+    s->version = TV_VERSIONA_UM980;
+    s->um980 = true;
+    s->sg_m = 1;   /* its factory group */
+    s->sg_s = 0;
+    s->mmp = 'D';
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    memset(&id, 0, sizeof(id));
+    um98x_apply_result_t r;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_STRING("UM980", id.model);
+    TEST_ASSERT_TRUE(r.um980);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG SIGNALGROUP 2"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG SIGNALGROUP 3"));   /* never the UM982 pair */
+    TEST_ASSERT_EQUAL_UINT8(2, s->sg_m);
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "CONFIG MMP ENABLE"));
+    TEST_ASSERT_LESS_THAN_INT(nth(s, "MASK 0", 0), nth(s, "CONFIG MMP ENABLE", 0));
+    TEST_ASSERT_EQUAL('E', s->mmp);
+    TEST_ASSERT_TRUE(r.mmp_sent);
+    TEST_ASSERT_TRUE(r.mmp_ok);
+    TEST_ASSERT_TRUE(r.saved);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_SETTING_ON, r.settings.mmp);
+    TEST_ASSERT_TRUE(r.sg_read.known);
+    TEST_ASSERT_EQUAL_UINT8(2, r.sg_read.master);
+    TEST_ASSERT_EQUAL_UINT8(0, r.sg_read.slave);
+
+    /* Again: the group and MMP read back as wanted, neither is sent. */
+    s->nrx = 0;
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG SIGNALGROUP"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "CONFIG MMP"));
+    TEST_ASSERT_FALSE(r.mmp_sent);
+
+    /* A group the UM980 refuses: an ordinary failure, rolled back (no UM982-style fallback). */
+    s = sim_init();
+    configured(s);
+    s->version = TV_VERSIONA_UM980;
+    s->um980 = true;
+    s->sg_m = 2;
+    s->sg_s = 0;
+    p.signal_group_um980 = 3;
+    memset(&id, 0, sizeof(id));
+    um98x_apply_opts_t o = { .sg_fallback = true };
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, &o, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_rejected);
+    TEST_ASSERT_TRUE(r.um980);
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
+    um98x_link_model_set(UM98X_MODEL_UM982);
+}
 
 TEST_CASE("exec: the elevation mask goes out in every session before the outputs; a refusal is not fatal", "[um98x_exec]")
 {

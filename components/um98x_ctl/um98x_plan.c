@@ -16,6 +16,8 @@
 
 /* The receiver port the link is wired to (index 0 = COM1). */
 static uint8_t s_port = 1u;
+/* The model on the link (um98x_model_t). */
+static uint8_t s_model = UM98X_MODEL_UM982;
 static const char *const PORT_NAME[] = { "COM1", "COM2", "COM3" };
 static const char *const UNLOG[] = { "UNLOG COM1", "UNLOG COM2", "UNLOG COM3" };
 
@@ -51,16 +53,46 @@ uint32_t um98x_applied_hash(const um98x_base_profile_t *p)
     return h != 0 ? h : 1u;
 }
 
+void um98x_link_model_set(um98x_model_t model)
+{
+    s_model = (uint8_t)model;
+}
+
+um98x_model_t um98x_link_model(void)
+{
+    return (um98x_model_t)s_model;
+}
+
+um98x_model_t um98x_model_of(const char *model)
+{
+    return model != NULL && strcmp(model, UM98X_MODEL_NAME_UM980) == 0 ? UM98X_MODEL_UM980 : UM98X_MODEL_UM982;
+}
+
 bool um98x_model_supported(const char *model)
 {
-    return model != NULL && strcmp(model, UM98X_SUPPORTED_MODEL) == 0;
+    return model != NULL && (strcmp(model, UM98X_SUPPORTED_MODEL) == 0 || strcmp(model, UM98X_MODEL_NAME_UM980) == 0);
+}
+
+void um98x_target_group(const um98x_base_profile_t *p, um98x_model_t model, uint8_t *master, uint8_t *slave)
+{
+    if (model == UM98X_MODEL_UM980) {
+        *master = p->signal_group_um980;
+        *slave = 0;
+    } else {
+        *master = p->signal_group_master;
+        *slave = p->signal_group_slave;
+    }
 }
 
 bool um98x_signal_group_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb)
 {
-    return p != NULL && rb != NULL && rb->config_ok && rb->config.signal_group_known &&
-           rb->config.signal_group_master == p->signal_group_master &&
-           rb->config.signal_group_slave == p->signal_group_slave;
+    if (p == NULL || rb == NULL || !rb->config_ok || !rb->config.signal_group_known) {
+        return false;
+    }
+    uint8_t m;
+    uint8_t s;
+    um98x_target_group(p, um98x_link_model(), &m, &s);
+    return rb->config.signal_group_master == m && rb->config.signal_group_slave == s;
 }
 
 bool um98x_antenna_matches(const um98x_base_profile_t *p, const um98x_readback_t *rb)
@@ -123,6 +155,9 @@ bool um98x_plan_build(const um98x_base_profile_t *p, const um98x_readback_t *rb,
     if (rb->config_ok && rb->config.rx.b1cb2a == UM98X_SETTING_OFF) {
         add(out, UM98X_STEP_B1CB2A, false, 0, 0);
     }
+    if (um98x_link_model() == UM98X_MODEL_UM980 && !(rb->config_ok && rb->config.rx.mmp == UM98X_SETTING_ON)) {
+        add(out, UM98X_STEP_MMP, false, 0, 0);
+    }
     add(out, UM98X_STEP_MASK, false, 0, 0);
     add_rtcm(p, out);
     if (p->sat_view_output) {
@@ -154,8 +189,12 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
     int n;
     switch ((um98x_step_kind_t)s->kind) {
     case UM98X_STEP_SIGNALGROUP:
-        n = snprintf(buf, cap, "CONFIG SIGNALGROUP %u %u", (unsigned)p->signal_group_master,
-                     (unsigned)p->signal_group_slave);
+        if (um98x_link_model() == UM98X_MODEL_UM980) {
+            n = snprintf(buf, cap, "CONFIG SIGNALGROUP %u", (unsigned)p->signal_group_um980);
+        } else {
+            n = snprintf(buf, cap, "CONFIG SIGNALGROUP %u %u", (unsigned)p->signal_group_master,
+                         (unsigned)p->signal_group_slave);
+        }
         break;
     case UM98X_STEP_BAUD:
         n = snprintf(buf, cap, "CONFIG %s %u", um98x_link_port_name(), (unsigned)p->com1_baud);
@@ -186,6 +225,9 @@ size_t um98x_step_command(const um98x_base_profile_t *p, const um98x_step_t *s, 
         break;
     case UM98X_STEP_MASK:
         n = snprintf(buf, cap, "MASK %u", (unsigned)p->elevation_mask_deg);
+        break;
+    case UM98X_STEP_MMP:
+        n = snprintf(buf, cap, "CONFIG MMP ENABLE");
         break;
     default:
         return 0;
@@ -247,8 +289,11 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
         ok = preview_step(p, out, cap, &n, UM98X_STEP_ANTENNA, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false) &&
              preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_IF_DIFFERS, false);
     }
-    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false) &&
-         preview_step(p, out, cap, &n, UM98X_STEP_MASK, 0, 0, UM98X_PREVIEW_ALWAYS, false);
+    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_B1CB2A, 0, 0, UM98X_PREVIEW_IF_OFF, false);
+    if (ok && um98x_link_model() == UM98X_MODEL_UM980) {
+        ok = preview_step(p, out, cap, &n, UM98X_STEP_MMP, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
+    }
+    ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_MASK, 0, 0, UM98X_PREVIEW_ALWAYS, false);
     for (size_t i = 0; ok && i < p->rtcm_count; i++) {
         ok = preview_step(p, out, cap, &n, UM98X_STEP_RTCM, p->rtcm[i].msg, p->rtcm[i].period_s, UM98X_PREVIEW_ALWAYS,
                           false);

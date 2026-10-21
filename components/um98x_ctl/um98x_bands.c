@@ -44,6 +44,11 @@ static const expect_t k_expect[] = {
     { 3, { 0x1D, 0x03, 0x0F, 0x2D, 0x35 } },
     { 7, { 0x1D, 0x03, 0x07, 0x3F, 0x15 } },
     { 5, { 0x0D, 0x03, 0x05, 0x07, 0x05 } },
+    /* UM980 group 2 (UNTESTED: the manual's table, read with the UM982's bit
+     * order): GPS L1C/A L1C L2C L2P L5, GLONASS G1-G3, Galileo E1 E5a E5b
+     * E6, BeiDou B1I B3I B1C B2a B2b, QZSS L1C/A L1C L2C L5. No UM982 group
+     * has the number 2. */
+    { 2, { 0x1F, 0x07, 0x0F, 0x3D, 0x17 } },
 };
 
 static bool is_space(char c)

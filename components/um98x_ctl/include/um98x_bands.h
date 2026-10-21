@@ -36,7 +36,10 @@
  * 3 the same with Galileo E6 (four Galileo bands), BeiDou B1I B3I B1C B2b
  * and QZSS L6; 7 the same as 4 with every BeiDou signal (B1C, B2a and B2b
  * added: four BeiDou bands); 5 no L5 at all (GPS L1C/A L2C L2P, Galileo E1
- * E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C). A report matches a group when it
+ * E5b, BeiDou B1I B2I B3I, QZSS L1C/A L2C). UM980 group 2 (UNTESTED: the
+ * manual's table, read with the bit order above; no UM982 group is 2): GPS
+ * L1C/A L1C L2C L2P L5, GLONASS G1 G2 G3, Galileo E1 E5a E5b E6, BeiDou
+ * B1I B3I B1C B2a B2b, QZSS L1C/A L1C L2C L5. A report matches a group when it
  * names that group and lists at least those signals (a newer firmware may
  * add some). Other group numbers have no expectation: only the number is
  * compared.

@@ -13,6 +13,11 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   tracks every satellite above the horizon (its own default was 5°). Existing stations
   switch to 0° and configure the receiver once after the update.
 - Local server: up to 4 rovers at once (was 2).
+- Receiver: UM980 support, untested (no UM980 has run it yet). The station configures a
+  UM980 with its own signal group, by default 2 (every signal: both GPS L2 signals, L1C,
+  GLONASS G3, Galileo E6, NavIC), and turns on its multipath mitigation. The Signals card
+  shows the UM980's groups when one is connected. Receiver firmware updates stay UM982
+  only.
 
 ## v0.1.5
 

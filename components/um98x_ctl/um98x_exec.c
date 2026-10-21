@@ -976,6 +976,8 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             unsupported(s, v.model);
             return UM98X_E_FAILED;
         }
+        um98x_link_model_set(um98x_model_of(v.model));
+        s->r->um980 = um98x_link_model() == UM98X_MODEL_UM980;
     }
     copy_str(s->r->firmware, sizeof(s->r->firmware), identity->firmware);
 
@@ -1097,6 +1099,15 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             }
             break;
         }
+        case UM98X_STEP_MMP: {
+            /* Not fatal: a rejection is recorded and shown, the session goes on. */
+            um98x_txn_status_t tst;
+            (void)step(s, UM98X_TXN_COMMAND, cmd, false, false, &tst);
+            s->r->mmp_sent = true;
+            s->r->mmp_ok = (tst == UM98X_TXN_OK);
+            txn_reason(ex, tst, s->r->mmp_reply, sizeof(s->r->mmp_reply));
+            break;
+        }
         case UM98X_STEP_MASK: {
             /* Not fatal: a rejection is recorded and shown, the session goes on. */
             um98x_txn_status_t tst;
@@ -1161,12 +1172,15 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         unsupported(&s, identity->model);
         return UM98X_E_UNSUPPORTED;
     }
+    um98x_link_model_set(um98x_model_of(identity->model));
+    r->um980 = um98x_link_model() == UM98X_MODEL_UM980;
 
     um98x_res_t res = run_plan(&s, opts, identity, queried);
     /* A plain refusal of the signal group changed nothing on the receiver:
      * with a group to go back to, the caller applies that at once, which
      * restores the quieted outputs without restarting the receiver. */
-    bool refused_kept = r->signal_group_refused_plain && (r->sg_before.known || (opts != NULL && opts->sg_fallback));
+    bool refused_kept = r->signal_group_refused_plain && !r->um980 &&
+                        (r->sg_before.known || (opts != NULL && opts->sg_fallback));
     if (res != UM98X_OK && res != UM98X_E_LOST && s.accepted && !refused_kept) {
         rollback(&s);
     }
@@ -1191,6 +1205,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         }
         if (r->saved && r->b1cb2a_ok) {
             r->settings.b1cb2a = UM98X_SETTING_ON;
+        }
+        if (r->saved && r->mmp_ok) {
+            r->settings.mmp = UM98X_SETTING_ON;
         }
         if (r->saved && r->mask_ok) {
             r->settings.mask_known = true;

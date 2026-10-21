@@ -276,11 +276,19 @@ const SG_CHOICES = [
   ['5 0', 'No L5', 'Low power, no L5 signals; second antenna off.', 'no L5'],
 ];
 const SG_RECOMMENDED = '3 6';
+/* A UM980's groups (one antenna input, one number; untested): the N4 manual's table. No UM982 pair uses these numbers. */
+const SG980_CHOICES = [
+  ['2', 'All signals', 'Both GPS L2 signals, L1C, GLONASS G3, Galileo E6 and NavIC.', 'all signals'],
+  ['1', 'Factory setting', 'One GPS L2 signal; no Galileo E6.', 'factory'],
+];
+const SG980_RECOMMENDED = '2';
 
-/** "3 6 (Galileo E6)" for a named pair, else "M S". */
+/** "3 6 (Galileo E6)" for a named pair, "2 (all signals)" for a named UM980 group, else "M S". */
 function sgName(m, s) {
   const key = m + ' ' + s;
   const c = SG_CHOICES.find(x => x[0] === key);
+  const u = s === 0 ? SG980_CHOICES.find(x => x[0] === String(m)) : null;
+  if (u) return m + ' (' + u[3] + ')';
   return c ? key + ' (' + c[3] + ')' : key;
 }
 

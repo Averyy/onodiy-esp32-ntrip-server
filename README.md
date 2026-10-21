@@ -23,7 +23,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
-<td align="center"><b>UM980</b> (support coming)</td>
+<td align="center"><b>UM980</b> (configured, untested)</td>
 <td align="center"><b>GNSS splitter</b> (optional)</td>
 </tr>
 </table>

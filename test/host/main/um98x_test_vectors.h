@@ -33,6 +33,11 @@
     "#VERSIONA,COM1,0,0.0,UNKNOWN,0,0.000,0,0,0;\"UM980\",\"R4.10Build7923\",\"HRPT00-S10C-P\","                \
     "\"2310415000001-SYNTH00000002\",\"00000000000000ff\",\"2022/09/28\"*a2234a25"
 
+/* Synthetic UM981 version log, the UM980's layout (CRC32 e269d47b): a model the station does not configure. */
+#define TV_VERSIONA_UM981                                                                                         \
+    "#VERSIONA,COM1,0,0.0,UNKNOWN,0,0.000,0,0,0;\"UM981\",\"R4.10Build7923\",\"HRPT00-S10C-P\","                \
+    "\"2310415000001-SYNTH00000003\",\"00000000000000fe\",\"2022/09/28\"*e269d47b"
+
 /* Synthetic base-mode log (2-hex XOR including '#'). */
 #define TV_MODE_SURVEY "#MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;MODE BASE 1234 TIME 600 0*13"
 

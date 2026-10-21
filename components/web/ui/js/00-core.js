@@ -695,7 +695,7 @@ const FIELD_LABEL = {
   survey_in_s: 'Survey-in time', lat_deg: 'Latitude', lon_deg: 'Longitude', height_m: 'Height',
   signal_group_master: 'Signal group (main antenna)', signal_group_slave: 'Signal group (second antenna)',
   antenna_model: 'Antenna model', antenna_serial: 'Antenna serial number', antenna_setup_id: 'Antenna setup ID',
-  elevation_mask_deg: 'Elevation mask',
+  elevation_mask_deg: 'Elevation mask', signal_group_um980: 'Signal group (UM980)',
   rtcm: 'RTCM messages', recovery: 'Receiver recovery', step: 'Setup step', tag: 'Tag', level: 'Log level',
   groups: 'Signal groups', phase_s: 'Time per group',
 };

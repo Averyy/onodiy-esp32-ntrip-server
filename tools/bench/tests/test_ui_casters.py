@@ -2710,6 +2710,9 @@ def test_receiver_pages_show_everything_without_fold_outs():
         "manual_running": rx_page("settings", run_st, manual_g, SIG_MSGS, test=SGT_RUN),
         "running": rx_page("settings", run_st, GNSS, SIG_MSGS, test=SGT_RUN, test2=SGT_RUN2),
         "deciding": rx_page("settings", done_st, GNSS, SIG_MSGS, test=SGT_DONE),
+        "settings_um980": rx_page("settings", st_status(), {**GNSS, "receiver": {**RX, "model": "UM980"},
+                                                            "profile": {**GNSS["profile"], "signal_group_um980": 2}},
+                                  SIG_MSGS, openAdvanced=True),
     }
     out = dict(zip(cases, run_editor(list(cases.values()))))
     folded = {k for k, c in cases.items() if c["arg"] == "settings"}
@@ -2794,6 +2797,13 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert ("On (default): the receiver sends where each satellite is every 10s, so the Receiver page shows them "
             "on a sky map. Off: no sky map.") in settings["hints"]
     # Opened: the station ID, the link speed, the antenna model and Apply again; still open once the forms rebuild.
+    # A UM980 (untested): its own groups, group 2 the default, no UM982 pairs and no comparison.
+    u = out["settings_um980"]
+    assert "2 All signals (default)" in u["choices"] and "1 Factory setting" in u["choices"]
+    assert not any(c.startswith("3 6") for c in u["choices"])
+    assert "Compare two signal groups" not in u["cards"]
+    assert "Elevation mask (\u00b0)" in u["fields"]
+    assert "Second antenna" not in u["adv"]["fields"]
     adv = settings["adv"]
     assert adv["subs"] == ["Signals", "Correction messages", "Antenna model"]
     assert {"Station ID", "Receiver link speed (COM1)"} <= set(adv["fields"]) and "Apply again" in adv["buttons"]

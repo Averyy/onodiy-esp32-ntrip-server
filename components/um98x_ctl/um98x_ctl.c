@@ -246,6 +246,7 @@ static void remember_identity(const gnss_versiona_t *v)
     portENTER_CRITICAL(&s_lock);
     s_info = info;
     portEXIT_CRITICAL(&s_lock);
+    um98x_link_model_set(um98x_model_of(info.model));
     put_str_if_changed(SETTINGS_KEY_GNSS_MODEL, info.model);
     put_str_if_changed(SETTINGS_KEY_GNSS_FW, info.firmware);
 }
@@ -289,8 +290,10 @@ static bool persist_applied(const um98x_base_profile_t *p, const um98x_apply_res
     }
     if (err == ESP_OK) {
         /* The group this receiver runs: a later refused group goes back to it. */
-        err = settings_batch_set_u16(b, SETTINGS_KEY_GNSS_SG_OK,
-                                     (uint16_t)(((unsigned)p->signal_group_master << 8) | p->signal_group_slave));
+        uint8_t m;
+        uint8_t sl;
+        um98x_target_group(p, um98x_link_model(), &m, &sl);
+        err = settings_batch_set_u16(b, SETTINGS_KEY_GNSS_SG_OK, (uint16_t)(((unsigned)m << 8) | sl));
     }
     if (err == ESP_OK && r->baud != 0 && r->baud != stored_baud()) {
         err = settings_batch_set_u32(b, SETTINGS_KEY_GNSS_BAUD, r->baud);
@@ -545,6 +548,16 @@ esp_err_t um98x_ctl_get_info(um98x_info_t *out)
 bool um98x_ctl_model_supported(const um98x_info_t *info)
 {
     return info != NULL && info->valid && um98x_model_supported(info->model);
+}
+
+bool um98x_ctl_is_um980(void)
+{
+    return um98x_link_model() == UM98X_MODEL_UM980;
+}
+
+void um98x_ctl_target_group(const um98x_base_profile_t *p, uint8_t *master, uint8_t *slave)
+{
+    um98x_target_group(p, um98x_link_model(), master, slave);
 }
 
 esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len)

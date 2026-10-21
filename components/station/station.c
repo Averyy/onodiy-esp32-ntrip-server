@@ -303,6 +303,9 @@ static char s_ant_reply[64];
 static bool s_b1c_sent;
 static bool s_b1c_ok;
 static char s_b1c_reply[64];
+static bool s_mmp_sent;
+static bool s_mmp_ok;
+static char s_mmp_reply[64];
 static bool s_mask_sent;
 static bool s_mask_ok;
 static char s_mask_reply[64];
@@ -1299,7 +1302,8 @@ static void note_bands(void)
     s_bands = s_apply.bands;
     s_bands_at_ms = now_ms();
     s_bands_unix = unix_now();
-    s_bands_master = s_profile.signal_group_master;
+    uint8_t sg_slave;
+    um98x_ctl_target_group(&s_profile, &s_bands_master, &sg_slave);
     snprintf(s_bands_reply, sizeof(s_bands_reply), "%s", s_apply.bands_reply);
     uint32_t missing[UM98X_BANDS_SYS];
     s_bands_match = um98x_bands_match(s_bands_master, &s_bands, missing);
@@ -1402,7 +1406,10 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     /* A group to go back to if the receiver refuses this one (the last
      * successful apply's): a plain refusal then needs no RESET. */
     uint16_t ok_pair = 0;
-    uint16_t want_pair = (uint16_t)(((unsigned)s_profile.signal_group_master << 8) | s_profile.signal_group_slave);
+    uint8_t want_m;
+    uint8_t want_s;
+    um98x_ctl_target_group(&s_profile, &want_m, &want_s);
+    uint16_t want_pair = (uint16_t)(((unsigned)want_m << 8) | want_s);
     bool fallback = settings_get_u16(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_SG_OK, &ok_pair) == ESP_OK && ok_pair != want_pair;
     um98x_apply_opts_t opts = { .force_mode = job->force_mode, .sg_fallback = fallback };
     esp_err_t err = um98x_ctl_apply_profile(s_lease, &s_profile, &opts, &s_apply);
@@ -1421,6 +1428,12 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     s_b1c_sent = s_apply.b1cb2a_sent;
     s_b1c_ok = s_apply.b1cb2a_ok;
     snprintf(s_b1c_reply, sizeof(s_b1c_reply), "%s", s_apply.b1cb2a_reply);
+    s_mmp_sent = s_apply.mmp_sent;
+    s_mmp_ok = s_apply.mmp_ok;
+    snprintf(s_mmp_reply, sizeof(s_mmp_reply), "%s", s_apply.mmp_reply);
+    if (s_mmp_sent && !s_mmp_ok) {
+        ESP_LOGW(TAG, "multipath mitigation not turned on: %s", s_mmp_reply);
+    }
     s_mask_sent = s_apply.mask_sent;
     s_mask_ok = s_apply.mask_ok;
     snprintf(s_mask_reply, sizeof(s_mask_reply), "%s", s_apply.mask_reply);
@@ -1472,7 +1485,9 @@ static void job_apply(const stn_job_t *job, stn_result_t *r)
     }
     if (job->why == STN_WHY_SG_TEST) {
         sg_test_apply_done(job, r);
-    } else if (err != ESP_OK && s_apply.signal_group_rejected) {
+    } else if (err != ESP_OK && s_apply.signal_group_rejected && !s_apply.um980) {
+        /* A UM980 (UNTESTED) has no group to fall back to in the profile's
+         * pair: its refusal is an ordinary failed apply. */
         sg_refused_fallback(r);
     }
     /* The failure is logged with what follows it once the core has
@@ -2405,6 +2420,9 @@ static void publish_status(const stn_in_t *in)
     o->b1cb2a_sent = s_b1c_sent;
     o->b1cb2a_ok = s_b1c_ok;
     memcpy(o->b1cb2a_reply, s_b1c_reply, sizeof(o->b1cb2a_reply));
+    o->mmp_sent = s_mmp_sent;
+    o->mmp_ok = s_mmp_ok;
+    memcpy(o->mmp_reply, s_mmp_reply, sizeof(o->mmp_reply));
     o->mask_sent = s_mask_sent;
     o->mask_ok = s_mask_ok;
     memcpy(o->mask_reply, s_mask_reply, sizeof(o->mask_reply));
@@ -3814,8 +3832,9 @@ esp_err_t station_sg_test_start(const station_sg_t groups[2], uint32_t phase_s, 
         .no_receiver = st->state == STATION_STATE_NO_RECEIVER,
         /* Unsupported: an identified model this firmware does not configure
          * (a receiver not identified yet is identity_unconfirmed). */
+        /* A UM980 has one group number, not a pair: the comparison is the UM982's. */
         .supported = (st->alerts & STATION_ALERT_UNSUPPORTED_MODEL) == 0 &&
-                     (!st->receiver.valid || um98x_ctl_model_supported(&st->receiver)),
+                     (!st->receiver.valid || um98x_ctl_model_supported(&st->receiver)) && !um98x_ctl_is_um980(),
         .identity_confirmed = st->identity_confirmed,
         .streaming = st->state == STATION_STATE_STREAMING,
         .config_failed = st->config_failed,

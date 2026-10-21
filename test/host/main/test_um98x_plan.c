@@ -349,12 +349,16 @@ TEST_CASE("plan: detection candidates, short and full list", "[um98x_plan]")
     TEST_ASSERT_EQUAL_size_t(3, n);
 }
 
-TEST_CASE("plan: only the exact model UM982 is configured", "[um98x_plan]")
+TEST_CASE("plan: only the exact models UM982 and UM980 are configured", "[um98x_plan]")
 {
     TEST_ASSERT_TRUE(um98x_model_supported("UM982"));
+    TEST_ASSERT_TRUE(um98x_model_supported("UM980"));
+    TEST_ASSERT_EQUAL(UM98X_MODEL_UM980, um98x_model_of("UM980"));
+    TEST_ASSERT_EQUAL(UM98X_MODEL_UM982, um98x_model_of("UM982"));
     TEST_ASSERT_FALSE(um98x_model_supported("UM982C"));
     TEST_ASSERT_FALSE(um98x_model_supported("UMD982"));
-    TEST_ASSERT_FALSE(um98x_model_supported("UM980"));
+    TEST_ASSERT_FALSE(um98x_model_supported("UM981"));
+    TEST_ASSERT_FALSE(um98x_model_supported("UM980C"));
     TEST_ASSERT_FALSE(um98x_model_supported("um982"));
     TEST_ASSERT_FALSE(um98x_model_supported(""));
     TEST_ASSERT_FALSE(um98x_model_supported(NULL));
@@ -823,4 +827,75 @@ TEST_CASE("plan preview: every write is what the plan sends when everything diff
     TEST_ASSERT_EQUAL_size_t(plan.count + 1, writes);
     TEST_ASSERT_TRUE(s_prev[n - 1].saved);
     TEST_ASSERT_EQUAL_STRING("SAVECONFIG", s_prev[n - 1].text);
+}
+
+TEST_CASE("plan: a UM980 gets its own one-number group, multipath mitigation, the rest as a UM982", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[512];
+    survey_profile(&p);
+    TEST_ASSERT_EQUAL_UINT8(2, p.signal_group_um980);   /* the default: every signal */
+    um98x_link_model_set(UM98X_MODEL_UM980);
+
+    /* Factory state: group 1, MMP off. */
+    matching_readback(&p, &rb);
+    rb.config.signal_group_master = 1;
+    rb.config.signal_group_slave = 0;
+    rb.config.rx.mmp = UM98X_SETTING_OFF;
+    TEST_ASSERT_FALSE(um98x_signal_group_matches(&p, &rb));
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 2|CONFIG MMP ENABLE|MASK 0|RTCM1005 COM1 1|RTCM1033 COM1 1|"
+                             "RTCM1077 COM1 1|RTCM1087 COM1 1|RTCM1097 COM1 1|RTCM1117 COM1 1|RTCM1127 COM1 1|"
+                             "RTCM1137 COM1 1|RTCM1230 COM1 1|GPGSV COM1 10|SAVECONFIG",
+                             text);
+    TEST_ASSERT_FALSE(plan.step[1].fatal);
+
+    /* Group 2 and MMP on: neither is sent; unknown MMP is. The UM982 pair plays no part. */
+    rb.config.signal_group_master = 2;
+    rb.config.rx.mmp = UM98X_SETTING_ON;
+    p.signal_group_master = 4;
+    p.signal_group_slave = 5;
+    TEST_ASSERT_TRUE(um98x_signal_group_matches(&p, &rb));
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    TEST_ASSERT_EQUAL(UM98X_STEP_MASK, plan.step[0].kind);
+    rb.config.rx.mmp = UM98X_SETTING_UNKNOWN;
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    TEST_ASSERT_EQUAL(UM98X_STEP_MMP, plan.step[0].kind);
+
+    /* Another group chosen for the UM980. */
+    p.signal_group_um980 = 1;
+    TEST_ASSERT_FALSE(um98x_signal_group_matches(&p, &rb));
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_EQUAL_STRING("CONFIG SIGNALGROUP 1", strtok(text, "|"));
+    uint8_t m;
+    uint8_t sl;
+    um98x_target_group(&p, UM98X_MODEL_UM980, &m, &sl);
+    TEST_ASSERT_EQUAL_UINT8(1, m);
+    TEST_ASSERT_EQUAL_UINT8(0, sl);
+    um98x_target_group(&p, UM98X_MODEL_UM982, &m, &sl);
+    TEST_ASSERT_EQUAL_UINT8(4, m);
+    TEST_ASSERT_EQUAL_UINT8(5, sl);
+
+    /* The preview names the UM980's steps. */
+    p.signal_group_um980 = 2;
+    um98x_preview_step_t prev[UM98X_PREVIEW_MAX];
+    size_t n = um98x_plan_preview(&p, p.com1_baud, prev, UM98X_PREVIEW_MAX);
+    bool sg = false;
+    bool mmp = false;
+    for (size_t i = 0; i < n; i++) {
+        sg = sg || strcmp(prev[i].text, "CONFIG SIGNALGROUP 2") == 0;
+        mmp = mmp || strcmp(prev[i].text, "CONFIG MMP ENABLE") == 0;
+    }
+    TEST_ASSERT_TRUE(sg);
+    TEST_ASSERT_TRUE(mmp);
+
+    /* Back to the UM982 for the other tests (one process). */
+    um98x_link_model_set(UM98X_MODEL_UM982);
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "MMP"));
 }

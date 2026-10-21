@@ -101,6 +101,10 @@ typedef struct {
     bool b1cb2a_sent;           /**< BeiDou B1C/B2a in RTCM was turned on (it read back off) */
     bool b1cb2a_ok;             /**< ... and accepted */
     char b1cb2a_reply[UM98X_APPLY_REASON_MAX];    /**< its rejection text, or "timeout" ("" when accepted) */
+    bool mmp_sent;              /**< multipath mitigation was turned on (a UM980 whose read-back did not show it on) */
+    bool mmp_ok;                /**< ... and accepted */
+    char mmp_reply[UM98X_APPLY_REASON_MAX];       /**< its rejection text, or "timeout" ("" when accepted) */
+    bool um980;                 /**< the session configured a UM980 (UNTESTED): a refused group is an ordinary failure */
     bool mask_sent;             /**< the elevation mask was sent (every session that gets that far) */
     bool mask_ok;               /**< ... and accepted */
     char mask_reply[UM98X_APPLY_REASON_MAX];      /**< its rejection text, or "timeout" ("" when accepted) */
@@ -120,12 +124,13 @@ typedef struct {
 
 #define UM98X_PREVIEW_TEXT_MAX UM98X_APPLY_CMD_MAX
 /**
- * Most steps of a preview: one per RTCM message plus the rest (14 today:
+ * Most steps of a preview: one per RTCM message plus the rest (15 today:
  * UNLOG COM1, VERSIONA, CONFIG, MODE, the signal group, ANT1GROUPA, the
  * baud, the base mode, the antenna and the dump read after it, B1C/B2a,
- * the elevation mask, the satellite view, SAVECONFIG), with one to spare.
+ * multipath mitigation (UM980), the elevation mask, the satellite view,
+ * SAVECONFIG), with one to spare.
  */
-#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 15u)
+#define UM98X_PREVIEW_MAX      (UM98X_MAX_RTCM_MSGS + 16u)
 
 /** um98x_preview_step_t.kind */
 typedef enum {
