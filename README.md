@@ -8,7 +8,9 @@ servers.
   messages Onocoy asks for.
 - Streams to Onocoy and up to 3 more NTRIP servers at once, and to your own rover on
   your home network.
-- A web UI for setup, status, a live sky map, logs and updates.
+- A web UI for setup, status, a live sky map, logs and updates. The Status page also
+  shows ping times to your router and to Onocoy, the Wi-Fi signal, CPU and memory, over
+  the last 24h.
 - Watches its own health and recovers by itself.
 - Updates from GitHub Releases, installed only when you click Update.
 
@@ -32,7 +34,8 @@ affiliated with or endorsed by Onocoy.
 - **Weak Wi-Fi where the antenna goes?** The same board is also sold with an external
   Wi-Fi antenna (the ESP32-S3-WROOM-1U module and its antenna connector): the "Um982 Wifi
   Ipex" option of [this listing](https://www.aliexpress.com/item/1005013018359434.html).
-  An external antenna reaches much farther than the module's built-in one.
+  An external antenna reaches much farther than the module's built-in one. The Status
+  page's Performance card shows the signal and the ping time to your router over 24h.
 - **Antenna:** a multi-band GNSS antenna on the lower SMA socket, marked `M`. Connect
   or disconnect it only with the power off: the socket carries the antenna's power.
 - **Power:** a plain 5 V USB-A charger and an A-to-C cable into the USB-C printed
@@ -66,7 +69,7 @@ Credentials). Enter its username and password, and any mountpoint name. The stat
 connects to `servers.onocoy.com:2101` with NTRIP 2.0 and sends the messages
 [Onocoy's guide](https://docs.onocoy.com/documentation/3.-become-a-miner/3.-connect-your-station-to-onocoy)
 lists, every second: 1005, 1033, MSM7 1077, 1087, 1097, 1117, 1127, 1137 and 1230.
-Add more servers on the NTRIP page.
+Add, edit or delete servers on the NTRIP page.
 
 The station answers at `http://onodiy.local/` (`onodiy-2.local` if another device has
 the name) and at its IP address. Settings shows both.

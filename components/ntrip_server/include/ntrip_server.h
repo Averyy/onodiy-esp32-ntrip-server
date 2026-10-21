@@ -362,7 +362,10 @@ esp_err_t ntrip_server_get_config(size_t slot, ntrip_caster_cfg_t *out, bool wit
  * (ntrip_server_rtk2go_check, against the stored slot). The host rules
  * (ntrip_server_apply_host_rules(), with no requested profile) then set
  * protected_slot and the backoff profile. A save clears a stopped slot's
- * stop and its login guard's counts.
+ * stop and its login guard's counts. Another host (case aside) is another
+ * server: the slot's figures start over, as a new slot's (status counters,
+ * today's data rate and Onocoy day figures, ledger_forget_slot()); the same
+ * host keeps them.
  *
  * Cross-slot rules (this component owns them; callers only name the
  * reason): enabling a slot must not stream to Onocoy or RTK2go from a second
@@ -382,7 +385,8 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
  * Remove a slot's server: the slot is empty again, as a slot after the first
  * is before it is ever set up (no host, off, no name, no credentials, no
  * duplicate-stream acknowledgement), saved through ntrip_server_set_config(),
- * and its custom CA PEM is erased. Only that slot disconnects.
+ * and its custom CA PEM is erased. Its figures start over (another host,
+ * ntrip_server_set_config()). Only that slot disconnects.
  * @return ESP_ERR_INVALID_STATE before ntrip_server_init() (safe mode), or
  *         the settings error of the save or the erase.
  */
