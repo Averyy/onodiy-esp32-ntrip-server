@@ -6,6 +6,9 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Updates: "Finish checks now" ends a new app version's first checks at once (about 11
+  minutes otherwise), so a receiver update can start right away. The crash watch goes
+  on. The update screens say "checking the new version" instead of "on trial".
 - Receiver: commands that older receiver firmware refuses are no longer sent to it. A
   UM980 before build 23980 lacks message 1230 and the signal report (`ANT1GROUPA`).
   The station leaves both out, and the Signals card, Onocoy's card and Ask the receiver

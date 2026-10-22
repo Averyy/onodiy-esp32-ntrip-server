@@ -85,6 +85,7 @@ typedef struct {
     uint32_t stage2_start_s;      /**< uptime at which this boot's stage 2 began */
     uint32_t window_start_s;      /**< uptime at which this boot's verify window began */
     fw_trial_obs_t obs;
+    bool trial_accept_req;        /**< the user ended the first checks (fw_update_trial_accept): the worker takes it */
     bool trial_inhibit_held;
     lifecycle_inhibit_t trial_inhibit;
     bool rollback_available;      /**< the other slot holds a bootable image (refreshed by the worker) */

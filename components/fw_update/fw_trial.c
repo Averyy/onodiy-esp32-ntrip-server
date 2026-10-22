@@ -368,9 +368,50 @@ static void confirm(uint32_t uptime, bool trusted, int64_t now)
              rec.version, CONFIG_FW_UPDATE_VERIFY_WINDOW_S);
 }
 
+esp_err_t fw_update_trial_accept(void)
+{
+    fw_lock();
+    bool first = g_fw.run == FW_TRIAL_RUN_CONFIRMING || g_fw.run == FW_TRIAL_RUN_VERIFYING;
+    if (first) {
+        g_fw.trial_accept_req = true;
+    }
+    fw_unlock();
+    return first ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+/* The user ended the first checks: confirm the image if not yet, then the crash watch (or nothing, for the same image). */
+static void accept_now(fw_trial_run_t run, uint32_t uptime, bool trusted, int64_t now)
+{
+    if (run == FW_TRIAL_RUN_CONFIRMING) {
+        esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "confirming the new image for the user failed (%s): the checks go on", esp_err_to_name(err));
+            return;
+        }
+    }
+    fw_lock();
+    bool same = run == FW_TRIAL_RUN_CONFIRMING && fw_trial_after_confirm(&g_fw.rec) == FW_TRIAL_REC_NONE;
+    if (run == FW_TRIAL_RUN_CONFIRMING) {
+        g_fw.rec.confirm_uptime_s = uptime;
+        g_fw.rec.watch_start_unix = trusted ? now : 0;
+        g_fw.stage2_start_s = uptime;
+        g_fw.rollback_known = false;   /* the otadata changed */
+    }
+    g_fw.rec.stage = same ? FW_TRIAL_REC_NONE : FW_TRIAL_REC_WATCHING;
+    fw_trial_rec_t rec = g_fw.rec;
+    fw_unlock();
+    fw_trial_save_rec(&rec);
+    inhibit_drop();
+    set_run(same ? FW_TRIAL_RUN_NONE : FW_TRIAL_RUN_WATCHING);
+    ESP_LOGI(TAG, "app %s: the user ended its first checks%s", rec.version,
+             same ? " (the same image as before: nothing more to watch)" : "; crash watch as before");
+}
+
 void fw_trial_tick_worker(void)
 {
     fw_lock();
+    bool accept = g_fw.trial_accept_req;
+    g_fw.trial_accept_req = false;
     fw_trial_run_t run = g_fw.run;
     bool started = g_fw.started;
     fw_update_state_t state = g_fw.state;
@@ -383,6 +424,11 @@ void fw_trial_tick_worker(void)
     uint32_t uptime = fw_uptime_s();
     int64_t now = 0;
     bool trusted = fw_clock(&now);
+
+    if (accept && (run == FW_TRIAL_RUN_CONFIRMING || run == FW_TRIAL_RUN_VERIFYING)) {
+        accept_now(run, uptime, trusted, now);
+        return;
+    }
 
     if (run == FW_TRIAL_RUN_VERIFYING) {
         bool online = network_is_online();

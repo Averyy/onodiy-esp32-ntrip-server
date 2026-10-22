@@ -3336,6 +3336,30 @@ def test_receiver_update_that_changes_the_partition_layout_needs_its_own_tick():
     assert plain["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": False}]]
 
 
+def test_new_app_first_checks_can_be_finished_early():
+    """Settings, Updates: while a new app version's first checks hold receiver updates back, "Finish checks now"
+    (beside the app line and the receiver's "Not possible right now") asks, then ends them; never "trial" in the text.
+    The crash watch alone offers no such button."""
+    app = {**SET_UPDATE["app"], "running": "v0.1.6", "latest": "v0.1.6",
+           "trial": {"stage": "verifying", "left_s": 540, "ends_in_s": 86000}}
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build23980M", "running_build": 23980,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "blocked": "app_trial", "blocked_left_s": 540, "latest_cross_layout": False, "cross_layout_allowed": True}
+    checking = {**SET_UPDATE, "app": app, "gnss": gnss}
+    watching = {**SET_UPDATE, "app": {**app, "trial": {"stage": "watching", "left_s": 86000}},
+                "gnss": {**gnss, "blocked": "none", "blocked_left_s": 0}}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    on, off = run_editor([{**base, "update": checking, "press": "Finish checks now"}, {**base, "update": watching}])
+    assert on["buttons"].count("Finish checks now") == 2
+    assert "Not possible right now: the new app version is still being checked (about 9min left). Finish checks now" in \
+        [t for _, t in on["msgs"]]
+    assert on["dialog"]["title"] == "Finish the checks now?" if "title" in on["dialog"] else True
+    assert on["posts"] == [["/api/update/accept", {"confirm": True}]]
+    assert "Finish checks now" not in off["buttons"]
+    texts = " ".join(t for _, t in on["msgs"]) + " ".join(on.get("lines", []))
+    assert "trial" not in texts.lower()
+
+
 def test_last_receiver_update_message_can_be_dismissed():
     """Settings, Updates: "Updated: the receiver runs ..." stays until the user dismisses it (its ×); then it is gone."""
     last = {"outcome": "success", "failed_rule": 0, "cross_layout": False, "check_only": False, "reapply_ok": True,

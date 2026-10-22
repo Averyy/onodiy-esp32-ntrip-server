@@ -114,8 +114,8 @@ Up to 4 rovers, local network only.
 ## Updates
 
 The station checks GitHub Releases daily and shows a banner; nothing installs until you
-click Update. Files are checked against the release's SHA-256 manifest, and a new
-version runs on trial, going back to the previous one if it fails. Receiver firmware
+click Update. Files are checked against the release's SHA-256 manifest, and the station
+checks a new version after it starts, going back to the previous one if it fails. Receiver firmware
 (UM982, UM980) is offered and installed the same way, over the station's own link to
 the receiver (tested on a UM980). [More](docs/releases.md).
 

@@ -638,7 +638,7 @@ const ERR = {
   busy: 'The station is busy with another job. Try again in a moment.',
   journal_open: 'A receiver update session is open. Finish or clear it first.',
   not_waiting: 'The receiver update is still running.',
-  app_trial: 'The new app version is still on trial.',
+  app_trial: 'The new app version is still being checked.',
   app_update: 'An app update is running.',
   safe_mode: 'Not possible in safe mode.',
   not_in_safe_mode: 'The station is not in safe mode.',

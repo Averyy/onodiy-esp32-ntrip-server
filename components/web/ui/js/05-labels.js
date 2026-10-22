@@ -180,7 +180,7 @@ const L = {
   },
   gnssBlock: {
     none: '',
-    app_trial: 'The new app version is still on trial',
+    app_trial: 'The new app version is still being checked',
     journal_open: 'A receiver update session is open',
     unsupported_model: 'This receiver model is not supported',
     safe_mode: 'The station is in safe mode',
@@ -189,7 +189,7 @@ const L = {
   },
   why: {
     no_journal: 'no session', not_waiting: 'the session still runs', safe_mode: 'not in safe mode',
-    settings_unavailable: 'settings unavailable', app_trial: 'app trial running', app_update: 'app update running',
+    settings_unavailable: 'settings unavailable', app_trial: 'the new app version is still being checked', app_update: 'app update running',
     not_available_yet: 'receiver firmware updates are not enabled in this build yet',
     unreadable: 'the update record is damaged: only clearing it works',
     receiver_maintenance: 'receiver maintenance is on',

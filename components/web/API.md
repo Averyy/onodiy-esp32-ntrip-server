@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware` |
+| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware`, `no_app_check` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -388,6 +388,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/update/app` | adm | Install the offered app | `fw_update_install_app` |
 | POST | `/api/update/gnss` | adm | Receiver update from the offered build | `fw_update_install_gnss` |
 | POST | `/api/update/rollback` | adm | Back to the previous app | `fw_update_rollback` |
+| POST | `/api/update/accept` | adm | End a new app's first checks now | `fw_update_trial_accept` |
 | POST | `/api/upload/app` | adm | Manual app image | `fw_update_upload_app_*` |
 | POST | `/api/upload/gnss` | adm | Manual receiver package | pkg_store, `um98x_flash_inspect_staged` |
 | GET | `/api/upload/gnss` | adm | The uploaded package awaiting confirmation | pkg_store |
@@ -2311,6 +2312,18 @@ into the other slot (reboot reason `app_rollback`, planned downtime: a
 failed trial's own revert is `app_revert` and is not). `202 {"accepted":
 true}`. Errors: `409 no_rollback_image`, `409 reboot_inhibited`, `409
 busy`, `409 journal_open`.
+
+### `POST /api/update/accept` (adm)
+
+`{"confirm": true}`. The user says the new app version works: its first
+checks (`trial.stage` `confirming`: the image is confirmed now;
+`verifying`: the comparison with the state from before the update ends)
+are over at once, so receiver updates are no longer held back
+(`gnss.blocked` `app_trial`). The crash watch (`watching`) runs on as
+before: a crash still goes back to the previous version by itself. The
+update task takes it within a second. `202 {"accepted": true}`. Errors:
+`409 no_app_check` (neither first check runs). The UI calls these checks
+"checking the new version" and offers it as "Finish checks now".
 
 ---
 

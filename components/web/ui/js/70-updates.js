@@ -207,14 +207,17 @@ function checkFailure(u) {
   return { tone: 'warn', text: text };
 }
 
-/* "On trial, 23h 59min left: confirming the start (15s)." The whole trial's time left, then the stage, with its own
- * time while another stage follows it. */
+/* "Checking the new version, 23h 59min left: confirming the start (15s)." The checks' whole time left, then the
+ * stage, with its own time while another stage follows it. */
 const TRIAL_NOW = { confirming: 'confirming the start', verifying: 'verifying it works as before', watching: 'watching for crashes' };
 function trialText(t) {
   const end = t.ends_in_s || t.left_s;
   const own = t.stage !== 'watching' && t.left_s && t.left_s !== end ? ' (' + fmt.dur(t.left_s) + ')' : '';
-  return 'On trial' + (end ? ', ' + fmt.dur(end) + ' left' : '') + ': ' + (TRIAL_NOW[t.stage] || t.stage) + own + '.';
+  return 'Checking the new version' + (end ? ', ' + fmt.dur(end) + ' left' : '') + ': ' + (TRIAL_NOW[t.stage] || t.stage) + own + '.';
 }
+
+/* The first checks (confirming, verifying) hold receiver updates back; the crash watch does not. */
+const firstChecks = t => !!t && (t.stage === 'confirming' || t.stage === 'verifying');
 
 /* The receiver's line when nothing is offered, against the latest release's package for its model (g: u.gnss, app: u.app). */
 function gnssReleaseText(g, app) {
@@ -369,7 +372,7 @@ const updatesPart = {
         title: 'Install app ' + version + '?',
         ok: 'Install',
         body: [h('p', null, 'The station downloads ' + version + ' from the release over HTTPS, checks its size and SHA-256 against the release\'s manifest, installs it and restarts. ' +
-          'The new version then runs on trial: if it fails, the station goes back to this version by itself.'),
+          'The station then checks the new version: if it fails, it goes back to this version by itself.'),
         h('p', { class: 'muted' }, 'The servers reconnect after the restart, which usually takes less than a minute of today\'s Onocoy budget.')],
         check: ack ? 'I know this version was rolled back on this station before.' : null,
       });
@@ -384,6 +387,25 @@ const updatesPart = {
           return;
         }
         if (e instanceof ApiError && e.code === 'manifest_changed') load();
+        showErr(e, appErr);
+      }
+    }
+
+    /* The user ends the new version's first checks (it works): receiver updates are possible at once. */
+    async function finishChecks(button) {
+      const ok = await dialog({
+        title: 'Finish the checks now?',
+        ok: 'Finish checks',
+        body: h('p', null, 'Do this once the station works as before. The new version is kept, receiver updates are ' +
+          'possible at once, and the crash watch goes on: if it crashes, the station still goes back by itself.'),
+      });
+      if (!ok) return;
+      appErr.hidden = true;
+      try {
+        await busy(button, () => api('POST', '/api/update/accept', { confirm: true }));
+        setTimeout(() => load(), 1500);   /* the update task takes it within a second */
+      } catch (e) {
+        if (e instanceof ApiError && e.code === 'no_app_check') load();
         showErr(e, appErr);
       }
     }
@@ -407,6 +429,7 @@ const updatesPart = {
         text = a.dev_build ? 'Development build: no release offers.' : a.latest ? 'Up to date.' : 'No release information yet.';
       }
       if (trial.stage && trial.stage !== 'none') text += ' ' + trialText(trial);
+      if (!b && firstChecks(trial)) b = btn('Finish checks now', () => finishChecks(b));
       appMain = !!b && b.classList.contains('primary');
       mount(appBox, settingRow('App ' + (a.running || ''), text, b),
         lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
@@ -459,6 +482,7 @@ const updatesPart = {
     /* "Receiver R4.10Build18975: up to date" or the offered build with its button; the downtime against the Onocoy budget is in the dialog. */
     function renderGnss() {
       const g = u.gnss || {};
+      let fin = null;
       const blocked = g.blocked && g.blocked !== 'none';
       /* Another partition layout that this app refuses (rule 12): no button, the reason instead. */
       const xlRefused = g.available && g.latest_cross_layout && !g.cross_layout_allowed;
@@ -474,7 +498,9 @@ const updatesPart = {
             gnssReleaseText(g, u.app || {}), upd),
         xlRefused ? crossLayoutMsg(false) : null,
         blocked && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
-          (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
+          (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.'),
+          g.blocked === 'app_trial' && firstChecks((u.app || {}).trial) ?
+            [' ', fin = btn('Finish checks now', () => finishChecks(fin), 'small')] : null) : null,
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,
@@ -589,7 +615,7 @@ const updatesPart = {
       body: h('p', null, 'This is the version already running' + (v ? ' (' + v + ')' : '') + '. Install it again? ' +
         'The station restarts into it; nothing else changes.') });
     const rolledBackOk = v => dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
-      body: h('p', null, (v ? 'Version ' + v : 'This version') + ' was rolled back on this station before: its trial failed, or someone ' +
+      body: h('p', null, (v ? 'Version ' + v : 'This version') + ' was rolled back on this station before: its checks failed, or someone ' +
         'went back from it. If it fails again, the station goes back to the version running now.'),
       check: 'I know this version was rolled back on this station before.' });
     const appPick = fileButton('Choose file', 'Choose file: app (.bin)', '.bin,application/octet-stream', f => uploadApp(f, {}));
@@ -629,7 +655,7 @@ const updatesPart = {
       if (!o.anyProject && !o.rolledBackAck && !o.reinstall) {
         const ok = await dialog({ title: 'Install ' + (img.version || file.name) + '?', ok: 'Install',
           body: [h('p', null, file.name + ', ' + fmt.bytes(file.size) + '. The station writes it to its spare app slot and restarts into it. ' +
-            'The new version runs on trial and goes back to this one if it fails.')] });
+            'The station checks the new version and goes back to this one if it fails.')] });
         if (!ok) return;
       }
       const q = [o.anyProject ? 'any_project=1' : null, o.rolledBackAck ? 'rolled_back_ack=1' : null].filter(x => x).join('&');

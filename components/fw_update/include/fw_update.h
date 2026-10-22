@@ -354,6 +354,15 @@ esp_err_t fw_update_restage_gnss(void);
 bool fw_update_has_journal_package(void);
 
 /**
+ * The user says the new app version works: its first checks (confirming the
+ * start, verifying it reaches the station's state from before) end now,
+ * so receiver updates are possible at once; the crash watch runs on as
+ * before. The update task takes it within a second. ESP_ERR_INVALID_STATE
+ * when neither first check runs.
+ */
+esp_err_t fw_update_trial_accept(void);
+
+/**
  * Manual rollback: mark the running image invalid, record its version in
  * ota/bad_ver, reboot into the other slot (async, via the lifecycle reboot
  * service). ESP_ERR_NOT_FOUND if the other slot holds no valid image;

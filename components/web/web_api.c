@@ -2026,6 +2026,20 @@ static esp_err_t h_update_gnss(web_req_t *r)
     return accepted(r->req);
 }
 
+/* The user ends the new app's first checks (it works): receiver updates are possible at once. */
+static esp_err_t h_update_accept(web_req_t *r)
+{
+    web_bad_t b = { 0 };
+    if (!web_parse_confirm(r->body, &b)) {
+        return bad(r->req, &b);
+    }
+    if (fw_update_trial_accept() != ESP_OK) {
+        return web_send_err(r->req, WEB_ERR_NO_APP_CHECK);
+    }
+    ESP_LOGW(TAG, "the user ended the new app's first checks");
+    return accepted(r->req);
+}
+
 static esp_err_t h_update_rollback(web_req_t *r)
 {
     web_bad_t b = { 0 };
@@ -2645,6 +2659,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/update/app", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_app),
     ROUTE("/api/update/gnss", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_gnss),
     ROUTE("/api/update/rollback", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_rollback),
+    ROUTE("/api/update/accept", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_accept),
     ROUTE("/api/upload/app", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_UPLOAD, h_upload_app),
     ROUTE("/api/upload/gnss", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_UPLOAD, h_upload_gnss),
     ROUTE("/api/upload/gnss", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_upload_gnss_get),

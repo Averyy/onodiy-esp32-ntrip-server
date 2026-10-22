@@ -1288,11 +1288,11 @@ def test_update_card_trial_and_receiver_lines():
                   ("trial", {"stage": "watching", "left_s": 85140, "ends_in_s": 85140}),
                   ("trial", {"stage": "confirming", "left_s": 15, "ends_in_s": 15}),   # same image: no crash watch
                   ("trial", {"stage": "watching", "left_s": 600})])                   # a firmware without ends_in_s
-    assert out == ["On trial, 1d left: confirming the start (15s).",
-                   "On trial, 23h 55min left: verifying it works as before (9min 12s).",
-                   "On trial, 23h 39min left: watching for crashes.",
-                   "On trial, 15s left: confirming the start.",
-                   "On trial, 10min left: watching for crashes."]
+    assert out == ["Checking the new version, 1d left: confirming the start (15s).",
+                   "Checking the new version, 23h 55min left: verifying it works as before (9min 12s).",
+                   "Checking the new version, 23h 39min left: watching for crashes.",
+                   "Checking the new version, 15s left: confirming the start.",
+                   "Checking the new version, 10min left: watching for crashes."]
     app = {"latest": "v0.1.1", "dev_build": False}
     rx = {"running": "R4.10Build25164", "running_build": 25164}
     out = run_ui([("gnssRel", [{**rx, "release": "R4.10Build18975", "release_build": 18975}, app]),
