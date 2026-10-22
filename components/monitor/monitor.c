@@ -8,7 +8,8 @@
  * under one mutex (the series copy is too long for a spinlock).
  *
  * The server figures are one server's: when another is pinged (Onocoy
- * turned off, so the first enabled slot instead), the ones before go.
+ * turned off, so the first enabled slot instead, or the internet when no
+ * slot is on), the ones before go.
  *
  * Pings go out on one raw ICMP socket, open for the task's life: what it
  * was handed between samples (late replies, other ICMP) is read off before
@@ -128,7 +129,9 @@ static monitor_ping_t ping(uint32_t addr, uint16_t *ms)
 
 /*
  * The server to ping: the Onocoy slot's address while it is on and its own
- * lookup found one, else the first enabled slot's (IPv4 only).
+ * lookup found one, else the first enabled slot's (IPv4 only), else the
+ * network's fallback DNS server (an address, so no lookup is needed): with no
+ * NTRIP server on there is still a ping to the internet.
  */
 static bool server_target(uint32_t *addr, char *name, size_t size)
 {
@@ -149,6 +152,14 @@ static bool server_target(uint32_t *addr, char *name, size_t size)
         strlcpy(name, cfg.name, size);
         found = true;
         found_protected = cfg.protected_slot;
+    }
+    if (!found) {
+        struct in_addr a;
+        if (inet_pton(AF_INET, CONFIG_NETWORK_FALLBACK_DNS1, &a) == 1) {
+            *addr = a.s_addr;
+            strlcpy(name, "Internet", size);
+            found = true;
+        }
     }
     return found;
 }

@@ -977,6 +977,7 @@ for (const c of JSON.parse(casesJson)) {
         /* The Performance card: per figure its name, latest reading and 24 h words; its lines (aria-label, viewBox,
          * each path [class, d]). */
         perf: v.filter(e => e.className === 'perf-row').map(r => r.kids.slice(0, 3).map(k => k.textContent)),
+        scales: v.filter(e => cls(e).indexOf(' spark-scale ') >= 0).map(e => e.textContent),
         sparks: v.filter(e => e.tagName === 'SVG' && e.attrs.class === 'spark').map(e => ({ label: e.attrs['aria-label'],
           viewBox: e.attrs.viewBox, paths: e.kids.map(k => [k.attrs.class, k.attrs.d]) })),
         text: sec.textContent };
@@ -3238,6 +3239,8 @@ def test_status_performance_card():
                                             "Wi-Fi signal over the same time", "CPU peaks over the same time",
                                             "Free memory over the same time"]
     assert all(s["viewBox"] == "0 0 4 32" for s in sparks)
+    # Each line says its own scale (bottom to top) under it.
+    assert card["scales"] == ["0 to 10ms", "0 to 120ms", f"−80 to −70{nb}dBm", "0 to 100%", f"0{nb}B to 97{nb}KB"]
     # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost a ping; 0..10 ms (its 5 ms would fill it).
     assert sparks[0]["paths"] == [["spark-base", "M0 31.5H4"], ["spark-loss", "M2 0V32"],
                                   ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]

@@ -9,11 +9,12 @@
  * MONITOR_PING_TIMEOUT_MS) to the router (the station's IPv4 gateway) and
  * one to the server the casters depend on most (the Onocoy slot's address
  * while it is on and connected, else the first enabled slot's: the address
- * that slot's own lookup found, so no name lookup of its own; when another
+ * that slot's own lookup found, so no name lookup of its own; else the
+ * fallback DNS server, so there is a ping with no server on; when another
  * server is pinged, the server figures start over), the Wi-Fi
  * signal, the busier core's CPU load over the sample (from the idle tasks'
  * run-time counters: no task list is scanned) and the free internal memory.
- * A ping without a target (offline, no server connected yet) is no sample
+ * A ping without a target (offline) is no sample
  * of it; one without an answer counts as lost.
  *
  * Load: two echo requests and their replies per sample, about 4 bytes a
@@ -47,7 +48,7 @@ extern "C" {
 
 /** One ping's outcome. */
 typedef enum {
-    MONITOR_PING_NONE = 0,   /**< no target (offline, no server connected): not a sample */
+    MONITOR_PING_NONE = 0,   /**< no target (offline): not a sample */
     MONITOR_PING_OK,
     MONITOR_PING_LOST,       /**< no reply within MONITOR_PING_TIMEOUT_MS */
 } monitor_ping_t;

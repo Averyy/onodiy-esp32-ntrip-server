@@ -450,7 +450,8 @@ const MON_DAY_S = 86400;
 
 /* A line over the time the figures cover (the card's "Last ..."; at most 24 h): values oldest first (null = none) from
  * the left edge to the right; scaled to lo..hi (default: the values' own range; zero: from 0; span: at least this much
- * range, so a small jitter stays a flat line). A lone value is a dot. */
+ * range, so a small jitter stays a flat line). A lone value is a dot. Its scale is written under it ("0 to 45ms": the
+ * line's bottom and top; unit: after the figures, fmtv: how a figure is written). */
 function sparkline(vals, label, o) {
   const H = 32, n = vals.length, W = Math.max(n - 1, 1);
   const x = i => (n === 1 ? W : i);
@@ -471,11 +472,13 @@ function sparkline(vals, label, o) {
   (o.lost || []).forEach((k, i) => {
     if (k) loss += 'M' + x(i) + ' 0V' + H;
   });
-  return svg('svg', { class: 'spark', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img',
-    'aria-label': label },
-  svg('path', { class: 'spark-base', d: 'M0 ' + (H - 0.5) + 'H' + W }),
-  loss ? svg('path', { class: 'spark-loss', d: loss }) : null,
-  d ? svg('path', { class: 'spark-line', d: d }) : null);
+  const fv = o.fmtv || (v => String(Math.round(v)));
+  return h('div', { class: 'spark-box' },
+    svg('svg', { class: 'spark', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img', 'aria-label': label },
+      svg('path', { class: 'spark-base', d: 'M0 ' + (H - 0.5) + 'H' + W }),
+      loss ? svg('path', { class: 'spark-loss', d: loss }) : null,
+      d ? svg('path', { class: 'spark-line', d: d }) : null),
+    h('span', { class: 'spark-scale muted' }, known.length ? fv(lo) + ' to ' + fv(hi) + (o.unit || '') : ''));
 }
 
 const pingMs = v => (v < 1 ? '<1ms' : fmt.ms(v));
@@ -510,16 +513,16 @@ function perfCard(s, st, mon) {
   const r = m.rssi, c = m.cpu, mem = m.memory;
   return wrap(h('div', { class: 'perf' },
     perfRow('Router ping', pingNow(m.router), pingDay(m.router),
-      sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, lost: col('router_lost') })),
+      sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('router_lost') })),
     perfRow(server, pingNow(m.server), pingDay(m.server),
-      sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, lost: col('server_lost') })),
+      sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, unit: 'ms', lost: col('server_lost') })),
     perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now) : DASH,
       r.avg !== null ? dotted(['avg ' + dbmText(r.avg), 'weakest ' + dbmText(r.min)]) : 'No readings yet',
-      sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10 })),
+      sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10, unit: NB + 'dBm', fmtv: v => String(Math.round(v)).replace('-', '\u2212') })),
     perfRow('CPU', fmt.pct(c.now), c.avg !== null ? dotted(['avg ' + fmt.pct(c.avg), 'peak ' + fmt.pct(c.max)]) : 'No readings yet',
-      sparkline(col('cpu_max'), 'CPU peaks over the same time', { lo: 0, hi: 100 })),
+      sparkline(col('cpu_max'), 'CPU peaks over the same time', { lo: 0, hi: 100, unit: '%' })),
     perfRow('Free memory', fmt.bytes(mem.free), mem.min !== null ? 'lowest ' + fmt.bytes(mem.min) : 'No readings yet',
-      sparkline(col('mem_min'), 'Free memory over the same time', { zero: true }))));
+      sparkline(col('mem_min'), 'Free memory over the same time', { zero: true, fmtv: fmt.bytes }))));
 }
 
 /* Each constellation with satellites: its count, and a dot in its colour under every band it is tracked on (the count

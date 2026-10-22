@@ -6,6 +6,11 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Status: "Server ping" works with no NTRIP server on: it pings the internet (1.1.1.1)
+  then, and says "Internet ping". Each line on the Performance card now has its own
+  scale under it ("0 to 45ms"), a rule between the figures, and sits beside its own name.
+- Updates: the "a receiver update session is open" message is not shown while the
+  update itself runs. A dismissable message's text is centred beside its ×.
 - Updates: "Finish checks now" ends a new app version's first checks at once (about 11
   minutes otherwise), so a receiver update can start right away. The crash watch goes
   on. The update screens say "checking the new version" instead of "on trial".
