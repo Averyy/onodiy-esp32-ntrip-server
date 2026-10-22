@@ -821,7 +821,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
   });
   sg980Sync();
 
-  /* Correction messages: how many, whether they are the Onocoy set (the chip: recommended, or custom) and each by number
+  /* Correction messages: how many, whether they are Onocoy's list (the chip: recommended with MSM7, smaller with MSM4, or
+   * custom) and each by number
    * and name (how often unless every second), kept up to date while rows change; the rows behind Edit, the list hidden
    * while they show. */
   const rows = h('div', { class: 'msgrows' });
@@ -838,10 +839,10 @@ function receiverForms(g, latest, done, onCompare, fold) {
     const n = list.length;
     const each = list.every(x => x[1] === 1);
     const onocoy = onocoySet(list);
-    const c = !n ? ['None', 'warn'] : onocoy ? ['Recommended', 'ok'] : ['Custom', ''];
+    const c = !n ? ['None', 'warn'] : onocoy === 'MSM7' ? ['Recommended', 'ok'] : onocoy ? ['Smaller', 'ok'] : ['Custom', ''];
     setChip.textContent = c[0];
     setChip.className = 'badge ' + c[1];
-    summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? 'The Onocoy set, ' + onocoy + ': ' : '') +
+    summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? onocoy + ': ' : '') +
       n + (n === 1 ? ' message' : ' messages') + (!each ? '.' : n === 1 ? ', every second.' : ', each every second.');
     patch(msgList, list.filter(x => x[0]).map(x => h('li', null, h('b', null, String(x[0])), ' ' + rtcmName(x[0]),
       x[1] !== 1 ? ' · every ' + x[1] + 's' : '')));
@@ -876,8 +877,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
         sumUp();
         saveSync();
       }, 'small'),
-      btn('Onocoy set, MSM7', () => useSet(ONOCOY_RTCM), 'small'),
-      btn('Onocoy set, MSM4', () => useSet(ONOCOY_RTCM_MSM4), 'small')),
+      btn('Recommended (MSM7)', () => useSet(ONOCOY_RTCM), 'small'),
+      btn('Smaller (MSM4)', () => useSet(ONOCOY_RTCM_MSM4), 'small')),
     h('p', { class: 'hint' }, 'MSM7 (the default) carries every observation at full precision. MSM4 is about 40% less data, ' +
       'for a slow link or a server with a rate limit. Onocoy takes both.'));
   function useSet(set) {

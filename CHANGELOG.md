@@ -13,8 +13,9 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   name keeps it. The local server's default mountpoint is the name, as before.
 - A new station name shows in the header and the tab title as soon as it is saved; the
   station answers at the new address after the next restart, as before.
-- Receiver settings: Onocoy's message set with MSM4 observations (about 40% less data,
-  for a slow link or a server with a rate limit) next to the default MSM7 set.
+- Receiver settings: correction messages "Smaller (MSM4)", Onocoy's list with MSM4
+  observations (about 40% less data, for a slow link or a server with a rate limit),
+  next to "Recommended (MSM7)", the default.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
   Wi-Fi). NTRIP-X (GNS Electronics) support, in testing: its own install with 8 MB
   flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on GPIO16/15,

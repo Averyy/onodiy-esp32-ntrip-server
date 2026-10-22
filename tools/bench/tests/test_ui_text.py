@@ -1321,7 +1321,7 @@ def test_regional_messages_without_satellites_are_not_red():
 
 
 def test_onocoy_set_with_msm4_or_msm7():
-    """The message editor offers Onocoy's list with MSM7 (the default) or MSM4 observations; both read as the Onocoy set
+    """The message editor offers Onocoy's list with MSM7 (the default) or MSM4 observations; both read as Onocoy's list
     (in any order, each every second), anything else as custom."""
     msm7 = [[m, 1] for m in (1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230)]
     msm4 = [[m, 1] for m in (1230, 1134, 1124, 1114, 1094, 1084, 1074, 1033, 1005)]
@@ -1331,8 +1331,9 @@ def test_onocoy_set_with_msm4_or_msm7():
                   ("onocoySet", msm4[:-1]), ("rtcmName", 1134)])
     assert out == ["MSM7", "MSM4", None, None, None, "NavIC observations (MSM4)"]
     text = (UI_JS / "60-receiver.js").read_text()
-    assert "btn('Onocoy set, MSM7', () => useSet(ONOCOY_RTCM)" in text
-    assert "btn('Onocoy set, MSM4', () => useSet(ONOCOY_RTCM_MSM4)" in text
+    assert "btn('Recommended (MSM7)', () => useSet(ONOCOY_RTCM)" in text
+    assert "btn('Smaller (MSM4)', () => useSet(ONOCOY_RTCM_MSM4)" in text
+    assert "onocoy === 'MSM7' ? ['Recommended', 'ok'] : onocoy ? ['Smaller', 'ok'] : ['Custom', '']" in text
 
 
 def test_message_and_satellite_lists_are_one_line_rows():
