@@ -9,8 +9,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Receiver firmware updates are on in releases: the update banner offers a newer
   receiver build and installs it over the station's own link to the receiver, with no
   PC and no cable. Tested on a UM980 (the NTRIP-X: 11833 to 23980). The UM982 uses the
-  same steps but has not been updated on hardware yet. Releases carry UM980 23980 and
-  25735 (instead of 11833 and 23980) and UM982 18975 and 23575.
+  same steps but has not been updated on hardware yet. Releases now carry UM980
+  packages too (23980 and 25735), beside UM982 18975 and 23575.
 - Network: each station has its own name, `onodiy-` and its hotspot's four characters
   (`onodiy-c978.local` for the hotspot `onodiy-C978`). Two stations on one network
   took `onodiy.local` from each other and both ended up under other names. A station
