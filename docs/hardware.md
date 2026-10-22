@@ -85,10 +85,11 @@ the receiver, and opening the receiver's USB-C does not reset it either.
 A finished base station from GNS-Electronics: an ESP32-S3-WROOM-1U-N8R8 (8 MB flash,
 8 MB PSRAM) and a UM980 in a case. The station's firmware runs on it with its own
 install (`onodiy-install-um980-ntrx.bin`: an 8 MB partition table whose
-`board.um980-ntrx` partition tells the firmware which board it is). In testing: on the
-bench it finds its board and its UM980 (Build 11833 as delivered), and going back to
-GNS's firmware and installing this one again both work. Next: the LEDs and the button by
-eye, the case's USB-C, then the antenna.
+`board.um980-ntrx` partition tells the firmware which board it is). Tested: it finds its
+board and its UM980 (Build 11833 as delivered), going back to GNS's firmware and
+installing this one again both work, it streams with an antenna, and its UM980 went from
+11833 to 23980 by a receiver update from the web page. Not checked yet: the LEDs and the
+button by eye, and the case's USB-C.
 
 **Power:** a USB-C supply of 2 A or more on the case's port. **Antenna:** the port
 marked `GNSS` (3.3 V for an active antenna, at most 100 mA).

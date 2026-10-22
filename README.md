@@ -24,8 +24,8 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
-<td align="center"><b>UM980</b> (in testing)</td>
-<td align="center"><b>NTRIP-X</b> (in testing)</td>
+<td align="center"><b>UM980</b></td>
+<td align="center"><b>NTRIP-X</b></td>
 <td align="center"><b>GNSS splitter</b> (optional)</td>
 </tr>
 </table>
@@ -58,8 +58,8 @@ One firmware for every board; only the install differs.
 | Board | Flash | Install image | Status |
 |---|---|---|---|
 | UM982 board (AliExpress) | 16 MB | `onodiy-install-16mb.bin` | tested |
-| UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | in testing |
-| NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | in testing; LEDs and button follow GNS's quick guide; receiver updates kept in memory |
+| UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | UM980 tested on the NTRIP-X; this board not run yet |
+| NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | tested; LEDs and button follow GNS's quick guide; receiver updates kept in memory |
 
 Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
 pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the

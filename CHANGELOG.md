@@ -38,7 +38,7 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Signals: a refused message 1230 now says what it costs beyond Onocoy: rovers of other
   brands get less from GLONASS.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
-  Wi-Fi). NTRIP-X (GNS Electronics) support, in testing: its own install with 8 MB
+  Wi-Fi). NTRIP-X (GNS Electronics) support: its own install with 8 MB
   flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on GPIO16/15,
   and its LEDs: the status LED blinks the codes of GNS's quick guide (white, then blue
   for Wi-Fi and green for the servers; fast red for a new alert; fast yellow and pink

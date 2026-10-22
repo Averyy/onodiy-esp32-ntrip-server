@@ -2223,7 +2223,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app.rollback_version` | the version `POST /api/update/rollback` would start (the other app slot's image), `null` without a rollback or when its description cannot be read |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
 | `app.rolled_back` | every version rolled back on this station, newest first (`fw_update_get_rolled_back()`: reverted by its trial, rolled back by the user, or rolled back twice in its first minute; the last 8, kept through a factory reset). The banner offers none of them, however many daily checks later; installing one, from the banner or as an upload, asks for `rolled_back_ack` first |
-| `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
+| `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package; information, never a gate. On hardware it runs high: 251 s for UM980 23980, which took about 150 s from start to streaming again on the NTRIP-X |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
 | `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason (`no_package_area`, `not_enabled_in_build`, `receiver_port`) when it is `false`, else `null` |
 | `gnss.latest_cross_layout` | the offered build has another partition layout than the receiver's build (rule 12; an unknown build counts as another), `null` when nothing is offered. The UI then asks for its own tick and sends `cross_layout_ack: true` |
@@ -3261,8 +3261,8 @@ Things this contract needs that the current headers do not provide yet:
    the rule it applied (`ntrip_policy_t`, out-parameter) and the server only
    names it (section 10).
 3. **Receiver flashing available**: resolved; `flash_available` is
-   `station_flash_available()` (`CONFIG_UM98X_FLASH_ENABLE`, off until the
-   bench has confirmed the receiver side, and the receiver wired by its COM1).
+   `station_flash_available()` (`CONFIG_UM98X_FLASH_ENABLE`, on by default
+   since v0.1.6, and the receiver wired by its COM1).
 4. **Rolled-back versions**: resolved; `fw_update_get_rolled_back()` and
    `fw_update_is_rolled_back()` expose the bounded list fw_update keeps
    (`ota/bad_ver`, 8 versions, written only when one is added). The banner
