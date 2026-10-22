@@ -11,7 +11,7 @@
 # It adds the bench console on the UART0 console (115200, beside the log;
 # every receiver byte captured), with the receiver link's bench hooks (RX
 # stalls, frame timing, the loader prompt detector in report-only mode),
-# and builds the receiver flasher in. The boot-time recovery of an
+# and the receiver flasher (on by default since v0.1.6). The boot-time recovery of an
 # interrupted update stays report-only (it logs what it would send) until
 # the journal-state bench test passes; then add
 # CONFIG_UM98X_FLASH_RECOVERY_ACTIONS=y for its second half. The 115200

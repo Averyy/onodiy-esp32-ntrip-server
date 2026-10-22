@@ -126,8 +126,9 @@ function signalsCard(sig) {
  * no GLONASS, 1230 refused. master: the main antenna's
  * signal group the receiver runs (GET /api/gnss), null while unknown; with
  * Galileo short of E6 it says whether 3 6 would add it or runs already.
+ * rcv: GET /api/status receiver, for a refused 1230 that a firmware update fixes.
  */
-function signalChecks(sig, master) {
+function signalChecks(sig, master, rcv) {
   const systems = sig.systems || [];
   let n = 0, sum = 0, w = 0, sum1 = 0, w1 = 0;
   const sys = systems.map(s => {
@@ -159,7 +160,10 @@ function signalChecks(sig, master) {
   const add = (tone, line) => r.items.push([tone, null, null, line, 'more']);
   if (sig.e6_lost) add('bad', 'Galileo E6 lost: it was tracked before with this signal group');
   if (!systems.some(s => s.sys === 'glonass')) add('warn', 'No GLONASS: Onocoy\'s quality score needs it');
-  else if (sig.rtcm1230_supported === false) add('warn', 'Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it');
+  else if (sig.rtcm1230_supported === false) {
+    const fix = fix1230(rcv);
+    add('warn', 'Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it' + (fix ? '. ' + fix : ''));
+  }
   r.ok = r.items.every(i => i[0] === 'ok');
   return r;
 }
@@ -184,7 +188,7 @@ function signalsHead(sig, live, master, why) {
     return msg(typeof sig.epoch_age_ms === 'number' ? 'warn' : 'info', h('strong', null, signalsHeadline(sig)),
       why ? h('div', null, why) : null);
   }
-  const checks = live ? signalChecks(sig, master) : null;
+  const checks = live ? signalChecks(sig, master, (S.status || {}).receiver) : null;
   return [checks && !checks.waiting ? h('div', { class: 'check-banner' }, receptionList(checks, true)) :
     h('div', { class: 'big' }, signalsHeadline(sig)),
     why ? msg('info', why) : null];

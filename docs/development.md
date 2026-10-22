@@ -84,9 +84,9 @@ Notes:
   ```sh
   tools/ci/install_files.sh build install   # install/onodiy-install-16mb.bin, ...-um980-ntrx.bin
   ```
-- Receiver firmware updates are off in the default build until they have been tested
-  on a bench unit: a package can be uploaded and checked against every rule, but
-  nothing is sent to the receiver. A bench build turns them on together with a bench
+- Receiver firmware updates are on in every build (`CONFIG_UM98X_FLASH_ENABLE`; off, a
+  package is only uploaded and checked against every rule, nothing is sent to the
+  receiver). A bench build adds a bench
   console on UART0 that runs the receiver tests one at a time and records every byte
   (`help` lists the commands), and copies the console to the built-in USB (see
   [the two USB-C ports](hardware.md#the-two-usb-c-ports) for its Wi-Fi cost):

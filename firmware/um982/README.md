@@ -25,8 +25,9 @@ highest build above its own.
 arrived (October 2026) with **R4.10 Build 25164**, compiled 2026-05-21, which is newer
 than both packages here. The flasher never installs a build lower than the one
 running, so they are of no use on such a receiver. A newer package has to come
-from Unicore's UPrecise tool (see below). Receiver flashing from the station stays in
-bench builds for now and is lower priority than streaming.
+from Unicore's UPrecise tool (see below). Receiver updates from the station are on in
+releases since v0.1.6; they were tested on a UM980, and no UM982 update has run on
+hardware yet.
 
 ### What's in Build 18975
 

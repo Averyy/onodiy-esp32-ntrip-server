@@ -152,6 +152,16 @@ function recoveryDoing(hl, answers) {
   return t[hl.step_phase === 'waiting' ? 1 : 0];
 }
 
+/* The first build of each model known to send message 1230 (UM980 11833 refuses it; 23980 sends it, tested on hardware). */
+const RX_1230_BUILD = { UM980: 23980 };
+
+/** A refused 1230 that a receiver update fixes: what to do about it, else ''. rcv: GET /api/status receiver. */
+function fix1230(rcv) {
+  const min = rcv && RX_1230_BUILD[rcv.model];
+  const m = min && /Build(\d+)/.exec(rcv.firmware || '');
+  return m && Number(m[1]) < min ? 'Update the receiver firmware (build ' + min + ' or later) to send it.' : '';
+}
+
 /**
  * Onocoy's quality minimums this board can miss (4 bands on one
  * constellation, GLONASS, message 1230 accepted), from the status, and only
@@ -168,6 +178,7 @@ function rxQuality(rcv, delivering) {
     refused1230: known && rcv.glonass !== false && rcv.rtcm1230_supported === false,
   };
   q.any = q.fewBands || q.noGlonass || q.refused1230;
+  q.fix1230 = q.refused1230 ? fix1230(rcv) : '';
   return q;
 }
 
@@ -176,7 +187,8 @@ function qualityLead(q, name) {
   if (q.fewBands && q.noGlonass) return name + ' gets ' + q.bands + ' bands and no GLONASS; its quality score needs 4 bands and GLONASS.';
   if (q.fewBands) return name + ' gets ' + q.bands + ' bands; its quality score needs 4 on one constellation.';
   if (q.noGlonass) return name + ' gets no GLONASS; its quality score needs it.';
-  return 'The receiver refused message 1230, so GLONASS does not count for ' + name + '\'s quality score.';
+  return 'The receiver refused message 1230, so GLONASS does not count for ' + name + '\'s quality score.' +
+    (q.fix1230 ? ' ' + q.fix1230 : '');
 }
 
 /**
@@ -398,7 +410,8 @@ function stationState(s, admin) {
     }
     if (onoStreaming && quality.any) {
       return pick('quality', quality.fewBands ? 'Too few bands for Onocoy' : 'No GLONASS for Onocoy', 'warn',
-        qualityLead(quality, casterName(ono)), { actions: [page('Receiver', '#/receiver')],
+        qualityLead(quality, casterName(ono)), { actions: [quality.fix1230 && !quality.fewBands && !quality.noGlonass ?
+          go('Updates', '#/settings/updates') : page('Receiver', '#/receiver')],
           alertId: quality.fewBands && find('bands') ? 'bands' : null });
     }
     const names = on.map(casterName);

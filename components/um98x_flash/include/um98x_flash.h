@@ -16,7 +16,7 @@
  * the same pinned package after the point of no return, which finish a
  * session the user started.
  *
- * Build options: CONFIG_UM98X_FLASH_ENABLE (default off) builds the receiver
+ * Build options: CONFIG_UM98X_FLASH_ENABLE (default on) builds the receiver
  * flasher in; without it the package can still be inspected and checked,
  * and nothing is ever sent to the receiver by this component.
  * CONFIG_UM98X_FLASH_RECOVERY_ACTIONS (needs it) lets the boot-time recovery

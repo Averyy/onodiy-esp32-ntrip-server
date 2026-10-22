@@ -1,4 +1,4 @@
 firmware/um982/UM982_R4.10Build18975.pkg
 firmware/um982/UM982_R4.10Build23575.pkg
-firmware/um980/UM980_R4.10Build11833.pkg
 firmware/um980/UM980_R4.10Build23980.pkg
+firmware/um980/UM980_R4.10Build25735.pkg

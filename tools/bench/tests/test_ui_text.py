@@ -92,7 +92,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  sgtNotice: st => { const n = sgTestNotice(st); return n && n.slice(0, 3); },\n' +
   '  rxChip: s => receiverChip(s), posLine: a => positionLine(a[0], a[1]), statusPos: a => positionText(a[0], a[1]),\n' +
   '  trial: t => trialText(t), gnssRel: a => gnssReleaseText(a[0], a[1]), dur: x => fmt.dur(x), ms: x => fmt.ms(x),\n' +
-  '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
+  '  headline: sig => signalsHeadline(sig), sigChecks: a => signalChecks(a[0], a[1], a[2]), msgCheck: a => msgCheck(a[0], a[1], a[2]),\n' +
   '  manage: () => MANAGE, manageKey: a => manageKey(a[0], a[1]), manageCustom: a => manageCustom(a[0], a[1]),\n' +
   '  doing: hl => recoveryDoing(hl), healthPlan: a => healthPlanText(a[0], stationState(a[1], true)),\n' +
   '  rxAlerts: a => (a[0].alerts || []).filter(rxAlertShown(stationState(a[1], true), false)),\n' +
@@ -910,6 +910,10 @@ def test_hero_quality_minimums_for_onocoy():
     assert out[0]["line"] == "Onocoy gets 3 bands; its quality score needs 4 on one constellation." and out[0]["action"] == "Receiver"
     assert out[1]["title"] == "No GLONASS for Onocoy" and out[1]["line"] == "Onocoy gets no GLONASS; its quality score needs it."
     assert out[2]["title"] == "No GLONASS for Onocoy" and "message 1230" in out[2]["line"]
+    # A UM980 whose build refuses 1230: the fix is a receiver update, so the card links to Updates.
+    fix, = heroes(status(receiver={"rtcm1230_supported": False, "model": "UM980", "firmware": "R4.10Build11833"}))
+    assert fix["line"].endswith(" Update the receiver firmware (build 23980 or later) to send it.") and fix["action"] == "Updates"
+    assert out[2]["action"] == "Receiver"
     assert out[3]["title"] == "Too few bands for Onocoy" and "3 bands and no GLONASS" in out[3]["line"]
     assert [o["key"] for o in out[4:7]] == ["streaming", "streaming", "streaming"]
     # The bands alert is the line: not an "Also:" line too.
@@ -1260,6 +1264,13 @@ def test_signals_card_headline_and_hints():
     assert line(e6)[-1] == ["bad", "Galileo E6 lost: it was tracked before with this signal group"] and e6["ok"] is False
     assert line(glo)[-1] == ["warn", "No GLONASS: Onocoy's quality score needs it"]
     assert line(r1230)[-1] == ["warn", "Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it"]
+    # A UM980 on a build before 23980: the update that fixes it. On 23980 or another model: nothing more to do there.
+    old, new, um982 = run_ui([("sigChecks", [refused, 7, {"model": "UM980", "firmware": f}]) for f in
+                              ("R4.10Build11833", "R4.10Build23980M")] +
+                             [("sigChecks", [refused, 7, {"model": "UM982", "firmware": "R4.10Build18975"}])])
+    assert line(old)[-1] == ["warn", "Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not "
+                                     "count it. Update the receiver firmware (build 23980 or later) to send it."]
+    assert line(new)[-1] == line(r1230)[-1] and line(um982)[-1] == line(r1230)[-1]
 
 
 def test_times_have_no_space_before_their_unit():

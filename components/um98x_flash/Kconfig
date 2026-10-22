@@ -4,7 +4,7 @@ menu "Station: receiver flasher"
 
     config UM98X_FLASH_ENABLE
         bool "Receiver firmware updates (send packages to the receiver)"
-        default n
+        default y
         help
             Builds the receiver flasher in: a receiver package the user
             confirmed (a release from the update banner, or an uploaded
@@ -12,9 +12,10 @@ menu "Station: receiver flasher"
             update is finished at boot. Off: packages can still be uploaded
             and checked against every pre-flight rule, the web UI says that
             receiver firmware updates are not enabled in this build, and
-            nothing is ever sent to the receiver's loader. Releases are built
-            with this off until the bench has confirmed the receiver side.
-            PROVISIONAL, to be confirmed on hardware.
+            nothing is ever sent to the receiver's loader. On in releases
+            since v0.1.6, after updates on a UM980 (the NTRIP-X: 11833
+            again, then 11833 to 23980). The UM982 uses the same loader
+            steps; no UM982 update has run on hardware yet.
 
     config UM98X_FLASH_RECOVERY_ACTIONS
         bool "Send the boot-time recovery actions for an interrupted receiver update"

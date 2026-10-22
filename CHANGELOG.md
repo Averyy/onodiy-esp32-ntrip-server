@@ -4,8 +4,13 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.6
 
+- Receiver firmware updates are on in releases: the update banner offers a newer
+  receiver build and installs it over the station's own link to the receiver, with no
+  PC and no cable. Tested on a UM980 (the NTRIP-X: 11833 to 23980). The UM982 uses the
+  same steps but has not been updated on hardware yet. Releases carry UM980 23980 and
+  25735 (instead of 11833 and 23980) and UM982 18975 and 23575.
 - Network: each station has its own name, `onodiy-` and its hotspot's four characters
   (`onodiy-c978.local` for the hotspot `onodiy-C978`). Two stations on one network
   took `onodiy.local` from each other and both ended up under other names. A station
@@ -24,6 +29,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   a × to dismiss it.
 - Updates: a receiver update can start once a new app version has passed its first
   checks (about 11 minutes), instead of after its whole 24-hour crash watch.
+- Signals: when a UM980 refuses message 1230, the warning says that receiver firmware
+  23980 or later sends it, and the Onocoy card links to Updates.
 - Updates: a receiver build with another partition layout (UM980 11833 to 23980 or
   later) says so in its dialog and needs its own tick. Builds with receiver updates
   now allow such updates; before, the station always refused them and the UI could not
