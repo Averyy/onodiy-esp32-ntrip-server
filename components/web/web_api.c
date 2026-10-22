@@ -1851,6 +1851,9 @@ static esp_err_t h_update_get(web_req_t *r)
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
         .flash_reason = WEB_FLASH_REASON,
+        .cross_layout_allowed = um98x_flash_cross_layout_allowed(),
+        .latest_cross_layout = s_fw.gnss_latest_build != 0 &&
+                               um98x_flash_build_cross_layout(s_fw.gnss_latest_build, s_st.receiver.valid ? s_st.receiver.build : 0),
         .rolled_back = (const char (*)[32])rolled_back,
         .rolled_back_count = n_rolled_back,
     };
@@ -2070,6 +2073,8 @@ static esp_err_t send_staged(httpd_req_t *req, const um98x_flash_pkg_facts_t *fa
         .budget_left_s = web_budget_now(),
         .flash_available = WEB_FLASH_AVAILABLE,
         .flash_reason = WEB_FLASH_REASON,
+        .cross_layout = um98x_flash_pkg_cross_layout(facts->layout, s_st.receiver.valid ? s_st.receiver.build : 0),
+        .cross_layout_allowed = um98x_flash_cross_layout_allowed(),
     };
     web_resp_t resp;
     resp_begin(&resp, req, 200);

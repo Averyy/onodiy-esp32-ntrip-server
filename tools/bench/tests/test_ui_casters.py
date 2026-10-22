@@ -564,7 +564,9 @@ const WIRING = { rx_gpio: 1, tx_gpio: 2, port: 1, saved: null, default: { rx_gpi
  * (GET /api/gnss/flash), c.staged (GET /api/upload/gnss), c.wiring (GET /api/system's wiring, WIRING by default). What it
  * shows (pageParts); with c.click, also what it shows once the first button of that name is pressed. With c.wire, the
  * receiver wiring's dialog: what it shows (wire.dialog, its lists as [option, greyed out, chosen]), then with
- * c.wire.pick ([rx, tx, port]) chosen and saved (the answer c.wire.answer), the PUTs that went out and the page after. */
+ * c.wire.pick ([rx, tx, port]) chosen and saved (the answer c.wire.answer), the PUTs that went out and the page after.
+ * With c.press, the dialog that button opens (dialog, with ok_disabled before and after its checkbox is ticked), then
+ * confirmed: the POSTs that went out. */
 async function settingsPageView(c) {
   const settle = async () => {
     for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
@@ -590,6 +592,25 @@ async function settingsPageView(c) {
   if (c.click) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.click).fire('click');
     r.after = pageParts(el);
+  }
+  if (c.press) {
+    ids.modal = new El('div');
+    [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.press).fire('click');
+    await settle();
+    const dlg = () => [...visible(ids.modal)];
+    const ok = () => dlg().find(e => e.tagName === 'BUTTON' && e.attrs.type === 'submit');
+    r.dialog = pageParts(ids.modal);
+    r.dialog.ok_disabled = !!ok().disabled;
+    const box = dlg().find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox');
+    if (box) {
+      box.checked = true;
+      box.fire('change');
+    }
+    r.dialog.ok_disabled_ticked = !!ok().disabled;
+    const n = sent.length;
+    dlg().find(e => e.tagName === 'FORM').fire('submit');
+    await settle();
+    r.posts = sent.slice(n).filter(x => x.method === 'POST').map(x => [x.path, x.body]);
   }
   if (c.wire) {
     ids.modal = new El('div');
@@ -3264,6 +3285,31 @@ def test_ask_the_receiver_sends_the_chosen_command_and_shows_the_answer():
     # Nothing asked yet: no answer box, no line.
     assert fresh["pres"] == [] and "Copy" not in fresh["buttons"] and "Ask" in fresh["buttons"]
     assert not any(t.startswith(("Asking", "VERSIONA:")) for t in fresh["lines"])
+
+
+def test_receiver_update_that_changes_the_partition_layout_needs_its_own_tick():
+    """Settings, Updates: an offered receiver build with another partition layout says so in the dialog, whose Update
+    receiver stays greyed out until its own checkbox is ticked; the request then carries the acknowledgement. An app
+    that cannot install such a build shows why instead of a button."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build11833", "running_build": 11833,
+            "latest": "R4.10Build23980", "latest_build": 23980, "available": True, "flash_available": True,
+            "expected_downtime_s": 251, "latest_cross_layout": True, "cross_layout_allowed": True}
+    update = {**SET_UPDATE, "gnss": gnss}
+    refused = {**SET_UPDATE, "gnss": {**gnss, "cross_layout_allowed": False}}
+    same = {**SET_UPDATE, "gnss": {**gnss, "latest_cross_layout": False}}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    xl, no, plain = run_editor([{**base, "update": update, "press": "Update receiver"},
+                                {**base, "update": refused},
+                                {**base, "update": same, "press": "Update receiver"}])
+    warn = "This build changes the receiver's partition layout. If the update stops partway, the station may not be able to finish it on its own."
+    assert warn in [t for _, t in xl["dialog"]["msgs"]]
+    assert xl["dialog"]["ok_disabled"] and not xl["dialog"]["ok_disabled_ticked"]
+    assert xl["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": True}]]
+    assert "Update receiver" not in no["buttons"]
+    assert "This build changes the receiver's partition layout, which this app version cannot install." in [t for _, t in no["msgs"]]
+    # Same layout: no extra tick, no acknowledgement.
+    assert not plain["dialog"]["ok_disabled"] and warn not in [t for _, t in plain["dialog"]["msgs"]]
+    assert plain["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": False}]]
 
 
 def test_last_receiver_update_message_can_be_dismissed():

@@ -1984,13 +1984,14 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
     e.cross_layout_confirmed = req.cross_layout_confirmed;
     um98x_flash_pkg_facts_t f;
     err = um98x_flash_prepare(&e, &f);
+    /* Kept for the outcome either way: an update that went ahead also says it changed the layout. */
+    portENTER_CRITICAL(&s_lock);
+    s_flash_last.failed_rule = f.failed_rule;
+    s_flash_last.cross_layout = f.cross_layout;
+    s_flash_last.check_only = false;
+    portEXIT_CRITICAL(&s_lock);
     if (err != ESP_OK) {
         r->flash_end = STN_FLASH_END_NOTHING;
-        portENTER_CRITICAL(&s_lock);
-        s_flash_last.failed_rule = f.failed_rule;
-        s_flash_last.cross_layout = f.cross_layout;
-        s_flash_last.check_only = false;
-        portEXIT_CRITICAL(&s_lock);
         if (f.failed_rule != 0) {
             flash_last_set(STATION_FLASH_OUT_REJECTED, "package refused by rule %u: %s", (unsigned)f.failed_rule, f.why);
         } else {

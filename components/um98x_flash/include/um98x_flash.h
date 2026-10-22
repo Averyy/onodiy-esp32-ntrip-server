@@ -193,6 +193,22 @@ esp_err_t um98x_flash_init(void);
 /** Receiver flashing is built in (CONFIG_UM98X_FLASH_ENABLE). */
 bool um98x_flash_enabled(void);
 
+/**
+ * Packages with another partition layout can be installed, each with its own
+ * confirmation (CONFIG_UM98X_FLASH_CROSS_LAYOUT). Off: rule 12 refuses them.
+ */
+bool um98x_flash_cross_layout_allowed(void);
+
+/**
+ * Installing receiver build `pkg_build` on a receiver running `receiver_build`
+ * changes the receiver's partition layout (rule 12): true when the two builds'
+ * tables differ or either build is unknown.
+ */
+bool um98x_flash_build_cross_layout(uint32_t pkg_build, uint32_t receiver_build);
+
+/** As um98x_flash_build_cross_layout() for a package's own table (um98x_flash_pkg_facts_t.layout). */
+bool um98x_flash_pkg_cross_layout(int8_t pkg_layout, uint32_t receiver_build);
+
 /** A receiver model whose packages the flasher takes ("UM982", "UM980"; pkg_check.h pkg_models). */
 bool um98x_flash_model_supported(const char *model);
 

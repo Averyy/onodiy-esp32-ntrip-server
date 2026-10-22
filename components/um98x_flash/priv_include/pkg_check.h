@@ -100,6 +100,13 @@ extern const pkg_layout_t pkg_known_layouts[PKG_KNOWN_LAYOUTS];
 /** Index of the known table a receiver build uses (any model), -1 when the build is unknown. */
 int pkg_layout_for_build(uint32_t build);
 
+/**
+ * A package carrying known table `pkg_layout` changes the partition layout of
+ * a receiver on `receiver_build` (rule 12): true when the two tables differ or
+ * either is unknown.
+ */
+bool pkg_layout_differs(int pkg_layout, uint32_t receiver_build);
+
 /** Facts readable without the receiver (upload page, logs). */
 typedef struct {
     uint32_t size;

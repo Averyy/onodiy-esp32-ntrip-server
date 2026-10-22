@@ -712,6 +712,12 @@ TEST_CASE("package facts: unreadable packages report unknowns", "[pkg]")
     TEST_ASSERT_EQUAL_INT(0, pkg_layout_for_build(13495));
     TEST_ASSERT_EQUAL_INT(1, pkg_layout_for_build(18975));
     TEST_ASSERT_EQUAL_INT(2, pkg_layout_for_build(23575));
+    /* Rule 12's layout change: UM980 11833 to 23980 changes it, 23980 to 25735 does not; unknown counts as a change. */
+    TEST_ASSERT_TRUE(pkg_layout_differs(pkg_layout_for_build(23980), 11833));
+    TEST_ASSERT_FALSE(pkg_layout_differs(pkg_layout_for_build(25735), 23980));
+    TEST_ASSERT_FALSE(pkg_layout_differs(pkg_layout_for_build(11833), 10110));
+    TEST_ASSERT_TRUE(pkg_layout_differs(pkg_layout_for_build(25735), 0));
+    TEST_ASSERT_TRUE(pkg_layout_differs(-1, 11833));
 }
 
 #ifndef FL_TEST_UM980_DIR

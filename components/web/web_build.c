@@ -2307,6 +2307,12 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_u32_or_null(w, "budget_left_s", u->budget_left_s);
     wj_bool(w, "flash_available", u->flash_available);
     wj_str(w, "flash_reason", u->flash_available ? NULL : flash_reason(u->flash_reason));
+    if (f->gnss_update_available) {
+        wj_bool(w, "latest_cross_layout", u->latest_cross_layout);
+    } else {
+        wj_null(w, "latest_cross_layout");
+    }
+    wj_bool(w, "cross_layout_allowed", u->cross_layout_allowed);
     wj_obj_close(w);
     wj_obj_close(w);
 }
@@ -2344,6 +2350,8 @@ void web_build_staged(wj_t *w, const web_staged_snap_t *s)
     wj_u32_or_null(w, "budget_left_s", s->budget_left_s);
     wj_bool(w, "flash_available", s->flash_available);
     wj_str(w, "flash_reason", s->flash_available ? NULL : flash_reason(s->flash_reason));
+    wj_bool(w, "cross_layout", s->cross_layout);
+    wj_bool(w, "cross_layout_allowed", s->cross_layout_allowed);
     wj_obj_close(w);
 }
 

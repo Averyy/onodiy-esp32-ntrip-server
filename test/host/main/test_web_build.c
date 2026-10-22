@@ -729,6 +729,42 @@ TEST_CASE("GET /api/update lists every version rolled back here, newest first", 
     cJSON_Delete(root);
 }
 
+TEST_CASE("GET /api/update says whether the offered receiver build changes the partition layout", "[web_build]")
+{
+    fixture();
+    web_update_snap_t u = { .fw = &s_snap.fw, .st = &s_snap.st, .latest_cross_layout = true };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    /* Nothing offered: no layout to compare. */
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "gnss"), "latest_cross_layout")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(at(root, "gnss"), "cross_layout_allowed")));
+    cJSON_Delete(root);
+
+    s_snap.fw.gnss_update_available = true;
+    s_snap.fw.gnss_latest_build = 23980;
+    u.cross_layout_allowed = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "gnss"), "latest_cross_layout")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "gnss"), "cross_layout_allowed")));
+    cJSON_Delete(root);
+
+    web_staged_snap_t st = { .st = &s_snap.st, .cross_layout = true };
+    st.facts.layout = -1;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_staged(&w, &st);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "cross_layout")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "cross_layout_allowed")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("update job results map the esp_err_t", "[web_build]")
 {
     TEST_ASSERT_EQUAL_STRING("ok", web_result_code("check", ESP_OK));

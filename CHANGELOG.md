@@ -24,6 +24,10 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   a × to dismiss it.
 - Updates: a receiver update can start once a new app version has passed its first
   checks (about 11 minutes), instead of after its whole 24-hour crash watch.
+- Updates: a receiver build with another partition layout (UM980 11833 to 23980 or
+  later) says so in its dialog and needs its own tick. Builds with receiver updates
+  now allow such updates; before, the station always refused them and the UI could not
+  confirm them. Tested on the NTRIP-X: UM980 11833 to 23980.
 - Signals: a refused message 1230 now says what it costs beyond Onocoy: rovers of other
   brands get less from GLONASS.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and

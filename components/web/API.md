@@ -2226,6 +2226,8 @@ until a newer version appears; the server keeps no "later" state.
 | `gnss.expected_downtime_s` | `station_expected_flash_downtime_s()` for the offered package (PROVISIONAL, to be confirmed on hardware); information, never a gate |
 | `gnss.budget_left_s` | as in `/api/status`, for the dialog |
 | `gnss.flash_available`, `gnss.flash_reason` | as `gnss_flash_available` and `gnss_flash_reason` in `/api/status`: `station_flash_available()`; the reason (`no_package_area`, `not_enabled_in_build`, `receiver_port`) when it is `false`, else `null` |
+| `gnss.latest_cross_layout` | the offered build has another partition layout than the receiver's build (rule 12; an unknown build counts as another), `null` when nothing is offered. The UI then asks for its own tick and sends `cross_layout_ack: true` |
+| `gnss.cross_layout_allowed` | this build installs such packages at all (`CONFIG_UM98X_FLASH_CROSS_LAYOUT`); when `false` the UI shows why instead of the button |
 
 **Result codes** (`last_result.result`, final `progress` messages): `ok`,
 `not_available_yet`, `refused` (the state changed between click and start),
@@ -2385,7 +2387,10 @@ state, not a missing one).
 
 `layout` is the index of the known partition table the package carries
 (`-1` unknown), `layout_build` the receiver build it belongs to (`0`
-unknown), `stamps` the five block date stamps. The user compares the
+unknown), `stamps` the five block date stamps. `cross_layout` (top level)
+says that this table differs from the one of the receiver's build (rule 12;
+unknown counts as different), `cross_layout_allowed` whether this build
+installs such a package at all. The user compares the
 SHA-256 with the published one and gives the expected firmware string.
 Unconfirmed after 15 min (`expires_in_s`), the package is released.
 
@@ -2403,7 +2408,10 @@ a build lower than the receiver's is `409 downgrade`. Then
 station's RAM copy after that; a refusal ends the job with `result:
 "package_rejected"` and releases the package. A package with another
 partition layout than the receiver's is refused unless the build allows it
-(tested on hardware); then it needs `cross_layout_ack`.
+(`CONFIG_UM98X_FLASH_CROSS_LAYOUT`, on by default since a UM980 went from
+11833 to 23980 on hardware); then it needs `cross_layout_ack`. `last.cross_layout`
+in `GET /api/gnss/flash` says whether the package changed the layout, also
+after a successful update.
 
 **In builds without receiver flashing** the package is checked instead:
 `202 {"accepted": true, "check_only": true}`, progress job `gnss_check`

@@ -279,6 +279,14 @@ function downtimeRows(down, left) {
   ];
 }
 
+/* A build with another partition layout (rule 12): its own confirmation, or why this app cannot install it. */
+const XL_CHECK = 'I understand that this build changes the receiver\'s partition layout.';
+function crossLayoutMsg(allowed) {
+  return msg('warn', allowed ?
+    'This build changes the receiver\'s partition layout. If the update stops partway, the station may not be able to finish it on its own.' :
+    'This build changes the receiver\'s partition layout, which this app version cannot install.');
+}
+
 function receiverWarnings(flashAvailable, reason) {
   return [
     h('ul', null,
@@ -426,16 +434,19 @@ const updatesPart = {
     /* ---- Receiver (offered package) ---- */
     async function updateReceiver(button) {
       const g = u.gnss || {};
+      const xl = !!g.latest_cross_layout;
       const ok = await dialog({
         title: 'Update the receiver firmware?',
         ok: g.flash_available ? 'Update receiver' : 'Download and verify',
+        check: xl ? XL_CHECK : undefined,
         body: [h('p', null, 'Install ' + g.latest + ' (build ' + g.latest_build + ') on the ' + (g.model || 'receiver') + ' (now ' + (g.running || 'unknown') + ').'),
+          xl ? crossLayoutMsg(true) : null,
           downtimeRows(g.expected_downtime_s, g.budget_left_s), receiverWarnings(g.flash_available, g.flash_reason)],
       });
       if (!ok) return;
       gnssErr.hidden = true;
       try {
-        await busy(button, () => api('POST', '/api/update/gnss', { build: g.latest_build, cross_layout_ack: false }));
+        await busy(button, () => api('POST', '/api/update/gnss', { build: g.latest_build, cross_layout_ack: xl }));
         rflow = { state: 'download' };
         P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', done: false });
         renderGnss();
@@ -449,7 +460,9 @@ const updatesPart = {
     function renderGnss() {
       const g = u.gnss || {};
       const blocked = g.blocked && g.blocked !== 'none';
-      const upd = g.available ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd), appMain ? '' : 'primary',
+      /* Another partition layout that this app refuses (rule 12): no button, the reason instead. */
+      const xlRefused = g.available && g.latest_cross_layout && !g.cross_layout_allowed;
+      const upd = g.available && !xlRefused ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd), appMain ? '' : 'primary',
         { disabled: blocked || (rflow && rflow.state === 'download') }) : null;
       const lr = u.last_result;
       const last = flash && flash.last;
@@ -459,7 +472,8 @@ const updatesPart = {
           g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
             !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
             gnssReleaseText(g, u.app || {}), upd),
-        blocked && g.available ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
+        xlRefused ? crossLayoutMsg(false) : null,
+        blocked && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.')) : null,
         rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
@@ -704,7 +718,8 @@ const updatesPart = {
         }
       };
       const err = errBox();
-      const go = btn(staged.flash_available ? 'Start the receiver update' : 'Continue', async () => {
+      const xl = !!staged.cross_layout;
+      const go = xl && !staged.cross_layout_allowed ? null : btn(staged.flash_available ? 'Start the receiver update' : 'Continue', async () => {
         fExp.error(null);
         const v = exp.value.trim();
         const m = /Build(\d+)/.exec(v);
@@ -724,13 +739,14 @@ const updatesPart = {
         const ok = await dialog({
           title: 'Install this package on the receiver?',
           ok: staged.flash_available ? 'Update receiver' : 'Continue',
-          body: [h('p', null, 'Expected afterwards: ' + v + '.'), downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
+          check: xl ? XL_CHECK : undefined,
+          body: [h('p', null, 'Expected afterwards: ' + v + '.'), xl ? crossLayoutMsg(true) : null, downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
             receiverWarnings(staged.flash_available, staged.flash_reason)],
         });
         if (!ok) return;
         err.hidden = true;
         try {
-          const r = await busy(go, () => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: false }));
+          const r = await busy(go, () => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: xl }));
           staged = null;
           if (r && r.check_only) {
             /* No receiver flashing in this build: the station checks the package and releases it. */
@@ -764,6 +780,7 @@ const updatesPart = {
           ['Deleted unless confirmed in', expires],
         ]),
         r.model && s.model && r.model !== s.model ? msg('bad', 'This package is for a ' + s.model + ', but the receiver is a ' + r.model + '. The station will refuse it.') : null,
+        xl ? crossLayoutMsg(!!staged.cross_layout_allowed) : null,
         downtimeRows(staged.expected_downtime_s, staged.budget_left_s),
         fExp.el,
         shaOk.el,

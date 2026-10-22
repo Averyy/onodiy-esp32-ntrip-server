@@ -15,8 +15,8 @@
 # interrupted update stays report-only (it logs what it would send) until
 # the journal-state bench test passes; then add
 # CONFIG_UM98X_FLASH_RECOVERY_ACTIONS=y for its second half. The 115200
-# entry fallback and cross-layout packages stay off until their own bench
-# tests pass.
+# entry fallback stays off until its own bench test passes; cross-layout
+# packages are on (UM980 11833 to 23980 tested).
 #
 # It also holds the receiver's first configuration until the user confirms
 # it (as sdkconfig.hold): a device whose profile was never applied and whose

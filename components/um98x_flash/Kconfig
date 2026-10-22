@@ -50,13 +50,14 @@ menu "Station: receiver flasher"
     config UM98X_FLASH_CROSS_LAYOUT
         bool "Allow packages with another partition layout (with their own confirmation)"
         depends on UM98X_FLASH_ENABLE
-        default n
+        default y
         help
             A package whose partition table differs from the one of the
             receiver's current build moves receiver flash regions. Refused
             while off; when on, such a package still needs its own explicit
-            confirmation. Off until a layout change is tested on hardware.
-            PROVISIONAL, to be confirmed on hardware.
+            confirmation. Tested on hardware: a UM980 from build 11833 to
+            23980 (the NTRIP-X, 2026-10-22). A UM982 layout change is not
+            tested yet.
 
     config UM98X_FLASH_BYTE_CAPTURE
         bool "Capture every receiver byte (bench builds)"

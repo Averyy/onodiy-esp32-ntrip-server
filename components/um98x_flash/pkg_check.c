@@ -112,6 +112,11 @@ int pkg_layout_for_build(uint32_t build)
     return -1;
 }
 
+bool pkg_layout_differs(int pkg_layout, uint32_t receiver_build)
+{
+    return !same_layout(pkg_layout, pkg_layout_for_build(receiver_build));
+}
+
 /* Index of the known table equal to the 72 table bytes, -1 none; among equal ones, the first of `model` (NULL: any). */
 static int layout_of_table(const uint8_t *t, const char *model)
 {
@@ -532,8 +537,7 @@ uint8_t pkg_check(const uint8_t *pkg, uint32_t len, const pkg_check_in_t *in, pk
         }
     }
     /* Rule 12 (and the cross-layout fact, also shown in recovery). */
-    int cur = pkg_layout_for_build(in->receiver_build);
-    out->cross_layout = !same_layout(out->facts.layout, cur);
+    out->cross_layout = pkg_layout_differs(out->facts.layout, in->receiver_build);
     if (r == 0 && !in->recovery) {
         if (in->package_build == 0) {
             r = fail(out, 12, "package build unknown");

@@ -420,6 +420,21 @@ bool um98x_flash_enabled(void)
     return CONFIG_UM98X_FLASH_ENABLE != 0;
 }
 
+bool um98x_flash_cross_layout_allowed(void)
+{
+    return CONFIG_UM98X_FLASH_CROSS_LAYOUT != 0;
+}
+
+bool um98x_flash_build_cross_layout(uint32_t pkg_build, uint32_t receiver_build)
+{
+    return pkg_layout_differs(pkg_layout_for_build(pkg_build), receiver_build);
+}
+
+bool um98x_flash_pkg_cross_layout(int8_t pkg_layout, uint32_t receiver_build)
+{
+    return pkg_layout_differs(pkg_layout, receiver_build);
+}
+
 static bool sha_of(const uint8_t *data, uint32_t len, uint8_t out[32])
 {
     psa_hash_operation_t op = psa_hash_operation_init();

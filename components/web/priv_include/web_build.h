@@ -395,6 +395,8 @@ typedef struct {
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
     const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
+    bool cross_layout_allowed;     /**< um98x_flash_cross_layout_allowed() */
+    bool latest_cross_layout;      /**< the offered receiver build changes the receiver's partition layout (rule 12) */
     const char (*rolled_back)[32]; /**< fw_update_get_rolled_back(), newest first */
     size_t rolled_back_count;
     uint32_t app_max_bytes;        /**< size of the app slot an upload or install writes (0 = unknown: null) */
@@ -421,6 +423,8 @@ typedef struct {
     uint32_t budget_left_s;        /**< UINT32_MAX = null */
     bool flash_available;
     const char *flash_reason;      /**< why not (station_flash_reason); NULL = not_enabled_in_build */
+    bool cross_layout;             /**< the package changes the receiver's partition layout (rule 12) */
+    bool cross_layout_allowed;     /**< um98x_flash_cross_layout_allowed() */
 } web_staged_snap_t;
 
 /** POST/GET /api/upload/gnss. */

@@ -1,16 +1,16 @@
 # UM980 GNSS firmware
 
 Unicore UM980 receiver firmware packages. The station checks them by the same rules as
-the UM982's, with the UM980's own marks, and takes one only for a UM980 receiver. None
-has been flashed on hardware yet, and receiver flashing stays off in station builds
-until it has (as for the UM982). Releases carry 11833 and 23980
-([`firmware/release-packages.txt`](../release-packages.txt)). 11833 is the build the
-NTRIP-X ships with: an update never goes down a build, so the first test installs the same
-build again (uploaded by hand) and keeps 23980 for later. The update banner offers the
-highest build above the receiver's, so a receiver on 11833 is offered 23980. That is a
-cross-layout update (another partition table: the type-4 backup address), which the
-station refuses until such updates have been tested on a board
-(`CONFIG_UM98X_FLASH_CROSS_LAYOUT`) and the user confirms it.
+the UM982's, with the UM980's own marks, and takes one only for a UM980 receiver. Tested
+on hardware (the NTRIP-X, 2026-10-22, bench builds): 11833 installed again over 11833,
+then 11833 to 23980, the first update with another partition layout (the type-4 backup
+address). 23980 reports itself as `R4.10Build23980M`; the station compares the build
+number. Receiver flashing stays off in release builds until it is turned on for them
+(`CONFIG_UM98X_FLASH_ENABLE`). Releases carry 11833 and 23980
+([`firmware/release-packages.txt`](../release-packages.txt)). An update never goes down
+a build. The update banner offers the highest build above the receiver's; a
+cross-layout update (11833 or 10110 to 23980 or 25735) needs its own tick in the dialog
+(`CONFIG_UM98X_FLASH_CROSS_LAYOUT`, on by default).
 
 | Build | Built (the package's block date stamps) | SHA-256 |
 |---|---|---|
