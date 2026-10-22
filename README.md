@@ -17,10 +17,10 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 
 <table width="100%">
 <tr>
-<td align="center" width="14%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
-<td align="center" width="26%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
-<td align="center" width="48%"><img src="docs/images/ntrip-x.png" width="50%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
-<td align="center" width="12%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
+<td align="center" width="20%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
+<td align="center" width="38%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
+<td align="center" width="24%"><img src="docs/images/ntrip-x.png" width="100%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
+<td align="center" width="18%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
