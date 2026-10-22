@@ -1166,6 +1166,12 @@ function journalDetail(e) {
       if (ev === 4) return 'Sea level, ' + metresText(up) + ' off';
       return 'event ' + ev;
     }
+    case 'rx_query': {
+      /* a: the command (ASK order, as um98x_query_t) and its outcome; b: how long the NTRIP servers paused (ms) */
+      const q = ASK[a & 0xff], res = ['answered', 'refused', 'no answer', 'not sent'][(a >> 8) & 0xff];
+      return (q ? q[0] : 'Query ' + (a & 0xff)) + ': ' + (res || 'outcome ' + ((a >> 8) & 0xff)) +
+        (b > 0 ? ', NTRIP servers paused for ' + fmt.ms(b) : '');
+    }
     case 'live_view': {
       /* A record of a session not loaded whole (journalItems makes a whole session one row) */
       const ev = a & 0xff, detail = (a >> 8) & 0xff;
@@ -1208,7 +1214,7 @@ const EV_FILTER = [
   ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop', 'rover_connect', 'rover_disconnect']],
   ['wifi', 'Wi-Fi', ['wifi_disconnect', 'wifi_up', 'wifi_roam']],
   ['updates', 'Updates', ['app_update', 'app_revert', 'gnss_flash']],
-  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check']],
+  ['receiver', 'Receiver', ['rx_maintenance', 'live_view', 'sg_test', 'fixed_check', 'rx_query']],
   ['loss', 'Data loss', ['data_loss']],
 ];
 
@@ -1305,7 +1311,7 @@ function journalItems(entries, atStart, kinds) {
         rows.push(Object.assign(when, { k: e.kind + '|' + c[1], seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
       } else {
         /* A recovery step under its recovery's name ("Receiver recovery"); a start and an end (maintenance, the sky) never fold together. */
-        const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' ? e.a :
+        const sub = e.kind === 'ladder_step' || e.kind === 'rx_maintenance' || e.kind === 'data_loss' || e.kind === 'rx_query' ? e.a :
           e.kind === 'live_view' || e.kind === 'sg_test' || e.kind === 'fixed_check' ? e.a & 0xff :
           e.kind === 'wifi_roam' ? e.a >>> 16 : '';
         const loss = e.kind === 'data_loss' ? (J.loss[e.a] || [e.a >= 16 ? slotName(e.a - 16) + ' data lost' : null])[0] : null;

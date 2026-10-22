@@ -16,6 +16,12 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Receiver settings: correction messages "Smaller (MSM4)", Onocoy's list with MSM4
   observations (about 40% less data, for a slow link or a server with a rate limit),
   next to "Recommended (MSM7)", the default.
+- Receiver settings: "Ask the receiver" sends one read-only command (VERSIONA, CONFIG,
+  MODE, ANT1GROUPA, BASEPOSA or SPPNAVA) and shows the receiver's answer as it came.
+  Nothing on the list changes the receiver. CONFIG and ANT1GROUPA pause the NTRIP
+  servers for about a second. Each question is listed on Logs.
+- Signals: a refused message 1230 now says what it costs beyond Onocoy: rovers of other
+  brands get less from GLONASS.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
   Wi-Fi). NTRIP-X (GNS Electronics) support, in testing: its own install with 8 MB
   flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on GPIO16/15,

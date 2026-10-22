@@ -265,6 +265,15 @@ web_err_t web_maint_refusal(station_maint_why_t why, bool safe_mode, const char 
 /** Error of a refused POST /api/gnss/live (station_live_why_t): journal_open (receiver update), safe_mode, else internal. */
 web_err_t web_live_refusal(station_live_why_t why, bool safe_mode);
 
+/** POST /api/gnss/query refused: the error for station_query_start's reason. */
+web_err_t web_query_refusal(station_query_why_t why);
+
+/**
+ * GET /api/gnss/query: the last query (q) with its reply text (state done),
+ * and the list of commands to ask.
+ */
+void web_build_query(wj_t *w, const station_query_status_t *q, const char *text);
+
 /** Live view window limits (the station's Kconfig). */
 typedef struct {
     uint32_t default_min;          /**< CONFIG_STATION_LIVE_VIEW_MIN */

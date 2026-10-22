@@ -103,7 +103,7 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  noRx: a => [noReceiverText(a[0], a[1]), noReceiverLead(a[0], a[1]), alertText(a[0], { link: a[1] })[1]],\n' +
   '  notEnabled: a => { S.status = a[0]; const r = notEnabled(a[1]); S.status = null; return r; },\n' +
-  '  pkgNeeded: p => packageNeededText(p), onocoySet: l => onocoySet(l), rtcmName: n => rtcmName(n),\n' +
+  '  pkgNeeded: p => packageNeededText(p), onocoySet: l => onocoySet(l), rtcmName: n => rtcmName(n), askLine: q => askLine(q),\n' +
   '  addrRows: a => { S.status = a[0]; const r = stationAddressRows(a[1]).map(x => x[0]); S.status = null; return r; },\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
@@ -1259,7 +1259,7 @@ def test_signals_card_headline_and_hints():
     assert line(unknown)[2] == ["warn", "Onocoy needs 4 bands: change the signal group in Receiver settings"]
     assert line(e6)[-1] == ["bad", "Galileo E6 lost: it was tracked before with this signal group"] and e6["ok"] is False
     assert line(glo)[-1] == ["warn", "No GLONASS: Onocoy's quality score needs it"]
-    assert line(r1230)[-1] == ["warn", "Message 1230 refused: GLONASS does not count for Onocoy"]
+    assert line(r1230)[-1] == ["warn", "Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it"]
 
 
 def test_times_have_no_space_before_their_unit():
@@ -2274,3 +2274,24 @@ def test_renamed_station_before_its_restart_is_no_name_conflict():
     assert out == [["Name", "Address"], ["Name", "", "Address"], ["Name", "Address"]]
     text = (UI_JS / "90-system.js").read_text()
     assert "if (body.hostname) setBrand(body.hostname);" in text
+
+
+def test_ask_the_receiver_says_what_was_asked_and_how_it_went():
+    done = {"state": "done", "command": "CONFIG", "result": "answered", "reason": "", "reply": "$CONFIG,...",
+            "cut": False, "lease_ms": 820, "age_s": 4}
+    refused = {**done, "command": "ANT1GROUPA", "result": "refused",
+               "reason": "PARSING FAILD NO MATCHING FUNC  ANT1GROUPA", "lease_ms": 300}
+    quiet = {**done, "command": "MODE", "result": "no_answer", "reason": "timeout", "lease_ms": 0}
+    out = run_ui([("askLine", {"state": "none"}), ("askLine", {"state": "waiting", "command": "VERSIONA"}),
+                  ("askLine", done), ("askLine", refused), ("askLine", quiet),
+                  ("journalDetail", {"kind": "rx_query", "a": 1, "b": 820}),
+                  ("journalDetail", {"kind": "rx_query", "a": 3 | (1 << 8), "b": 300}),
+                  ("journalDetail", {"kind": "rx_query", "a": 0 | (2 << 8), "b": 0})])
+    assert out[0] is None
+    assert out[1] == "Asking VERSIONA…"
+    assert out[2] == "CONFIG: Answered, 4s ago. The NTRIP servers paused for 820ms."
+    assert out[3].startswith("ANT1GROUPA: Refused (PARSING FAILD NO MATCHING FUNC  ANT1GROUPA), 4s ago.")
+    assert out[4] == "MODE: No answer (timeout), 4s ago."   # no lease: no pause to mention
+    assert out[5] == "CONFIG: answered, NTRIP servers paused for 820ms"
+    assert out[6] == "ANT1GROUPA: refused, NTRIP servers paused for 300ms"
+    assert out[7] == "VERSIONA: no answer"

@@ -577,6 +577,32 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len)
     return to_esp_err(res);
 }
 
+esp_err_t um98x_ctl_query(gnss_link_lease_t lease, unsigned q, char *text, size_t cap, char *reason, size_t reason_len)
+{
+    if (text != NULL && cap > 0) {
+        text[0] = '\0';
+    }
+    if (reason != NULL && reason_len > 0) {
+        reason[0] = '\0';
+    }
+    const char *cmd = um98x_query_command(q);
+    if (cmd == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (lease == NULL && um98x_query_leased(q)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = call_begin(lease, cmd);
+    if (err != ESP_OK) {
+        return err;
+    }
+    call_t c;
+    call_setup(&c, lease);
+    um98x_res_t res = um98x_exec_query(&c.ex, q, text, cap, reason, reason_len);
+    call_end();
+    return to_esp_err(res);
+}
+
 esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_own_fix_t *out)
 {
     if (out == NULL) {

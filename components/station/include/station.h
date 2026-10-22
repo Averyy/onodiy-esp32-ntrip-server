@@ -918,6 +918,63 @@ esp_err_t station_live_view_touch(void);
 /** Close the live view now (the output is turned off at the next free moment). ESP_ERR_NOT_FOUND when none is open. */
 esp_err_t station_live_view_stop(void);
 
+/* ---- the user's receiver queries ("Ask the receiver") ---------------------------
+ *
+ * One read-only query from a fixed list (um98x_query.h) at a time; the
+ * station sends it at its next free moment while the receiver streams and
+ * keeps the reply lines as text until the next query. The configuration
+ * dump and the signal-group query take the COMMAND lease (the casters
+ * pause for about a second, planned); the others go out without one. Each
+ * query that ran is journalled (DIAG_EV_RX_QUERY). Nothing on the list
+ * changes the receiver.
+ */
+
+#define STATION_QUERY_TEXT_MAX 8192u   /**< reply text kept (bytes, with the terminator); longer replies are cut */
+
+typedef enum {
+    STATION_QUERY_NONE = 0,          /**< none this boot */
+    STATION_QUERY_WAITING,           /**< queued: the station sends it at its next free moment */
+    STATION_QUERY_RUNNING,
+    STATION_QUERY_DONE,
+} station_query_state_t;
+
+typedef enum {
+    STATION_QUERY_OK = 0,            /**< answered: the text is the reply */
+    STATION_QUERY_REFUSED,           /**< the receiver refused it (reason: its words) */
+    STATION_QUERY_NO_ANSWER,         /**< no answer, or no log after the acknowledgement */
+    STATION_QUERY_NOT_RUN,           /**< not sent: the station had no free moment within 30 s, maintenance began, or the link was busy */
+} station_query_result_t;
+
+typedef enum {
+    STATION_QUERY_WHY_NONE = 0,
+    STATION_QUERY_WHY_BUSY,          /**< a query is queued or runs */
+    STATION_QUERY_WHY_NOT_RUNNING,   /**< safe mode, or the station does not run */
+    STATION_QUERY_WHY_MAINTENANCE,
+    STATION_QUERY_WHY_JOURNAL,       /**< a receiver update session is open */
+    STATION_QUERY_WHY_NOT_STREAMING, /**< the receiver does not stream */
+    STATION_QUERY_WHY_UNSUPPORTED,   /**< an identified receiver of a model this firmware does not configure */
+} station_query_why_t;
+
+typedef struct {
+    uint8_t state;                   /**< station_query_state_t */
+    uint8_t query;                   /**< um98x_query_t (state != NONE) */
+    uint8_t result;                  /**< station_query_result_t (DONE) */
+    bool cut;                        /**< the reply filled the text buffer: lines are missing at the end */
+    uint32_t lease_ms;               /**< DONE: how long the casters paused for it (0 = no lease) */
+    uint32_t age_ms;                 /**< DONE: since it ended */
+    int64_t ended_unix;              /**< DONE: when, 0 without a trusted clock */
+    char reason[64];                 /**< DONE and not OK: the receiver's refusal, "timeout", or why it did not run */
+} station_query_status_t;
+
+/** Queue query q (um98x_query_t). ESP_OK; ESP_ERR_INVALID_ARG (not on the list); ESP_ERR_INVALID_STATE with why. */
+esp_err_t station_query_start(unsigned q, station_query_why_t *why);
+
+/**
+ * The last query: its status, and with state DONE its reply text (up to
+ * cap - 1 bytes; text may be NULL). Other states leave text empty.
+ */
+esp_err_t station_query_get(station_query_status_t *out, char *text, size_t cap);
+
 /* ---- signal-group comparison ----------------------------------------------------
  *
  * The user's comparison of two signal groups (station_sgt.h): each is

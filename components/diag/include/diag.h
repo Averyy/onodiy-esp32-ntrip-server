@@ -293,7 +293,21 @@ typedef enum {
      * holds (a start is rare; each one should show why the link is off).
      */
     DIAG_EV_BOARD = 28,
+    /**
+     * The user's receiver query ran (station.h, "Ask the receiver"):
+     * a = the query (um98x_query_t, bits 0-7) | its outcome (diag_query_t,
+     * bits 8-15); b = how long the casters paused for it, ms (0 = no lease).
+     */
+    DIAG_EV_RX_QUERY = 29,
 } diag_event_t;
+
+/** DIAG_EV_RX_QUERY outcomes (bits 8-15 of `a`). */
+typedef enum {
+    DIAG_QUERY_ANSWERED = 0,
+    DIAG_QUERY_REFUSED = 1,      /**< the receiver refused it */
+    DIAG_QUERY_NO_ANSWER = 2,
+    DIAG_QUERY_NOT_SENT = 3,     /**< the link was busy */
+} diag_query_t;
 
 /** DIAG_EV_FIXED_POS events (low byte of `a`). */
 typedef enum {

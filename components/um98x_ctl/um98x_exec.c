@@ -10,6 +10,7 @@
 #include "um98x_bands.h"
 #include "um98x_base.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 
 /* Loader menu item that restarts the receiver's application. */
 #define LOADER_RESTART_KEY "6"
@@ -595,6 +596,73 @@ um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_
     copy_str(body, sizeof(body), ex->ch->txn.own_body);
     unlock(ex);
     return um98x_own_fix_parse(body, strlen(body), out) ? UM98X_OK : UM98X_E_FAILED;
+}
+
+/* The user's queries (um98x_query.h): each completes on the reply its kind reads. */
+static const struct {
+    const char *cmd;
+    um98x_txn_kind_t kind;
+    bool leased;
+} k_queries[UM98X_QUERY_COUNT] = {
+    [UM98X_QUERY_VERSION] = { UM98X_CMD_VERSION, UM98X_TXN_VERSION, false },
+    [UM98X_QUERY_CONFIG] = { UM98X_CMD_CONFIG, UM98X_TXN_CONFIG, true },
+    [UM98X_QUERY_MODE] = { UM98X_CMD_MODE, UM98X_TXN_MODE, false },
+    [UM98X_QUERY_GROUPS] = { UM98X_CMD_GROUPS, UM98X_TXN_GROUPS, true },
+    [UM98X_QUERY_BASEPOS] = { UM98X_CMD_BASEPOS, UM98X_TXN_OWNPOS, false },
+    [UM98X_QUERY_SPPNAV] = { UM98X_CMD_SPPNAV, UM98X_TXN_OWNPOS, false },
+};
+
+const char *um98x_query_command(unsigned q)
+{
+    return q < UM98X_QUERY_COUNT ? k_queries[q].cmd : NULL;
+}
+
+bool um98x_query_leased(unsigned q)
+{
+    return q < UM98X_QUERY_COUNT && k_queries[q].leased;
+}
+
+int um98x_query_find(const char *cmd)
+{
+    if (cmd == NULL) {
+        return -1;
+    }
+    while (*cmd == ' ') {
+        cmd++;
+    }
+    size_t n = strlen(cmd);
+    while (n > 0 && cmd[n - 1] == ' ') {
+        n--;
+    }
+    char word[16];
+    if (n == 0 || n >= sizeof(word)) {
+        return -1;
+    }
+    memcpy(word, cmd, n);
+    word[n] = '\0';
+    for (unsigned q = 0; q < UM98X_QUERY_COUNT; q++) {
+        if (word_is(word, k_queries[q].cmd)) {
+            return (int)q;
+        }
+    }
+    return -1;
+}
+
+um98x_res_t um98x_exec_query(um98x_exec_t *ex, unsigned q, char *text, size_t cap, char *reason, size_t reason_cap)
+{
+    if (reason != NULL && reason_cap > 0) {
+        reason[0] = '\0';
+    }
+    if (text != NULL && cap > 0) {
+        text[0] = '\0';
+    }
+    if (q >= UM98X_QUERY_COUNT) {
+        return UM98X_E_ARG;
+    }
+    um98x_txn_opts_t o = { .text = text, .text_cap = text != NULL ? cap : 0 };
+    um98x_txn_status_t st = um98x_exec_txn(ex, k_queries[q].kind, k_queries[q].cmd, &o);
+    txn_reason(ex, st, reason, reason_cap);
+    return um98x_res_from_txn(st);
 }
 
 um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason, size_t cap)

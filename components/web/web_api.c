@@ -67,6 +67,7 @@ EXT_RAM_BSS_ATTR static network_status_t s_net;
 EXT_RAM_BSS_ATTR static network_scan_entry_t s_scan[NETWORK_SCAN_MAX];
 EXT_RAM_BSS_ATTR static fw_update_status_t s_fw;
 EXT_RAM_BSS_ATTR static gnss_link_stats_t s_link;
+EXT_RAM_BSS_ATTR static char s_query_text[STATION_QUERY_TEXT_MAX];
 EXT_RAM_BSS_ATTR static gnss_obs_summary_t s_obs;
 EXT_RAM_BSS_ATTR static gnss_obs_msg_stat_t s_msgs[MSG_STATS_MAX];
 EXT_RAM_BSS_ATTR static gnss_obs_sat_t s_sky[SKY_MAX];
@@ -949,6 +950,43 @@ static esp_err_t h_live_post(web_req_t *r)
     }
     ESP_LOGI(TAG, "live view opened or extended by the user");
     return send_live(r->req);
+}
+
+static esp_err_t send_query(httpd_req_t *req)
+{
+    station_query_status_t q;
+    esp_err_t err = station_query_get(&q, s_query_text, sizeof(s_query_text));
+    if (err != ESP_OK) {
+        return web_send_internal(req, err);
+    }
+    web_resp_t resp;
+    resp_begin(&resp, req, 200);
+    web_build_query(&resp.w, &q, s_query_text);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_query_get(web_req_t *r)
+{
+    return send_query(r->req);
+}
+
+static esp_err_t h_query_post(web_req_t *r)
+{
+    unsigned q = 0;
+    web_bad_t b = { 0 };
+    if (!web_parse_query(r->body, &q, &b)) {
+        return bad(r->req, &b);
+    }
+    station_query_why_t why = STATION_QUERY_WHY_NONE;
+    esp_err_t err = station_query_start(q, &why);
+    if (err == ESP_ERR_INVALID_STATE) {
+        web_err_t e = web_query_refusal(why);
+        return e == WEB_ERR_INTERNAL ? web_send_internal(r->req, err) : web_send_err(r->req, e);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    return accepted(r->req);
 }
 
 static esp_err_t h_live_delete(web_req_t *r)
@@ -2569,6 +2607,8 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/gnss/live", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_get),
     ROUTE("/api/gnss/live", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_live_post),
     ROUTE("/api/gnss/live", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_live_delete),
+    ROUTE("/api/gnss/query", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_query_get),
+    ROUTE("/api/gnss/query", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_query_post),
     ROUTE("/api/gnss/detect", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_detect),
     ROUTE("/api/gnss/signal-test", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_sgt_get),
     ROUTE("/api/gnss/signal-test", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_sgt_post),

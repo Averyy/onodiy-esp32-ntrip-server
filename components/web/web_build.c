@@ -11,6 +11,7 @@
 #include "um98x_bands.h"
 #include "um98x_fixcheck.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 #include "web_enums.h"
 #include "web_parse.h"
 
@@ -1616,6 +1617,64 @@ web_err_t web_live_refusal(station_live_why_t why, bool safe_mode)
         return WEB_ERR_JOURNAL_OPEN;
     }
     return safe_mode ? WEB_ERR_SAFE_MODE : WEB_ERR_INTERNAL;
+}
+
+/* ---- receiver queries ------------------------------------------------------------------------------- */
+
+web_err_t web_query_refusal(station_query_why_t why)
+{
+    switch (why) {
+    case STATION_QUERY_WHY_BUSY:
+        return WEB_ERR_QUERY_RUNNING;
+    case STATION_QUERY_WHY_NOT_RUNNING:
+        return WEB_ERR_SAFE_MODE;
+    case STATION_QUERY_WHY_MAINTENANCE:
+        return WEB_ERR_RECEIVER_MAINTENANCE;
+    case STATION_QUERY_WHY_JOURNAL:
+        return WEB_ERR_JOURNAL_OPEN;
+    case STATION_QUERY_WHY_NOT_STREAMING:
+        return WEB_ERR_RECEIVER_NOT_STREAMING;
+    case STATION_QUERY_WHY_UNSUPPORTED:
+        return WEB_ERR_UNSUPPORTED_MODEL;
+    default:
+        return WEB_ERR_INTERNAL;
+    }
+}
+
+void web_build_query(wj_t *w, const station_query_status_t *q, const char *text)
+{
+    static const char *const states[] = { "none", "waiting", "running", "done" };
+    static const char *const results[] = { "answered", "refused", "no_answer", "not_sent" };
+    const bool done = q->state == STATION_QUERY_DONE;
+    wj_obj_open(w, NULL);
+    wj_str(w, "state", q->state < sizeof(states) / sizeof(states[0]) ? states[q->state] : "none");
+    wj_str_or_null(w, "command", q->state != STATION_QUERY_NONE ? um98x_query_command(q->query) : NULL);
+    if (done) {
+        wj_str(w, "result", q->result < sizeof(results) / sizeof(results[0]) ? results[q->result] : "not_sent");
+        wj_str(w, "reason", q->reason);
+        wj_str(w, "reply", text != NULL ? text : "");
+        wj_bool(w, "cut", q->cut);
+        wj_uint(w, "lease_ms", q->lease_ms);
+        wj_uint(w, "age_s", q->age_ms / 1000u);
+        wj_unix(w, "ended_unix", q->ended_unix);
+    } else {
+        wj_null(w, "result");
+        wj_null(w, "reason");
+        wj_null(w, "reply");
+        wj_bool(w, "cut", false);
+        wj_null(w, "lease_ms");
+        wj_null(w, "age_s");
+        wj_null(w, "ended_unix");
+    }
+    wj_arr_open(w, "commands");
+    for (unsigned i = 0; i < UM98X_QUERY_COUNT; i++) {
+        wj_obj_open(w, NULL);
+        wj_str(w, "command", um98x_query_command(i));
+        wj_bool(w, "pauses_servers", um98x_query_leased(i));
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
 }
 
 /* ---- live view ------------------------------------------------------------------------------------ */

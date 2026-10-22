@@ -296,6 +296,15 @@ um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason
  */
 um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_t *out);
 
+/**
+ * The user's query q (um98x_query.h): text gets the receiver's reply lines
+ * as they came ('\n'-separated, cut to fit), reason the refusal text,
+ * "timeout" or "link error" ("" on success). A log query the receiver
+ * acknowledged without its log ends as a timeout.
+ * @return OK, E_REJECTED, E_TIMEOUT, E_LINK, E_ARG (not on the list).
+ */
+um98x_res_t um98x_exec_query(um98x_exec_t *ex, unsigned q, char *text, size_t cap, char *reason, size_t reason_cap);
+
 typedef struct {
     uint32_t baud;              /**< where the receiver answered */
     bool saw_bytes;             /**< bytes arrived at some baud during the pass */

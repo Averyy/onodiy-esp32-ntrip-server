@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked` |
+| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -358,6 +358,8 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/gnss/live` | adm | Open or extend the live view | `station_live_view_start` |
 | DELETE | `/api/gnss/live` | adm | Close it | `station_live_view_stop` |
 | POST | `/api/gnss/detect` | adm | No receiver found: search again now | `station_request_detect` |
+| GET | `/api/gnss/query` | adm | Ask the receiver: the last answer, the commands | `station_query_get` |
+| POST | `/api/gnss/query` | adm | Ask the receiver one read-only command | `station_query_start` |
 | GET | `/api/gnss/signal-test` | adm | Signal-group comparison: state and results | `station_sg_test_get` |
 | POST | `/api/gnss/signal-test` | adm | Compare two signal groups | `station_sg_test_start` |
 | POST | `/api/gnss/signal-test/keep` | adm | Keep one of the two | `station_sg_test_keep` |
@@ -1247,6 +1249,51 @@ that runs already counts. `202 {"accepted": true}`. Errors:
 `409 safe_mode`. The UI offers it as "Check again" wherever it says no
 receiver was found (the Status page; Logs, Overview; the setup
 wizard's antenna check; the Receiver page).
+
+### Ask the receiver: `/api/gnss/query`
+
+One read-only command from a fixed list, its answer shown as the receiver
+sent it (`um98x_query.h`): `VERSIONA` (model, firmware build, serial),
+`CONFIG` (every setting), `MODE` (base mode), `ANT1GROUPA` (the signals the
+running signal group configures), `BASEPOSA` (base position), `SPPNAVA`
+(the receiver's own single-point solution). Nothing on the list changes the
+receiver: no configuring command, no rate (the logs are one-shot), no save.
+One at a time; the station sends it at its next free moment while the
+receiver streams, and one that has not gone out within 30 s (another
+session ran meanwhile) or when receiver maintenance begins is dropped
+(`not_sent`). `CONFIG` and `ANT1GROUPA` take the station's COMMAND lease:
+the NTRIP servers pause for it, about a second, planned (the ledger counts
+it so); the others go out without a lease, as the station's own queries
+do. Each query that ran is journalled (`rx_query`). The UI offers it in
+Receiver settings ("Ask the receiver").
+
+#### `GET /api/gnss/query` (adm)
+
+```json
+{"state": "done", "command": "CONFIG", "result": "answered", "reason": "",
+ "reply": "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 2*..\n$CONFIG,MMP,CONFIG MMP ENABLE*..", "cut": false,
+ "lease_ms": 820, "age_s": 4, "ended_unix": 1792673989,
+ "commands": [{"command": "VERSIONA", "pauses_servers": false}, {"command": "CONFIG", "pauses_servers": true}]}
+```
+
+| Field | Notes |
+|---|---|
+| `state` | `none` (no query this boot), `waiting`, `running`, `done` |
+| `command` | the last query's command (`null` with `none`) |
+| `result` | with `done`: `answered`, `refused` (the receiver's words in `reason`), `no_answer` (`reason` `timeout`: nothing came, or an acknowledgement without its log), `not_sent` (`reason` says why); else `null` |
+| `reply` | with `done`: the receiver's reply lines, `\n`-separated, as they came (checksums included; at most 8191 bytes, `cut` true when it filled them); else `null` |
+| `lease_ms` | with `done`: how long the NTRIP servers paused for it (0 = no lease); else `null` |
+| `age_s`, `ended_unix` | with `done`: since it ended, and when (`null` without a trusted clock) |
+| `commands` | the list, in `um98x_query_t` order, with `pauses_servers` for the ones that take the lease |
+
+#### `POST /api/gnss/query` (adm)
+
+`{"command": "CONFIG"}` (one of the list, case-insensitive; else
+`400 invalid_field` `command`). `202 {"accepted": true}`; `GET` shows it.
+Errors: `409 query_running` (one is queued or runs), `409
+receiver_maintenance`, `409 journal_open`, `409 receiver_not_streaming`,
+`409 unsupported_model` (an identified receiver of a model this firmware
+does not configure), `409 safe_mode`.
 
 ### Signal-group comparison
 
@@ -2725,6 +2772,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `rx_boot` | after a power-on or brownout reset, whether the receiver kept running (`diag_rx_boot_t`): 1 kept running (only the ESP32 was reset, its reset pin, or only its supply dipped), 2 restarted with it (the power was cut, or dipped for both), 3 unknown; written once per power-on or brownout boot, when the station knows (`station.rx_boot` in `/api/health`); only a power-on boot's 2 counts toward `power_lost` | what told it (`diag_rx_boot_by_t`): 0 nothing, 1 its restart banner before any data, 2 its version log's time since its restart, 3 RTCM or NMEA at once |
 | `live_view` | event (bits 0-7: 1 opened, 2 extended, 3 closed, 4 satellite-in-view output on, 5 off) \| detail << 8 (closed: end reason; on/off: 0 accepted, 1 rejected, 2 no answer, 3 not sent) | opened: window s; extended: s left; closed: s open; on/off: ms the lease held RTCM back |
 | `sg_test` | signal groups: event (bits 0-7: 1 a comparison started, 2 it switched the receiver, 3 the receiver refused a signal group, in a comparison or any apply, 4 a comparison ended) \| master << 8 \| slave << 16 (started: the group measured first; switched: the group now running; refused: the refused group; ended: the group it ended on) | started: s per group; switched: the phase (0, 1); refused: `(master << 8) \| slave` of the group the profile went back to (-1 none); ended: the outcome (1 kept, 2 timed out, 3 cancelled, 4 rejected, 5 failed, 6 interrupted) |
+| `rx_query` | the user's receiver query (`/api/gnss/query`): the command (bits 0-7, `um98x_query_t`: 0 `VERSIONA`, 1 `CONFIG`, 2 `MODE`, 3 `ANT1GROUPA`, 4 `BASEPOSA`, 5 `SPPNAVA`) \| outcome << 8 (`diag_query_t`: 0 answered, 1 refused, 2 no answer, 3 not sent: the link was busy) | ms the NTRIP servers paused for it (0 = no lease) |
 | `fixed_check` | the fixed-position check: event (bits 0-7: 1 the fixed position is more than 50 m from the receiver's own solution, horizontally or in height: the `fixed_far` alert raised; 2 within the limits again: cleared; 3 the fixed position changed, or the profile surveys now, while it stood: cleared; 4 the fixed height is the receiver's height above sea level: the `fixed_far` alert raised, or its reason changed from event 1; event 1 after event 4 likewise) \| the fixed height minus the receiver's in m << 8 (signed, bits 8-31) | the horizontal distance in m (0 for event 3) |
 
 Enum numbers are the C values; the UI decodes them with the appendix
@@ -3287,7 +3335,7 @@ after it). The journal's `a` and `b` carry these C values.
 | `ledger_clock_t` | `none`, `sntp`, `gnss` |
 | `gnss_sys_t` | `gps`, `glonass`, `galileo`, `sbas`, `qzss`, `beidou`, `navic` |
 | `gnss_band_t` | `l1`, `l2`, `l5`, `l6`, `e5ab` |
-| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25, `rover_connect` = 26, `rover_disconnect` = 27, `board` = 28 |
+| `diag_event_t` | `boot`, `reboot`, `ladder_step`, `app_update`, `app_revert`, `gnss_flash`, `safe_mode`, `wifi_disconnect`, `data_loss`, `session`, `caster_down`, `caster_up`, `wifi_up`, `caster_stop` (1-14); `rx_maintenance` = 20, `live_view` = 21, `sg_test` = 22, `rx_boot` = 23, `fixed_check` = 24, `wifi_roam` = 25, `rover_connect` = 26, `rover_disconnect` = 27, `board` = 28, `rx_query` = 29 |
 | `station_sgt_state_t` | `idle`, `switching`, `settling`, `measuring`, `deciding`, `restoring` |
 | `station_sgt_outcome_t` | (none: `null`), `kept`, `timed_out`, `cancelled`, `rejected`, `failed`, `interrupted` |
 | `station_sgt_res_status_t` | `pending`, `measuring`, `done`, `rejected` |

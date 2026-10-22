@@ -91,6 +91,7 @@ typedef enum {
     WEB_ERR_POSITION_NOT_LOCKED,
     WEB_ERR_NO_RECEIVER,
     WEB_ERR_PACKAGE_NEEDED,
+    WEB_ERR_QUERY_RUNNING,
     WEB_ERR_COUNT,
 } web_err_t;
 

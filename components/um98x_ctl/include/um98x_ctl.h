@@ -34,7 +34,8 @@
  *    from the 1005 stream. The configuration dump CONFIG needs a COMMAND lease (several KB of text
  *    between epochs). um98x_ctl_command() rejects everything else without a
  *    lease with ESP_ERR_INVALID_STATE, so this layer never reconfigures the
- *    receiver behind the supervisor's back. Raw writes through
+ *    receiver behind the supervisor's back. The user's queries
+ *    (um98x_ctl_query) follow the same rules. Raw writes through
  *    gnss_link_write(NULL, ...) bypass that check; that only the station
  *    configures the receiver is a convention for them (see gnss_link.h).
  *  - The link's current mode decides as well: lease-free queries only in
@@ -118,6 +119,7 @@
 #include "um98x_base.h"
 #include "um98x_fixcheck.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -255,6 +257,18 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
  *         (link or lease: nothing sent, or a link error).
  */
 esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_own_fix_t *out);
+
+/**
+ * The user's query q (um98x_query.h, "Ask the receiver"): lease == NULL
+ * while streaming for the queries that need none, else the COMMAND lease.
+ * text gets the reply lines as the receiver sent them ('\n'-separated, cut
+ * to fit), reason the refusal text, "timeout" or "link error".
+ * @return ESP_OK, ESP_FAIL (refused), ESP_ERR_TIMEOUT (no answer, or no log
+ *         after the acknowledgement), ESP_ERR_INVALID_ARG (not on the
+ *         list), ESP_ERR_INVALID_STATE (no lease where one is needed, a link
+ *         error, another call holds the command layer).
+ */
+esp_err_t um98x_ctl_query(gnss_link_lease_t lease, unsigned q, char *text, size_t cap, char *reason, size_t reason_len);
 
 /**
  * Send one command and wait for its acknowledgement or data (rules above).

@@ -447,6 +447,7 @@ function pageParts(el) {
     buttons: v.filter(e => e.tagName === 'BUTTON' || (e.tagName === 'A' && (e.className || '').indexOf('btn') === 0)).map(e => e.textContent),
     rows: pairs,
     lines: v.filter(e => e.tagName === 'P').map(e => e.textContent),
+    pres: v.filter(e => e.tagName === 'PRE').map(e => e.textContent),
     trs: v.filter(e => e.tagName === 'TR').map(tr => tr.kids.map(k => k.textContent).join(' | ')),
     lis: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').length,
     /* The checkboxes by their label; the notes beside a button (why it waits); the correction messages' list. */
@@ -483,6 +484,7 @@ async function receiverPageView(c) {
     if (path === '/api/gnss/signal-test') return [200, c.test || { state: 'idle', groups: null, results: null, outcome: null }];
     if (path === '/api/gnss/live') return [200, c.live || { window: { open: false, last_end: 'none' } }];
     if (path === '/api/gnss/apply/preview') return [200, c.preview || { steps: [] }];
+    if (path === '/api/gnss/query') return m === 'POST' ? [202, { accepted: true }] : [200, c.query || { state: 'none' }];
     return [200, {}];
   };
   ui.setStatus(c.status);
@@ -2787,7 +2789,8 @@ def test_receiver_pages_show_everything_without_fold_outs():
     assert not any("commands" in t for t in held["dialog"]["lines"])
 
     settings = out["settings"]
-    assert settings["cards"] == ["Position", "Receiver profile", "Receiver setup", "Compare two signal groups"]
+    assert settings["cards"] == ["Position", "Receiver profile", "Receiver setup", "Compare two signal groups",
+                                 "Ask the receiver"]
     # Advanced closed: its title only; the Sky map box in view, under the signal groups.
     assert settings["subs"] == ["Signals", "Correction messages"]
     assert {"Group A", "Group B", "Time per group"} <= set(settings["fields"])
@@ -2830,11 +2833,11 @@ def test_receiver_pages_show_everything_without_fold_outs():
     # Manual setup cannot start one: no card and no link to it; nor the restart box.
     manual = out["settings_noant"]
     assert restart not in manual["checks"]
-    assert manual["cards"] == ["Position", "Receiver profile", "Receiver setup"]
+    assert manual["cards"] == ["Position", "Receiver profile", "Receiver setup", "Ask the receiver"]
     assert "Not sure? Compare two groups" not in manual["buttons"] and "Start comparison" not in manual["buttons"]
     # One that still runs stays, without a start form, with the way to it.
     still = out["manual_running"]
-    assert still["cards"][-1] == "Compare two signal groups" and "Stop" in still["buttons"]
+    assert still["cards"][-2:] == ["Compare two signal groups", "Ask the receiver"] and "Stop" in still["buttons"]
     assert "Not sure? Compare two groups" in still["buttons"] and "Group A" not in still["fields"]
 
     running = out["running"]
@@ -3239,3 +3242,25 @@ def test_update_banner_shows_on_the_status_page_too():
     assert not [n for n in home if n[0].startswith("onocoy_stopped")]
     assert not [n for n in ntrip_page if n[0].startswith("onocoy_stopped")]
     assert [n[0] for n in logs if n[0].startswith("onocoy_stopped")] == ["onocoy_stopped:0"]
+
+
+def test_ask_the_receiver_sends_the_chosen_command_and_shows_the_answer():
+    """Receiver settings' Ask the receiver: the last answer as the receiver sent it, with what was asked and how it
+    went; Ask posts the chosen command (VERSIONA first); the hint about the NTRIP servers' pause only for the commands
+    that take the lease."""
+    done = {"state": "done", "command": "CONFIG", "result": "answered", "reason": "",
+            "reply": "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 2*7A\n$CONFIG,MMP,CONFIG MMP ENABLE*1B", "cut": False,
+            "lease_ms": 820, "age_s": 4, "ended_unix": None,
+            "commands": [{"command": c, "pauses_servers": c in ("CONFIG", "ANT1GROUPA")}
+                         for c in ("VERSIONA", "CONFIG", "MODE", "ANT1GROUPA", "BASEPOSA", "SPPNAVA")]}
+    out = run_editor([rx_page("settings", st_status(), GNSS, SIG_MSGS, query=done, press="Ask"),
+                      rx_page("settings", st_status(), GNSS, SIG_MSGS)])
+    asked, fresh = out
+    assert "CONFIG: Answered, 4s ago. The NTRIP servers paused for 820ms." in asked["lines"]
+    assert asked["pres"] == ["$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 2*7A\n$CONFIG,MMP,CONFIG MMP ENABLE*1B"]
+    assert "Copy" in asked["buttons"] and "Command" in asked["fields"]
+    assert asked["pressed"] == [["POST", "/api/gnss/query", {"command": "VERSIONA"}]]
+    assert "The NTRIP servers pause for about a second while it answers." not in asked["hints"]   # VERSIONA: no lease
+    # Nothing asked yet: no answer box, no line.
+    assert fresh["pres"] == [] and "Copy" not in fresh["buttons"] and "Ask" in fresh["buttons"]
+    assert not any(t.startswith(("Asking", "VERSIONA:")) for t in fresh["lines"])

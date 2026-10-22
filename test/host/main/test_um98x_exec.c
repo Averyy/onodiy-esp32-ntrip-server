@@ -24,6 +24,7 @@
 #include "um98x_base.h"
 #include "um98x_exec.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 #include "um98x_test_vectors.h"
 #include "unity.h"
 
@@ -2326,4 +2327,76 @@ TEST_CASE("exec: the receiver's own position: either log, refused, or a log not 
     /* Only the two position logs. */
     TEST_ASSERT_EQUAL(UM98X_E_ARG, um98x_exec_own_fix(&s->ex, "BESTNAVA", &f));
     TEST_ASSERT_EQUAL_INT(0, count(s, "BESTNAVA"));
+}
+
+TEST_CASE("exec: the user's queries: the list, reply lines as text, refusals with the receiver's reason",
+          "[um98x_exec]")
+{
+    /* The list: exact commands only, never a configuring one. */
+    TEST_ASSERT_EQUAL_INT(UM98X_QUERY_CONFIG, um98x_query_find(" config "));
+    TEST_ASSERT_EQUAL_INT(UM98X_QUERY_GROUPS, um98x_query_find("ant1groupa"));
+    TEST_ASSERT_EQUAL_INT(-1, um98x_query_find("SAVECONFIG"));
+    TEST_ASSERT_EQUAL_INT(-1, um98x_query_find("CONFIG SIGNALGROUP 2"));
+    TEST_ASSERT_EQUAL_INT(-1, um98x_query_find("VERSIONA COM1 1"));
+    TEST_ASSERT_EQUAL_INT(-1, um98x_query_find(""));
+    TEST_ASSERT_EQUAL_INT(-1, um98x_query_find(NULL));
+    TEST_ASSERT_NULL(um98x_query_command(UM98X_QUERY_COUNT));
+    for (unsigned q = 0; q < UM98X_QUERY_COUNT; q++) {
+        const char *cmd = um98x_query_command(q);
+        TEST_ASSERT_NOT_NULL(cmd);
+        TEST_ASSERT_EQUAL_INT((int)q, um98x_query_find(cmd));
+        /* Lease-free exactly where the command layer lets it go out while streaming. */
+        TEST_ASSERT_EQUAL(!um98x_query_leased(q), um98x_stream_query_allowed(cmd));
+    }
+    TEST_ASSERT_TRUE(um98x_query_leased(UM98X_QUERY_CONFIG));
+    TEST_ASSERT_TRUE(um98x_query_leased(UM98X_QUERY_GROUPS));
+
+    sim_t *s = sim_init();
+    configured(s);
+    char text[2048];
+    char why[UM98X_REASON_MAX];
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_VERSION, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_NOT_NULL(strstr(text, "#VERSIONA,"));
+    TEST_ASSERT_EQUAL_STRING("", why);
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_CONFIG, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_NOT_NULL(strstr(text, "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 3 6*"));
+    TEST_ASSERT_NOT_NULL(strstr(text, "$CONFIG,RTCMB1CB2A"));
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_MODE, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_NOT_NULL(strstr(text, "MODE BASE 1234 TIME 600 0"));
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_GROUPS, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_NOT_NULL(strstr(text, "ANT1GROUPA"));
+
+    s->basepos = "SOL_COMPUTED,SINGLE,45.1000000,-75.2000000,80.000,-34.000,WGS84,1.200,1.100,2.300,\"0\",0.000,0.000,40,32";
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_BASEPOS, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_NOT_NULL(strstr(text, "BASEPOSA,COM1"));
+
+    /* Refused: the receiver's words, once (no resend), no text. */
+    TEST_ASSERT_EQUAL(UM98X_E_REJECTED,
+                      um98x_exec_query(&s->ex, UM98X_QUERY_SPPNAV, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING_LEN(SIM_REFUSAL, why, strlen(SIM_REFUSAL));
+    TEST_ASSERT_EQUAL_STRING("", text);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "SPPNAVA"));
+    s->groups = 1;
+    TEST_ASSERT_EQUAL(UM98X_E_REJECTED,
+                      um98x_exec_query(&s->ex, UM98X_QUERY_GROUPS, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING_LEN(SIM_REFUSAL, why, strlen(SIM_REFUSAL));
+
+    /* A reply longer than the buffer is cut, not lost. */
+    char small[24];
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query(&s->ex, UM98X_QUERY_CONFIG, small, sizeof(small), NULL, 0));
+    TEST_ASSERT_EQUAL_size_t(sizeof(small) - 1u, strlen(small));
+
+    /* No answer: a timeout, said so. */
+    s = sim_init();
+    s->present = false;
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_query(&s->ex, UM98X_QUERY_MODE, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING("timeout", why);
+
+    /* Not on the list: nothing sent. */
+    s = sim_init();
+    configured(s);
+    int sent = s->nrx;
+    TEST_ASSERT_EQUAL(UM98X_E_ARG,
+                      um98x_exec_query(&s->ex, UM98X_QUERY_COUNT, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_EQUAL_INT(sent, s->nrx);
 }

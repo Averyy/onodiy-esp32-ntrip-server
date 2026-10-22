@@ -9,6 +9,7 @@
 #include "cJSON.h"
 #include "station.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 #include "unity.h"
 #include "web_parse.h"
 
@@ -1023,5 +1024,29 @@ TEST_CASE("local caster refusals name the field: wrong type, too long, control c
     TEST_ASSERT_FALSE(lcast_put("{\"password\":\"secret123\",\"username\":7}", &c, &b));
     for (size_t i = 0; i < sizeof(c.password); i++) {
         TEST_ASSERT_EQUAL_HEX8(0, (uint8_t)c.password[i]);
+    }
+}
+
+TEST_CASE("receiver query: one command from the list, nothing else", "[web_parse]")
+{
+    unsigned q = 99;
+    web_bad_t b = { 0 };
+    cJSON *root = body("{\"command\":\"config\"}");
+    TEST_ASSERT_TRUE(web_parse_query(root, &q, &b));
+    TEST_ASSERT_EQUAL_UINT(UM98X_QUERY_CONFIG, q);
+    cJSON_Delete(root);
+    root = body("{\"command\":\"ANT1GROUPA\"}");
+    TEST_ASSERT_TRUE(web_parse_query(root, &q, &b));
+    TEST_ASSERT_EQUAL_UINT(UM98X_QUERY_GROUPS, q);
+    cJSON_Delete(root);
+    static const char *const bad_cmd[] = { "{}", "{\"command\":\"SAVECONFIG\"}", "{\"command\":\"FRESET\"}",
+                                           "{\"command\":\"CONFIG SIGNALGROUP 2\"}", "{\"command\":\"\"}",
+                                           "{\"command\":1}", "{\"command\":\"VERSIONA\\r\\nFRESET\"}" };
+    for (size_t i = 0; i < sizeof(bad_cmd) / sizeof(bad_cmd[0]); i++) {
+        root = body(bad_cmd[i]);
+        b = (web_bad_t){ 0 };
+        TEST_ASSERT_FALSE_MESSAGE(web_parse_query(root, &q, &b), bad_cmd[i]);
+        TEST_ASSERT_EQUAL_STRING("command", b.field);
+        cJSON_Delete(root);
     }
 }

@@ -307,7 +307,8 @@ const J = {
   kind: { boot: 'Start', session: 'Previous uptime', reboot: 'Restart', app_update: 'App update', app_revert: 'App rolled back',
     gnss_flash: 'Receiver update', safe_mode: 'Safe mode', data_loss: 'Data lost', rx_maintenance: 'Receiver maintenance',
     live_view: 'Sky view', sg_test: 'Signal groups', rx_boot: 'Receiver at the start', fixed_check: 'Fixed position',
-    wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected', board: 'Board' },
+    wifi_roam: 'Wi-Fi moved', rover_connect: 'Rover connected', rover_disconnect: 'Rover disconnected', board: 'Board',
+    rx_query: 'Receiver asked' },
   /* By C value, as the API names them (lifecycle_reset_class_t, lifecycle_reboot_reason_t). */
   resetClassKey: ['power_on', 'planned', 'crash', 'brownout', 'other'],
   rebootKey: ['none', 'user', 'factory_reset', 'admin_reset', 'app_update', 'app_revert', 'gnss_ladder', 'network_ladder',

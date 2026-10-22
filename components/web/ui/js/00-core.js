@@ -683,6 +683,7 @@ const ERR = {
   identity_unconfirmed: 'The receiver is not identified yet.',
   config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
   position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
+  query_running: 'The receiver is still answering the last question.',
 };
 
 /* Request fields as the forms label them, for "<label>: <rule>" refusals. */

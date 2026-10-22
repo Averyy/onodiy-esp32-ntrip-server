@@ -115,6 +115,13 @@ bool web_parse_maintenance(const cJSON *root, uint32_t *duration_s, web_bad_t *b
  */
 bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_bad_t *bad);
 
+/**
+ * POST /api/gnss/query: {"command": c}, c one of the receiver queries
+ * (um98x_query.h: VERSIONA, CONFIG, MODE, ANT1GROUPA, BASEPOSA, SPPNAVA;
+ * case-insensitive): *query its um98x_query_t.
+ */
+bool web_parse_query(const cJSON *root, unsigned *query, web_bad_t *bad);
+
 #define WEB_SG_TEST_PHASE_MIN_S     60u
 #define WEB_SG_TEST_PHASE_MAX_S     7200u
 #define WEB_SG_TEST_PHASE_DEFAULT_S 1800u

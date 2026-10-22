@@ -3988,3 +3988,96 @@ TEST_CASE("station core: NMEA sentences tell data from command-layer lines", "[s
     }
     TEST_ASSERT_FALSE(stn_line_is_nmea(NULL, 10));
 }
+
+TEST_CASE("station core: the user's query runs while streaming, pauses the casters only with a lease", "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    boot_applied(&w);
+    stn_take_notes(&w.s, (stn_note_t[STN_NOTES]){ 0 }, STN_NOTES);
+
+    /* Lease-free (the version query): the casters go on. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_query(&w.s, 0, false, w.in.now_ms));
+    TEST_ASSERT_TRUE(stn_query_pending(&w.s));
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_query(&w.s, 1, true, w.in.now_ms));   /* one at a time */
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_QUERY, j.kind);
+    TEST_ASSERT_EQUAL_UINT8(0, j.query);
+    TEST_ASSERT_FALSE(j.leased);
+    TEST_ASSERT_FALSE(w.s.paused);
+    TEST_ASSERT_TRUE(stn_query_pending(&w.s));   /* running */
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_query(&w.s, 1, true, w.in.now_ms));
+    sim_done(&w, &(stn_result_t){ .err = STN_OK });
+    TEST_ASSERT_FALSE(stn_query_pending(&w.s));
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_QUERY, &n));
+    TEST_ASSERT_EQUAL_INT32(0, n.a);
+    TEST_ASSERT_EQUAL_INT32(STN_OK, n.b);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+
+    /* With the lease (the configuration dump): a planned pause, journalled with its length. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_query(&w.s, 1, true, w.in.now_ms));
+    j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_QUERY, j.kind);
+    TEST_ASSERT_EQUAL_UINT8(1, j.query);
+    TEST_ASSERT_TRUE(j.leased);
+    TEST_ASSERT_TRUE(w.s.paused);
+    stn_result_t r = res(STN_E_FAIL);
+    r.lease_ms = 700;
+    sim_done(&w, &r);
+    TEST_ASSERT_FALSE(w.s.paused);
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_QUERY, &n));
+    TEST_ASSERT_EQUAL_INT32(700, n.a);
+    TEST_ASSERT_EQUAL_INT32(STN_E_FAIL | (1 << 8), n.b);
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+}
+
+TEST_CASE("station core: the user's query: refused unless streaming, dropped by maintenance or when it waits too long",
+          "[station]")
+{
+    sim_t w;
+    sim_init(&w, false);
+    sim_start(&w);
+    TEST_ASSERT_NOT_EQUAL(STN_STREAMING, w.s.state);
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_query(&w.s, 0, false, w.in.now_ms));
+
+    boot_applied(&w);
+    stn_take_notes(&w.s, (stn_note_t[STN_NOTES]){ 0 }, STN_NOTES);
+
+    /* Maintenance begins with one queued: dropped, nothing runs. */
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_query(&w.s, 2, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_MAINT_OK, stn_maint_enter(&w.s, 900, false, w.in.now_ms));
+    TEST_ASSERT_FALSE(stn_query_pending(&w.s));
+    stn_note_t n;
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_QUERY_DROPPED, &n));
+    TEST_ASSERT_EQUAL_INT32(2, n.b & 0xFF);
+    uint16_t seq = w.s.query_seq;
+    TEST_ASSERT_EQUAL_INT32(seq, n.b >> 8);   /* which request it is about */
+    TEST_ASSERT_EQUAL(STN_E_STATE, stn_request_query(&w.s, 0, false, w.in.now_ms));
+    TEST_ASSERT_EQUAL(STN_OK, stn_maint_end(&w.s, &w.in));
+
+    /* Queued while another job runs that outlasts the wait: dropped, never sent late. */
+    for (int i = 0; i < 120 && w.s.state != STN_STREAMING; i++) {
+        stn_job_t j = sim_until_job(&w, 1);
+        if (j.kind != STN_JOB_NONE) {
+            sim_done(&w, &(stn_result_t){ .err = STN_OK, .supported = true, .static_ok = true });
+        }
+    }
+    TEST_ASSERT_EQUAL(STN_STREAMING, w.s.state);
+    stn_take_notes(&w.s, (stn_note_t[STN_NOTES]){ 0 }, STN_NOTES);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_query(&w.s, 0, false, w.in.now_ms));
+    stn_request_apply(&w.s);   /* the user's apply goes first */
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_TRUE(stn_query_pending(&w.s));
+    w.in.now_ms += STN_QUERY_WAIT_MS;
+    stn_result_t r = res(STN_OK);
+    r.answered = true;
+    sim_done(&w, &r);
+    j = sim_next(&w);
+    TEST_ASSERT_NOT_EQUAL(STN_JOB_QUERY, j.kind);
+    TEST_ASSERT_FALSE(stn_query_pending(&w.s));
+    TEST_ASSERT_TRUE(has_note(&w, STN_NOTE_QUERY_DROPPED, &n));
+    TEST_ASSERT_EQUAL_INT32(0, n.b & 0xFF);
+    TEST_ASSERT_EQUAL_INT32((uint16_t)(seq + 1u), n.b >> 8);
+}

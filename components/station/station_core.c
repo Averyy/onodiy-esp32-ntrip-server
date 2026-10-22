@@ -96,6 +96,16 @@ static void note(stn_t *s, stn_note_kind_t kind, int64_t a, int32_t b)
     n->b = b;
 }
 
+/* The user's query will not run: the caller says so. */
+static void query_drop(stn_t *s)
+{
+    if (s->query_want == 0) {
+        return;
+    }
+    note(s, STN_NOTE_QUERY_DROPPED, 0, (int32_t)((uint32_t)(s->query_want - 1u) | ((uint32_t)s->query_seq << 8)));
+    s->query_want = 0;
+}
+
 static uint32_t secs(int64_t ms)
 {
     if (ms <= 0) {
@@ -762,6 +772,17 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
         return sky;
     }
 
+    if (s->query_want != 0) {
+        stn_job_t q = make_job(STN_JOB_QUERY);
+        q.query = (uint8_t)(s->query_want - 1u);
+        q.leased = s->query_leased;
+        s->query_want = 0;
+        if (q.leased) {
+            s->paused = true;   /* the lease holds RTCM back: a short planned gap for the casters */
+        }
+        return q;
+    }
+
     if (s->mode_probe) {
         s->mode_probe = false;
         s->mode_probe_done = true;
@@ -1007,6 +1028,9 @@ stn_job_t stn_next(stn_t *s, const stn_in_t *in)
     fix_track(s, in);
     live_tick(s, in);
     flash_close_tick(s, in);
+    if (s->query_want != 0 && in->now_ms >= s->query_until_ms) {
+        query_drop(s);
+    }
     if (s->maint) {
         if (in->now_ms < s->maint_until_ms) {
             return none;   /* hands off: nothing is sent, nothing is decided */
@@ -1527,6 +1551,12 @@ void stn_done(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     case STN_JOB_OWN_FIX:
         done_own_fix(s, r, in);
         break;
+    case STN_JOB_QUERY:
+        if (s->job.leased) {
+            s->paused = false;
+        }
+        note(s, STN_NOTE_QUERY, r->lease_ms, (int32_t)r->err | (int32_t)((uint32_t)s->job.query << 8));
+        break;
     case STN_JOB_ASK:   /* its answer is a line like any other (stn_responding) */
     case STN_JOB_PKG_CHECK:
     default:
@@ -1606,6 +1636,23 @@ int stn_request_bench(stn_t *s)
     }
     s->bench_want = true;
     return STN_OK;
+}
+
+int stn_request_query(stn_t *s, uint8_t query, bool leased, int64_t now_ms)
+{
+    if (s->maint || flash_state(s) || s->state != STN_STREAMING || stn_query_pending(s)) {
+        return STN_E_STATE;
+    }
+    s->query_want = (uint8_t)(query + 1u);
+    s->query_leased = leased;
+    s->query_until_ms = now_ms + STN_QUERY_WAIT_MS;
+    s->query_seq++;
+    return STN_OK;
+}
+
+bool stn_query_pending(const stn_t *s)
+{
+    return s->query_want != 0 || (s->job_busy && s->job.kind == STN_JOB_QUERY);
 }
 
 int stn_request_pkg_check(stn_t *s)
@@ -2020,6 +2067,7 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
     s->maint_resumed = false;
     s->maint_end_unix = 0;
     drop_stale_requests(s);   /* queued ladder steps and automatic re-applies */
+    query_drop(s);            /* nothing is sent in maintenance */
     /* Listening only, as in the first seconds of a boot: the health
      * monitor's ladder stays suspended, no drift is judged. */
     s->state = STN_IDLE;

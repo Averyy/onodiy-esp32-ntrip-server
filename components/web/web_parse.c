@@ -9,6 +9,7 @@
 
 #include "station.h"
 #include "um98x_profile.h"
+#include "um98x_query.h"
 #include "web_enums.h"
 
 static bool fail(web_bad_t *bad, web_err_t err, const char *field)
@@ -462,6 +463,19 @@ bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_
         return invalid(bad, "minutes");
     }
     *minutes = m == M_OK ? (uint32_t)v : 0;
+    return true;
+}
+
+/* ---- receiver queries ------------------------------------------------------------------------- */
+
+bool web_parse_query(const cJSON *root, unsigned *query, web_bad_t *bad)
+{
+    const char *s = NULL;
+    int q = get_str(root, "command", 16, &s) == M_OK ? um98x_query_find(s) : -1;
+    if (q < 0) {
+        return invalid_rule(bad, "command", "one of VERSIONA, CONFIG, MODE, ANT1GROUPA, BASEPOSA, SPPNAVA");
+    }
+    *query = (unsigned)q;
     return true;
 }
 

@@ -9,6 +9,7 @@
 #include "cJSON.h"
 #include "unity.h"
 #include "um98x_bands.h"
+#include "um98x_query.h"
 #include "web_build.h"
 #include "web_enums.h"
 
@@ -939,17 +940,19 @@ TEST_CASE("journal names cover the connection-history and receiver kinds; the ga
     TEST_ASSERT_EQUAL(26, DIAG_EV_ROVER_UP);
     TEST_ASSERT_EQUAL(27, DIAG_EV_ROVER_DOWN);
     TEST_ASSERT_EQUAL(28, DIAG_EV_BOARD);
+    TEST_ASSERT_EQUAL(29, DIAG_EV_RX_QUERY);
 }
 
 TEST_CASE("journal: a move between access points is wifi_roam, a rover's session rover_connect and rover_disconnect, "
-          "the board choice board, the kinds after them unknown", "[web_build]")
+          "the board choice board, the user's receiver query rx_query, the kinds after them unknown", "[web_build]")
 {
     TEST_ASSERT_EQUAL_STRING("wifi_roam", web_diag_event_name(DIAG_EV_WIFI_ROAM));
     TEST_ASSERT_EQUAL_STRING("rx_boot", web_diag_event_name(DIAG_EV_RX_BOOT));
     TEST_ASSERT_EQUAL_STRING("rover_connect", web_diag_event_name(DIAG_EV_ROVER_UP));
     TEST_ASSERT_EQUAL_STRING("rover_disconnect", web_diag_event_name(DIAG_EV_ROVER_DOWN));
     TEST_ASSERT_EQUAL_STRING("board", web_diag_event_name(DIAG_EV_BOARD));
-    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_BOARD + 1));
+    TEST_ASSERT_EQUAL_STRING("rx_query", web_diag_event_name(DIAG_EV_RX_QUERY));
+    TEST_ASSERT_EQUAL_STRING("unknown", web_diag_event_name(DIAG_EV_RX_QUERY + 1));
 }
 
 TEST_CASE("the power-lost alert and the new network ladder reasons have API names", "[web_build]")
@@ -2987,4 +2990,70 @@ TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none"
         "\"server_avg\":[null,null],\"server_max\":[null,null],\"server_lost\":[null,null],"
         "\"rssi_avg\":[-79,null],\"cpu_avg\":[11,null],\"cpu_max\":[30,null],\"mem_min\":[97000,null]}",
         wj_text(&w));
+}
+
+/* ---- receiver queries ------------------------------------------------------------------------- */
+
+static cJSON *build_query(const station_query_status_t *q, const char *text)
+{
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_query(&w, q, text);
+    TEST_ASSERT_TRUE(wj_finish(&w));   /* one whole object, as the response writes it */
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    return root;
+}
+
+TEST_CASE("receiver query: the reply as text once done, the list with what pauses the servers", "[web_build]")
+{
+    station_query_status_t q = { 0 };
+    cJSON *root = build_query(&q, "");
+    TEST_ASSERT_EQUAL_STRING("none", cJSON_GetObjectItem(root, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(root, "command")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(root, "reply")));
+    const cJSON *cmds = cJSON_GetObjectItem(root, "commands");
+    TEST_ASSERT_EQUAL_INT(UM98X_QUERY_COUNT, cJSON_GetArraySize(cmds));
+    const cJSON *c1 = cJSON_GetArrayItem(cmds, UM98X_QUERY_CONFIG);
+    TEST_ASSERT_EQUAL_STRING("CONFIG", cJSON_GetObjectItem(c1, "command")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItem(c1, "pauses_servers")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItem(cJSON_GetArrayItem(cmds, UM98X_QUERY_VERSION), "pauses_servers")));
+    cJSON_Delete(root);
+
+    q.state = STATION_QUERY_WAITING;
+    q.query = UM98X_QUERY_MODE;
+    root = build_query(&q, "stale");
+    TEST_ASSERT_EQUAL_STRING("waiting", cJSON_GetObjectItem(root, "state")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("MODE", cJSON_GetObjectItem(root, "command")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(root, "reply")));
+    cJSON_Delete(root);
+
+    q.state = STATION_QUERY_DONE;
+    q.query = UM98X_QUERY_CONFIG;
+    q.result = STATION_QUERY_OK;
+    q.lease_ms = 820;
+    q.age_ms = 4500;
+    q.ended_unix = 1792673989;
+    root = build_query(&q, "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 2*7A\n$CONFIG,MMP,CONFIG MMP ENABLE*1B");
+    TEST_ASSERT_EQUAL_STRING("done", cJSON_GetObjectItem(root, "state")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("answered", cJSON_GetObjectItem(root, "result")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 2*7A\n$CONFIG,MMP,CONFIG MMP ENABLE*1B",
+                             cJSON_GetObjectItem(root, "reply")->valuestring);
+    TEST_ASSERT_EQUAL_INT(820, cJSON_GetObjectItem(root, "lease_ms")->valueint);
+    TEST_ASSERT_EQUAL_INT(4, cJSON_GetObjectItem(root, "age_s")->valueint);
+    TEST_ASSERT_FALSE(cJSON_IsTrue(cJSON_GetObjectItem(root, "cut")));
+    cJSON_Delete(root);
+
+    q.query = UM98X_QUERY_GROUPS;
+    q.result = STATION_QUERY_REFUSED;
+    snprintf(q.reason, sizeof(q.reason), "PARSING FAILD NO MATCHING FUNC  ANT1GROUPA");
+    root = build_query(&q, "");
+    TEST_ASSERT_EQUAL_STRING("refused", cJSON_GetObjectItem(root, "result")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("PARSING FAILD NO MATCHING FUNC  ANT1GROUPA", cJSON_GetObjectItem(root, "reason")->valuestring);
+    cJSON_Delete(root);
+
+    TEST_ASSERT_EQUAL(WEB_ERR_QUERY_RUNNING, web_query_refusal(STATION_QUERY_WHY_BUSY));
+    TEST_ASSERT_EQUAL(WEB_ERR_RECEIVER_NOT_STREAMING, web_query_refusal(STATION_QUERY_WHY_NOT_STREAMING));
+    TEST_ASSERT_EQUAL(WEB_ERR_RECEIVER_MAINTENANCE, web_query_refusal(STATION_QUERY_WHY_MAINTENANCE));
+    TEST_ASSERT_EQUAL_STRING("query_running", web_err_code(WEB_ERR_QUERY_RUNNING));
 }

@@ -284,6 +284,7 @@ extern "C" {
 #define STN_LIVE_MAX_MS        (60 * 60000)  /**< longest window, extensions included */
 #define STN_LIVE_IDLE_MS       120000        /**< closes when no admin client asked for it this long */
 #define STN_SKY_RETRY_MS       60000         /**< a failed "output off" is tried again after this */
+#define STN_QUERY_WAIT_MS      30000         /**< the user's query is dropped when it could not run within this */
 #define STN_SKY_OFF_TRIES      3             /**< then it is left on until the receiver restarts */
 #define STN_NOTES              8             /**< notes kept for the caller between two steps */
 #define STN_FIX_FIRST_MS       60000         /**< fixed-position check: first query after it was armed (a fix after a restart: under 30 s) */
@@ -344,6 +345,7 @@ typedef enum {
     STN_JOB_PKG_CHECK,       /**< no lease: check the staged package against every rule, send nothing */
     STN_JOB_OWN_FIX,         /**< no lease: the receiver's own position, one line (BASEPOSA, or SPPNAVA with sppnav) */
     STN_JOB_ASK,             /**< no lease: the version query to a receiver that never streamed, only to see that it answers */
+    STN_JOB_QUERY,           /**< the user's read-only query (um98x_query.h): with a COMMAND lease when `leased` (casters paused), else none */
 } stn_job_kind_t;
 
 /** What a STN_JOB_FLASH does. */
@@ -395,7 +397,7 @@ typedef enum {
 
 typedef struct {
     uint8_t kind;            /**< stn_job_kind_t */
-    bool leased;             /**< IDENTIFY: with a COMMAND lease (no model ever stored, no RTCM flowing) */
+    bool leased;             /**< IDENTIFY: with a COMMAND lease (no model ever stored, no RTCM flowing); QUERY: with the COMMAND lease */
     bool after_restart;      /**< IDENTIFY: restart mode (poll every second for 20 s) */
     bool full;               /**< DETECT: full baud list */
     bool listen_only;        /**< DETECT: nothing is transmitted (receiver at its loader) */
@@ -408,6 +410,7 @@ typedef struct {
     bool sky_on;             /**< SKY: turn the output on (else off) */
     uint8_t flash_kind;      /**< FLASH: stn_flash_kind_t */
     bool sppnav;             /**< OWN_FIX: ask the single-point log (the base-position log was refused or gave nothing usable) */
+    uint8_t query;           /**< QUERY: um98x_query_t */
 } stn_job_t;
 
 /** Job outcome codes (the caller maps its errors). */
@@ -450,8 +453,8 @@ typedef struct {
      * (STN_WHY_SG_BACK; STN_WHY_SG_TEST for the comparison's own switch).
      */
     bool sg_back;
-    /* SKY */
-    uint32_t lease_ms;       /**< how long the lease held RTCM back */
+    /* SKY, QUERY */
+    uint32_t lease_ms;       /**< how long the lease held RTCM back (QUERY: 0 without a lease) */
     /* FLASH */
     uint8_t flash_end;       /**< stn_flash_end_t */
     bool loader_key_sent;    /**< the identification sent the loader's restart key (the boot's one) */
@@ -561,6 +564,9 @@ typedef enum {
     STN_NOTE_FIXED_CHANGED,  /**< it cleared: the fixed position changed (or the profile surveys now); checked again */
     STN_NOTE_FIXED_SEA_LEVEL, /**< STN_ALERT_FIXED_FAR raised (or kept) because the fixed height is the receiver's height
                                    above sea level (a, b as FIXED_FAR) */
+    STN_NOTE_QUERY,          /**< the user's query ran: a = lease length (ms, 0 = no lease), b = stn_err_t | query << 8 */
+    STN_NOTE_QUERY_DROPPED,  /**< the user's query did not run (not within STN_QUERY_WAIT_MS, or maintenance began): b = query
+                                  | its request's query_seq << 8 */
 } stn_note_kind_t;
 
 typedef struct {
@@ -691,6 +697,12 @@ typedef struct {
     uint8_t flash_want;        /**< stn_flash_kind_t queued (0 = none) */
     bool bench_want;
     bool check_want;
+
+    /* the user's query (one at a time) */
+    uint8_t query_want;        /**< queued: um98x_query_t + 1 (0 = none) */
+    bool query_leased;         /**< it needs the COMMAND lease */
+    int64_t query_until_ms;    /**< dropped when it has not run by then */
+    uint16_t query_seq;        /**< counts accepted requests: tells the caller which one a drop is about */
     uint8_t flash_close;       /**< 0 none, 1 after the re-apply's window, 2 after RTCM within STN_FLASH_RTCM_MS */
     int64_t flash_close_ms;    /**< the journal closes by then whatever happens */
     int64_t flash_rtcm_ms;     /**< close kind 2: RTCM is required by then */
@@ -819,6 +831,19 @@ int stn_request_bench(stn_t *s);
 
 /** Check the staged package only (STN_JOB_PKG_CHECK): not while a flash journal is open. */
 int stn_request_pkg_check(stn_t *s);
+
+/**
+ * The user's read-only query (STN_JOB_QUERY, um98x_query.h; leased: it
+ * needs the COMMAND lease, and the casters pause for it): STREAMING only,
+ * not in maintenance or with a flash journal open, one at a time (queued
+ * or running), else STN_E_STATE. It runs at the station's next free
+ * moment while streaming; one that has not run within STN_QUERY_WAIT_MS,
+ * or when maintenance begins, is dropped (STN_NOTE_QUERY_DROPPED).
+ */
+int stn_request_query(stn_t *s, uint8_t query, bool leased, int64_t now_ms);
+
+/** A user's query is queued or running. */
+bool stn_query_pending(const stn_t *s);
 
 /**
  * The user's "check again" in NO_RECEIVER: the next detection pass is due

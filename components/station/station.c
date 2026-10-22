@@ -337,6 +337,14 @@ EXT_RAM_BSS_ATTR static station_status_t s_sgt_st;   /* the status a start is ju
 static SemaphoreHandle_t s_sgt_mx;
 static esp_err_t sg_record_flush(int64_t now);
 
+/* The user's query (s_query_mx): its status, and the reply text, which the
+ * receiver's lines fill while it runs (read only once it is done). */
+EXT_RAM_BSS_ATTR static char s_query_text[STATION_QUERY_TEXT_MAX];
+static station_query_status_t s_query;
+static int64_t s_query_end_us;
+static uint16_t s_query_seq;   /* s_core.query_seq of the request s_query is about */
+static SemaphoreHandle_t s_query_mx;
+
 /* Receiver update sessions (station task, except where noted). */
 static station_flash_request_t s_flash_req;   /* the user's request (written under s_lock by the requester) */
 static uint32_t s_bench_stop_after;           /* bench: stop after this many blocks (under s_lock) */
@@ -1573,6 +1581,147 @@ static void job_own_fix(const stn_job_t *job, stn_result_t *r)
     }
 }
 
+/* ---- the user's queries ---------------------------------------------------------- */
+
+static void query_finish(uint8_t result, const char *reason, uint32_t lease_ms)
+{
+    xSemaphoreTake(s_query_mx, portMAX_DELAY);
+    s_query.state = STATION_QUERY_DONE;
+    s_query.result = result;
+    s_query.lease_ms = lease_ms;
+    s_query.ended_unix = unix_now();
+    s_query.cut = strlen(s_query_text) >= sizeof(s_query_text) - 1u;
+    snprintf(s_query.reason, sizeof(s_query.reason), "%s", reason != NULL ? reason : "");
+    s_query_end_us = esp_timer_get_time();
+    xSemaphoreGive(s_query_mx);
+}
+
+/* One read-only query from the user's list (um98x_query.h); the text fills
+ * as the receiver's lines arrive. */
+static void job_query(const stn_job_t *job, stn_result_t *r)
+{
+    xSemaphoreTake(s_query_mx, portMAX_DELAY);
+    s_query.state = STATION_QUERY_RUNNING;
+    s_query_text[0] = '\0';
+    xSemaphoreGive(s_query_mx);
+    const char *cmd = um98x_query_command(job->query);
+    int64_t t0 = esp_timer_get_time();
+    if (job->leased) {
+        if (lease_take("receiver query") != ESP_OK) {
+            r->err = STN_E_STATE;
+            query_finish(STATION_QUERY_NOT_RUN, "the receiver link was busy", 0);
+            return;
+        }
+        (void)um98x_ctl_session_begin(s_lease);
+    }
+    char reason[sizeof(s_query.reason)];
+    esp_err_t err = um98x_ctl_query(job->leased ? s_lease : NULL, job->query, s_query_text, sizeof(s_query_text),
+                                    reason, sizeof(reason));
+    uint32_t lease_ms = 0;
+    if (job->leased) {
+        lease_drop();
+        int64_t ms = (esp_timer_get_time() - t0) / 1000;
+        lease_ms = ms < 0 ? 0 : (ms > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)ms);
+    }
+    r->lease_ms = lease_ms;
+    uint8_t result;
+    switch (err) {
+    case ESP_OK:
+        r->err = STN_OK;
+        result = STATION_QUERY_OK;
+        break;
+    case ESP_FAIL:
+        r->err = STN_E_FAIL;
+        result = STATION_QUERY_REFUSED;
+        break;
+    case ESP_ERR_TIMEOUT:
+        r->err = STN_E_TIMEOUT;
+        result = STATION_QUERY_NO_ANSWER;
+        break;
+    default:
+        r->err = STN_E_STATE;
+        result = STATION_QUERY_NOT_RUN;
+        snprintf(reason, sizeof(reason), "not sent: %s", esp_err_to_name(err));
+        break;
+    }
+    ESP_LOGI(TAG, "the user's receiver query %s: %s%s%s", cmd != NULL ? cmd : "?",
+             result == STATION_QUERY_OK ? "answered" : result == STATION_QUERY_REFUSED ? "refused" : "no answer",
+             result == STATION_QUERY_OK ? "" : " ", result == STATION_QUERY_OK ? "" : reason);
+    query_finish(result, result == STATION_QUERY_OK ? "" : reason, lease_ms);
+}
+
+esp_err_t station_query_start(unsigned q, station_query_why_t *why)
+{
+    station_query_why_t w = STATION_QUERY_WHY_NONE;
+    if (why != NULL) {
+        *why = w;
+    }
+    if (um98x_query_command(q) == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_inited || !s_started || lifecycle_in_safe_mode()) {
+        w = STATION_QUERY_WHY_NOT_RUNNING;
+    } else {
+        xSemaphoreTake(s_query_mx, portMAX_DELAY);
+        portENTER_CRITICAL(&s_lock);
+        esp_err_t jerr = s_journal_err;
+        if (s_core.maint) {
+            w = STATION_QUERY_WHY_MAINTENANCE;
+        } else if (journal_open(jerr)) {
+            w = STATION_QUERY_WHY_JOURNAL;
+        } else if (stn_query_pending(&s_core)) {
+            w = STATION_QUERY_WHY_BUSY;
+        } else if (s_core.identity_ok && !s_core.supported) {
+            w = STATION_QUERY_WHY_UNSUPPORTED;
+        } else if (stn_request_query(&s_core, (uint8_t)q, um98x_query_leased(q), now_ms()) != STN_OK) {
+            w = STATION_QUERY_WHY_NOT_STREAMING;
+        }
+        uint16_t seq = s_core.query_seq;
+        portEXIT_CRITICAL(&s_lock);
+        if (w == STATION_QUERY_WHY_NONE) {
+            memset(&s_query, 0, sizeof(s_query));
+            s_query.state = STATION_QUERY_WAITING;
+            s_query.query = (uint8_t)q;
+            s_query_text[0] = '\0';
+            s_query_seq = seq;
+        }
+        xSemaphoreGive(s_query_mx);
+    }
+    if (why != NULL) {
+        *why = w;
+    }
+    if (w != STATION_QUERY_WHY_NONE) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    wake();
+    return ESP_OK;
+}
+
+esp_err_t station_query_get(station_query_status_t *out, char *text, size_t cap)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (text != NULL && cap > 0) {
+        text[0] = '\0';
+    }
+    if (s_query_mx == NULL) {
+        memset(out, 0, sizeof(*out));
+        return ESP_OK;
+    }
+    xSemaphoreTake(s_query_mx, portMAX_DELAY);
+    *out = s_query;
+    if (s_query.state == STATION_QUERY_DONE) {
+        int64_t ms = (esp_timer_get_time() - s_query_end_us) / 1000;
+        out->age_ms = ms < 0 ? 0 : (ms > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)ms);
+        if (text != NULL && cap > 0) {
+            snprintf(text, cap, "%s", s_query_text);
+        }
+    }
+    xSemaphoreGive(s_query_mx);
+    return ESP_OK;
+}
+
 /* The question to a receiver that sends no RTCM (none this boot, or its RTCM
  * stopped): the version query without a lease, only so that its answer (a
  * line like any other) keeps "the receiver answers" fresh. Logged when the
@@ -2244,6 +2393,9 @@ static void run_job(const stn_job_t *job, stn_result_t *r)
     case STN_JOB_ASK:
         job_ask(r);
         break;
+    case STN_JOB_QUERY:
+        job_query(job, r);
+        break;
     default:
         r->err = STN_E_STATE;
         break;
@@ -2624,6 +2776,39 @@ static void handle_notes(const stn_note_t *n, unsigned count)
             ESP_LOGI(TAG, "fixed position changed: its warning is cleared until it is checked again");
             journal_push(DIAG_EV_FIXED_POS, diag_fixed_a(DIAG_FIXED_CHANGED, 0), 0);
             break;
+        case STN_NOTE_QUERY: {
+            uint32_t q = ((uint32_t)x->b >> 8) & 0xFFu;
+            uint32_t res;
+            switch (x->b & 0xFF) {
+            case STN_OK:
+                res = DIAG_QUERY_ANSWERED;
+                break;
+            case STN_E_FAIL:
+                res = DIAG_QUERY_REFUSED;
+                break;
+            case STN_E_TIMEOUT:
+                res = DIAG_QUERY_NO_ANSWER;
+                break;
+            default:
+                res = DIAG_QUERY_NOT_SENT;
+                break;
+            }
+            journal_push(DIAG_EV_RX_QUERY, (int32_t)(q | (res << 8)), x->a);
+            break;
+        }
+        case STN_NOTE_QUERY_DROPPED: {
+            const char *cmd = um98x_query_command((unsigned)x->b & 0xFFu);
+            ESP_LOGW(TAG, "the user's receiver query %s not sent: the station had no free moment for it",
+                     cmd != NULL ? cmd : "?");
+            xSemaphoreTake(s_query_mx, portMAX_DELAY);
+            bool waiting = s_query.state == STATION_QUERY_WAITING && s_query_seq == (uint16_t)((uint32_t)x->b >> 8);
+            xSemaphoreGive(s_query_mx);
+            if (waiting) {
+                query_finish(STATION_QUERY_NOT_RUN, "not sent: the station was busy, or receiver maintenance began",
+                             0);
+            }
+            break;
+        }
         case STN_NOTE_APPLY_FAILED: {
             char next[112];
             (void)stn_apply_next_text(x->a > 0 ? (uint32_t)x->a : 0u, next, sizeof(next));
@@ -3447,6 +3632,12 @@ esp_err_t station_init(void)
     if (s_sgt_mx == NULL) {
         s_sgt_mx = xSemaphoreCreateMutex();
         if (s_sgt_mx == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    if (s_query_mx == NULL) {
+        s_query_mx = xSemaphoreCreateMutex();
+        if (s_query_mx == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }

@@ -582,8 +582,9 @@ static const char *const s_diag_event[] = {
     [DIAG_EV_ROVER_UP] = "rover_connect",
     [DIAG_EV_ROVER_DOWN] = "rover_disconnect",
     [DIAG_EV_BOARD] = "board",
+    [DIAG_EV_RX_QUERY] = "rx_query",
 };
-_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_BOARD + 1u, "journal kinds added: update the table");
+_Static_assert(COUNT(s_diag_event) == (size_t)DIAG_EV_RX_QUERY + 1u, "journal kinds added: update the table");
 
 const char *web_diag_event_name(uint16_t kind)
 {

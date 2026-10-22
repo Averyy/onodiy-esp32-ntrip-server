@@ -159,7 +159,7 @@ function signalChecks(sig, master) {
   const add = (tone, line) => r.items.push([tone, null, null, line, 'more']);
   if (sig.e6_lost) add('bad', 'Galileo E6 lost: it was tracked before with this signal group');
   if (!systems.some(s => s.sys === 'glonass')) add('warn', 'No GLONASS: Onocoy\'s quality score needs it');
-  else if (sig.rtcm1230_supported === false) add('warn', 'Message 1230 refused: GLONASS does not count for Onocoy');
+  else if (sig.rtcm1230_supported === false) add('warn', 'Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it');
   r.ok = r.items.every(i => i[0] === 'ok');
   return r;
 }

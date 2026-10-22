@@ -1423,6 +1423,90 @@ Views.receiver = {
  * Receiver settings page (#/receiver/settings/manage: at its Receiver
  * setup card); both read GET /api/gnss every 5 s.
  */
+/* The questions Ask the receiver offers (GET/POST /api/gnss/query): the command and what it answers. */
+const ASK = [
+  ['VERSIONA', 'Model and firmware'],
+  ['CONFIG', 'All settings'],
+  ['MODE', 'Base mode'],
+  ['ANT1GROUPA', 'Signals of the signal group'],
+  ['BASEPOSA', 'Base position'],
+  ['SPPNAVA', 'The receiver\'s own position'],
+];
+const ASK_RESULT = { answered: 'Answered', refused: 'Refused', no_answer: 'No answer', not_sent: 'Not sent' };
+
+/** The last question's line (q: GET /api/gnss/query): what was asked and how it went, or null for none. */
+function askLine(q) {
+  if (!q || q.state === 'none') return null;
+  if (q.state === 'waiting' || q.state === 'running') return 'Asking ' + q.command + '…';
+  return q.command + ': ' + (ASK_RESULT[q.result] || q.result) + (q.reason ? ' (' + q.reason + ')' : '') + ', ' +
+    fmt.dur(q.age_s) + ' ago.' + (q.lease_ms ? ' The NTRIP servers paused for ' + fmt.ms(q.lease_ms) + '.' : '');
+}
+
+/**
+ * Receiver settings' Ask the receiver: one read-only command at a time, its answer as the receiver sent it. Returns
+ * {nodes, load(), destroy()}.
+ */
+function askCtl() {
+  let pauses = { CONFIG: true, ANT1GROUPA: true }, timer = 0, gone = false;
+  const sel = selectInput(ASK.map(a => [a[0], a[0] + ': ' + a[1]]), 'VERSIONA');
+  const f = field('Command', sel);
+  const pauseHint = h('small', { class: 'hint', hidden: true }, 'The NTRIP servers pause for about a second while it answers.');
+  const go = btn('Ask', () => ask(), 'primary');
+  const line = h('div');
+  const say = (text, warn) => mount(line, text ? (warn ? msg('warn', text) : h('p', null, text)) : null);
+  const out = h('pre', { class: 'log short', tabindex: '0', 'aria-label': 'The receiver\'s answer', hidden: true });
+  const copyBox = h('span');
+  const copy = btn('Copy', () => copyText(out.textContent, copyBox), 'small');
+  const copyRow = h('div', { class: 'form-actions', hidden: true }, copy, copyBox);
+  const setHint = () => {
+    pauseHint.hidden = !pauses[sel.value];
+  };
+  sel.addEventListener('change', setHint);
+  setHint();
+  const show = q => {
+    if (q.commands) {
+      pauses = {};
+      for (const c of q.commands) pauses[c.command] = c.pauses_servers;
+      setHint();
+    }
+    const busy = q.state === 'waiting' || q.state === 'running';
+    go.disabled = busy;
+    say(askLine(q), q.state === 'done' && q.result !== 'answered');
+    const reply = q.state === 'done' && q.reply ? q.reply + (q.cut ? '\n…' : '') : '';
+    out.textContent = reply;
+    out.hidden = copyRow.hidden = !reply;
+    mount(copyBox);
+    return busy;
+  };
+  /* Read until the answer is in (at most a minute: the station gives up on a question after 30 s). */
+  const follow = (left) => {
+    clearTimeout(timer);
+    if (gone) return;
+    api('GET', '/api/gnss/query').then(q => {
+      if (gone) return;
+      if (show(q) && left > 0) timer = setTimeout(() => follow(left - 1), 1000);
+    }, () => {
+      go.disabled = false;
+    });
+  };
+  const ask = () => {
+    go.disabled = true;
+    api('POST', '/api/gnss/query', { command: sel.value }).then(() => follow(60), e => {
+      go.disabled = false;
+      say(errText(e), true);
+    });
+  };
+  return {
+    nodes: [cardHead('Ask the receiver'), h('p', { class: 'hint' }, 'Read-only: nothing here changes the receiver.'),
+      f.el, pauseHint, h('div', { class: 'form-actions' }, go), line, out, copyRow],
+    load: () => follow(60),
+    destroy() {
+      gone = true;
+      clearTimeout(timer);
+    },
+  };
+}
+
 function receiverPage(el, arg) {
   const settings = /^settings(\/|$)/.test(arg);
   let g = null, t = null, forms = null, stop = null, held = null, heldLater = false, sigs = null, missing = null;
@@ -1461,6 +1545,8 @@ function receiverPage(el, arg) {
     compare.scrollIntoView({ behavior: 'smooth', block: 'start' });
     compare.focus({ preventScroll: true });
   };
+  const asker = settings ? askCtl() : null;
+  const askCard = h('section', { class: 'card wide', id: 'ask', tabindex: '-1' }, asker ? asker.nodes : null);
   const noteTitle = h('strong');
   const sgtNote = h('div', { class: 'notice info wide', hidden: true },
     h('div', { class: 'text' }, noteTitle), btn('Go to the comparison', openCompare, 'small'));
@@ -1566,8 +1652,9 @@ function receiverPage(el, arg) {
     if (settings) {
       /* The comparison's note above the grid (its areas: position, receiver setup, profile beside both). */
       mount(el, sgtNote, grid);
-      add(grid, [posCard, profile, manageCard, compare]);
+      add(grid, [posCard, profile, manageCard, compare, askCard]);
       buildForms();
+      asker.load();
     } else {
       mount(el, grid);
       add(grid, [heldCard, info, where]);
@@ -1600,6 +1687,7 @@ function receiverPage(el, arg) {
       gone = true;
       if (stop) stop();
       if (sigs) sigs.destroy();
+      if (asker) asker.destroy();
     },
     dirty: () => !!(forms && forms.dirty()) || manage.dirty(),
     reload() {
