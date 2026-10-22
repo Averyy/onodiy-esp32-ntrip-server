@@ -20,6 +20,8 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
   MODE, ANT1GROUPA, BASEPOSA or SPPNAVA) and shows the receiver's answer as it came.
   Nothing on the list changes the receiver. CONFIG and ANT1GROUPA pause the NTRIP
   servers for about a second. Each question is listed on Logs.
+- Updates: a receiver update can start once a new app version has passed its first
+  checks (about 11 minutes), instead of after its whole 24-hour crash watch.
 - Signals: a refused message 1230 now says what it costs beyond Onocoy: rovers of other
   brands get less from GLONASS.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and

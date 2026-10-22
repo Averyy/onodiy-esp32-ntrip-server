@@ -2176,7 +2176,7 @@ until a newer version appears; the server keeps no "later" state.
 | `app_available`, `app_version` | `app_update_available`, `latest_version` |
 | `app_reverted_version`, `app_reverted_in_stage1` | the last version rolled back; true when it rolled back in its first minute (offer "install again?") |
 | `gnss_available`, `gnss_build`, `gnss_version` | `gnss_update_available`, `gnss_latest_build`, `gnss_latest` |
-| `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: the rest of the trial (confirmation plus crash watch; for a reinstall of the running image the confirmation only) |
+| `gnss_blocked_reason`, `gnss_blocked_left_s` | `fw_update_gnss_block_t`; `left_s` for `app_trial`: until the new app image's verify window ends (stage 1 and the verify window, at most about 11 min, while it may still go back by itself; for a reinstall of the running image the confirmation only). The crash watch that follows does not hold receiver updates back |
 | `gnss_flash_available`, `gnss_flash_reason` | `station_flash_available()`; when it is `false` the reason (`station_flash_reason()`): `no_package_area` (no package area at all: the board's partition table has no receiver package partition and PSRAM staging, `CONFIG_PKG_STORE_RAM`, is off; `pkg_max_bytes` is then `null`, no receiver build is offered and an upload is refused; with PSRAM staging on, the default, a board with 8 MB flash such as the NTRIP-X stages the package in PSRAM), `not_enabled_in_build`, or `receiver_port` (a build with receiver flashing, the receiver wired by another port than COM1: the loader steps name COM1, and no other port is tested), else `null` |
 | `checking`, `last_check_unix` | state `checking`; `ota/last_check` |
 
@@ -2338,9 +2338,8 @@ carries the header `X-Reinstall: 1` (the UI asks "This is the version
 already running (v). Install it again?" first). A confirmed reinstall of
 the identical image runs stage 1 of the trial only (the bootloader's
 first-minute check): identical code needs no verify window and no crash
-watch, so receiver updates are not held back for the watch's day: during
-that stage `gnss_blocked_left_s` (section 12) counts the confirmation
-alone (at most a minute).
+watch, so receiver updates wait only for that stage: `gnss_blocked_left_s`
+(section 12) counts the confirmation alone (at most a minute).
 
 `200 {"sha256": "...", "size": 1234567, "version": "v0.4.0+dev", "project": "onodiy-esp32-ntrip-server", "reboot": true}`;
 the device reboots into the image about a second after the response and

@@ -82,9 +82,10 @@
  *   one atomic step, and no inhibit can be taken once a reboot is committed.
  *
  * App trial flag (lifecycle_set_app_trial): fw_update publishes whether a
- *   new app image is in its trial (confirm, verify or crash watch), so the
- *   station, which may not call fw_update, can refuse to start a receiver
- *   flash meanwhile.
+ *   new app image is early in its trial (stage 1's confirmation or the
+ *   verify window, while it may still go back by itself; not the crash
+ *   watch), so the station, which may not call fw_update, can refuse to
+ *   start a receiver flash meanwhile.
  *
  * Update slot (lifecycle_update_claim): one firmware update at a time across
  *   both chips. fw_update claims it for an app download, manual upload or

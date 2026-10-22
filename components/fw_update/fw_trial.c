@@ -120,7 +120,10 @@ static void set_run(fw_trial_run_t run)
     fw_lock();
     g_fw.run = run;
     fw_unlock();
-    lifecycle_set_app_trial(run != FW_TRIAL_RUN_NONE);
+    /* Receiver updates wait while the new image may still go back by itself
+     * (stage 1, the verify window: as an app install does), not through the
+     * crash watch. */
+    lifecycle_set_app_trial(run == FW_TRIAL_RUN_CONFIRMING || run == FW_TRIAL_RUN_VERIFYING);
 }
 
 static void journal(diag_event_t kind, int32_t a, int32_t b)
@@ -519,7 +522,12 @@ void fw_trial_status_locked(fw_update_status_t *out, bool clock_trusted, int64_t
     }
     out->trial_end_s = fw_trial_left_s(run, uptime, CONFIG_FW_UPDATE_CONFIRM_S, elapsed, watch_s);
     if (out->gnss_blocked == FW_GNSS_BLOCK_APP_TRIAL) {
-        out->gnss_blocked_left_s = out->trial_end_s;
+        /* Until the verify window ends (stage 1 counts it as well, unless a
+         * reinstall of the identical image ends its trial with stage 1). */
+        out->gnss_blocked_left_s =
+            run == FW_TRIAL_RUN_CONFIRMING && watch_s != 0
+                ? out->trial_left_s + (uint32_t)CONFIG_FW_UPDATE_VERIFY_WINDOW_S
+                : out->trial_left_s;
     }
     if (g_fw.rec.stage == FW_TRIAL_REC_REVERTED || g_fw.rec.stage == FW_TRIAL_REC_ROLLED_BACK) {
         strlcpy(out->reverted_version, g_fw.rec.version, sizeof(out->reverted_version));
