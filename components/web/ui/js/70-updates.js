@@ -484,6 +484,8 @@ const updatesPart = {
       const g = u.gnss || {};
       let fin = null;
       const blocked = g.blocked && g.blocked !== 'none';
+      /* The open session is this update itself while it runs: the steps below say so. */
+      const running = g.blocked === 'journal_open' && !!(rflow || (flash && flash.journal === 'running'));
       /* Another partition layout that this app refuses (rule 12): no button, the reason instead. */
       const xlRefused = g.available && g.latest_cross_layout && !g.cross_layout_allowed;
       const upd = g.available && !xlRefused ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd), appMain ? '' : 'primary',
@@ -497,7 +499,7 @@ const updatesPart = {
             !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
             gnssReleaseText(g, u.app || {}), upd),
         xlRefused ? crossLayoutMsg(false) : null,
-        blocked && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
+        blocked && !running && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.'),
           g.blocked === 'app_trial' && firstChecks((u.app || {}).trial) ?
             [' ', fin = btn('Finish checks now', () => finishChecks(fin), 'small')] : null) : null,

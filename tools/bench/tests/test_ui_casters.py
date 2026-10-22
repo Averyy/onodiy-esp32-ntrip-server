@@ -3360,6 +3360,23 @@ def test_new_app_first_checks_can_be_finished_early():
     assert "trial" not in texts.lower()
 
 
+def test_open_session_message_is_hidden_while_the_receiver_update_runs():
+    """Settings, Updates: while this receiver update runs its own open session blocks a second one; "Not possible right
+    now: a receiver update session is open" is not shown then (the steps already say what runs), only when it waits."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build23980M", "running_build": 23980,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "blocked": "journal_open", "blocked_left_s": 0, "latest_cross_layout": False, "cross_layout_allowed": True}
+    upd = {**SET_UPDATE, "gnss": gnss}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": upd}
+    running = {"journal": "running", "progress": {"done": 696, "total": 2954}, "flash_available": True,
+               "last": None, "actions": {}}
+    waiting = {"journal": "waiting", "flash_available": True, "last": None, "actions": {}}
+    on, off = run_editor([{**base, "flash": running}, {**base, "flash": waiting}])
+    said = lambda r: [t for _, t in r["msgs"]]
+    assert not any(t.startswith("Not possible right now") for t in said(on))
+    assert "Not possible right now: a receiver update session is open." in said(off)
+
+
 def test_last_receiver_update_message_can_be_dismissed():
     """Settings, Updates: "Updated: the receiver runs ..." stays until the user dismisses it (its ×); then it is gone."""
     last = {"outcome": "success", "failed_rule": 0, "cross_layout": False, "check_only": False, "reapply_ok": True,
