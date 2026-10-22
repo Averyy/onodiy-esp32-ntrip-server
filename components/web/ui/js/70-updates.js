@@ -115,6 +115,9 @@ function resultTone(m) {
   return m.result === 'ok' ? 'ok' : m.result === 'not_available_yet' ? 'warn' : 'bad';
 }
 
+/* The last step of a receiver update: the new firmware runs, the station's settings go back on and are checked. */
+const FINISHING_WAIT = 'Finishing, please wait. This can take a few minutes.';
+
 /** Blocks, transfers and entry attempts of a receiver session's progress. */
 function flashCounts(m) {
   const parts = [];
@@ -141,13 +144,16 @@ function progressWidget() {
       else if (m.total) frac = m.bytes / m.total;
       const tone = m.done ? resultTone(m) : '';
       if (m.done) frac = tone === 'ok' || m.result === 'not_available_yet' ? 1 : frac;
+      /* The receiver has the new firmware; the station puts its settings back and checks them: no count to show. */
+      const finishing = m.job === 'gnss_flash' && !m.done && m.phase === 'finishing';
+      if (finishing) frac = null;
       b.className = 'bar ' + tone + (frac === null && !m.done ? ' indet' : '');
       fill.style.width = frac === null ? '' : (Math.max(0, Math.min(1, frac)) * 100).toFixed(1) + '%';
-      const counts = m.job === 'gnss_flash' && !m.done ? flashCounts(m) : '';
+      const counts = m.job === 'gnss_flash' && !m.done && !finishing ? flashCounts(m) : '';
       /* "failed" before the final message: a transfer failed and the session goes on (back to the loader,
        * the same package again within the caps, or a stop for your decision). */
       const phase = m.job === 'gnss_flash' && !m.done && m.phase === 'failed' ? TRANSFER_FAILED : lbl(L.phase, m.phase);
-      label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : phase +
+      label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : finishing ? FINISHING_WAIT : phase +
         (frac !== null ? ' ' + Math.round(frac * 100) + ' %' : '') + (counts ? ' (' + counts + ')' : ''));
     },
     hide() {

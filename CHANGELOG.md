@@ -9,6 +9,9 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 - Status: "Server ping" works with no NTRIP server on: it pings the internet (1.1.1.1)
   then, and says "Internet ping". Each line on the Performance card now has its own
   scale under it ("0 to 45ms"), a rule between the figures, and sits beside its own name.
+- Updates: the last step of a receiver update (the station puts its settings back and
+  checks them) shows a moving bar and "Finishing, please wait. This can take a few
+  minutes." instead of a full bar that looks stuck.
 - Updates: the "a receiver update session is open" message is not shown while the
   update itself runs. A dismissable message's text is centred beside its ×.
 - Updates: "Finish checks now" ends a new app version's first checks at once (about 11

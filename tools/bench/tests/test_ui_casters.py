@@ -456,6 +456,9 @@ function pageParts(el) {
     msgList: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'UL' && e.parent.className.indexOf('msglist') >= 0)
       .map(e => e.textContent),
     msgs: v.filter(e => (e.className || '').indexOf('msg ') === 0).map(m => [m.className.slice(4), m.textContent]),
+    /* The progress lines: [label, the bar's class]. */
+    progress: v.filter(e => e.tagName === 'DIV' && e.className === 'small' && e.parent && e.parent.kids[1] &&
+      (e.parent.kids[1].className || '').indexOf('bar') === 0).map(e => [e.textContent, e.parent.kids[1].className]),
     /* Amber text (the position casters get, a value that differs). */
     warn: v.filter(e => (' ' + e.className + ' ').indexOf(' t-warn ') >= 0).map(e => e.textContent),
     /* The setting rows: [title, text]. */
@@ -3375,6 +3378,14 @@ def test_open_session_message_is_hidden_while_the_receiver_update_runs():
                "last": None, "actions": {}}
     waiting = {"journal": "waiting", "flash_available": True, "last": None, "actions": {}}
     on, off = run_editor([{**base, "flash": running}, {**base, "flash": waiting}])
+    fin = {**running, "progress": {"phase": "finishing", "frames_acked": 2954, "frames_total": 2954}}
+    xfer = {**running, "progress": {"phase": "transferring", "bytes_sent": 700000, "bytes_total": 3027628,
+                                       "frames_acked": 696, "frames_total": 2954}}
+    done, going = run_editor([{**base, "flash": fin}, {**base, "flash": xfer}])
+    # The last step has no count to show: a moving bar and a line that says to wait.
+    norm = lambda r: [[t, c.split()] for t, c in r["progress"]]
+    assert ["Receiver update: Finishing, please wait. This can take a few minutes.", ["bar", "indet"]] in norm(done)
+    assert ["Receiver update: Transferring 23 % (block 696 of 2,954)", ["bar"]] in norm(going)
     said = lambda r: [t for _, t in r["msgs"]]
     assert not any(t.startswith("Not possible right now") for t in said(on))
     assert "Not possible right now: a receiver update session is open." in said(off)
