@@ -126,7 +126,7 @@ function signalsCard(sig) {
  * no GLONASS, 1230 refused. master: the main antenna's
  * signal group the receiver runs (GET /api/gnss), null while unknown; with
  * Galileo short of E6 it says whether 3 6 would add it or runs already.
- * rcv: GET /api/status receiver, for a refused 1230 that a firmware update fixes.
+ * rcv: GET /api/status receiver, for a 1230 that only a newer receiver build has.
  */
 function signalChecks(sig, master, rcv) {
   const systems = sig.systems || [];
@@ -161,8 +161,9 @@ function signalChecks(sig, master, rcv) {
   if (sig.e6_lost) add('bad', 'Galileo E6 lost: it was tracked before with this signal group');
   if (!systems.some(s => s.sys === 'glonass')) add('warn', 'No GLONASS: Onocoy\'s quality score needs it');
   else if (sig.rtcm1230_supported === false) {
-    const fix = fix1230(rcv);
-    add('warn', 'Message 1230 refused: rovers of other brands get less from GLONASS, and Onocoy does not count it' + (fix ? '. ' + fix : ''));
+    const min = needs1230(rcv);
+    add('warn', (min ? 'Message 1230 needs receiver firmware ' + min + ' or later' : 'Message 1230 refused') +
+      ': rovers of other brands get less from GLONASS, and Onocoy does not count it');
   }
   r.ok = r.items.every(i => i[0] === 'ok');
   return r;

@@ -1334,6 +1334,9 @@ static void note_bands(void)
     case UM98X_BANDS_REFUSED:
         ESP_LOGI(TAG, "this receiver firmware does not report its signals per group (%s): unknown", s_bands_reply);
         break;
+    case UM98X_BANDS_FIRMWARE:
+        ESP_LOGI(TAG, "this receiver build has no signal report per group (not asked): unknown");
+        break;
     default:
         ESP_LOGI(TAG, "the receiver's signals per group are unknown (%s)",
                  s_bands_reply[0] != '\0' ? s_bands_reply : "answer not read");
@@ -1659,8 +1662,14 @@ esp_err_t station_query_start(unsigned q, station_query_why_t *why)
     if (um98x_query_command(q) == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
+    /* A command the receiver's build does not have is never sent: it would only be refused. */
+    um98x_info_t info;
+    bool lacks = q == UM98X_QUERY_GROUPS && um98x_ctl_get_info(&info) == ESP_OK && info.valid &&
+                 !um98x_cap_ok(info.model, info.build, UM98X_CAP_GROUPS);
     if (!s_inited || !s_started || lifecycle_in_safe_mode()) {
         w = STATION_QUERY_WHY_NOT_RUNNING;
+    } else if (lacks) {
+        w = STATION_QUERY_WHY_FIRMWARE;
     } else {
         xSemaphoreTake(s_query_mx, portMAX_DELAY);
         portENTER_CRITICAL(&s_lock);

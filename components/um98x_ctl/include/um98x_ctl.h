@@ -117,6 +117,7 @@
 #include "gnss_types.h"
 #include "um98x_apply.h"
 #include "um98x_base.h"
+#include "um98x_caps.h"
 #include "um98x_fixcheck.h"
 #include "um98x_profile.h"
 #include "um98x_query.h"

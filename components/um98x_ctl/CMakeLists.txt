@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 #
 # um98x_profile.c, um98x_base.c, um98x_reply.c, um98x_txn.c, um98x_plan.c,
-# um98x_exec.c and um98x_fixcheck.c are pure logic (no IDF includes) and are also compiled
+# um98x_exec.c, um98x_fixcheck.c and um98x_caps.c are pure logic (no IDF includes) and are also compiled
 # into the host test app; um98x_ctl.c is the RTOS/link wrapper around them.
 idf_component_register(
     SRCS
@@ -15,6 +15,7 @@ idf_component_register(
         "um98x_exec.c"
         "um98x_bands.c"
         "um98x_fixcheck.c"
+        "um98x_caps.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES gnss_link gnss_types

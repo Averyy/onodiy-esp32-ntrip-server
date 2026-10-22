@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "um98x_base.h"
+#include "um98x_caps.h"
 #include "um98x_plan.h"
 #include "um98x_profile.h"
 #include "unity.h"
@@ -898,4 +899,71 @@ TEST_CASE("plan: a UM980 gets its own one-number group, multipath mitigation, th
     TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
     plan_text(&p, &plan, text, sizeof(text));
     TEST_ASSERT_NULL(strstr(text, "MMP"));
+}
+
+TEST_CASE("caps: UM980 builds before 23980 lack 1230 and ANT1GROUPA; the UM982 and unknown builds are tried", "[um98x_caps]")
+{
+    TEST_ASSERT_EQUAL_UINT32(23980, um98x_cap_min_build("UM980", UM98X_CAP_RTCM1230));
+    TEST_ASSERT_EQUAL_UINT32(23980, um98x_cap_min_build("UM980", UM98X_CAP_GROUPS));
+    TEST_ASSERT_FALSE(um98x_cap_ok("UM980", 11833, UM98X_CAP_RTCM1230));
+    TEST_ASSERT_FALSE(um98x_cap_ok("UM980", 11833, UM98X_CAP_GROUPS));
+    TEST_ASSERT_TRUE(um98x_cap_ok("UM980", 23980, UM98X_CAP_RTCM1230));
+    TEST_ASSERT_TRUE(um98x_cap_ok("UM980", 25735, UM98X_CAP_GROUPS));
+    TEST_ASSERT_TRUE(um98x_cap_ok("UM980", 0, UM98X_CAP_GROUPS));   /* unknown build: tried, its answer decides */
+    TEST_ASSERT_EQUAL_UINT32(0, um98x_cap_min_build("UM982", UM98X_CAP_RTCM1230));
+    TEST_ASSERT_TRUE(um98x_cap_ok("UM982", 13495, UM98X_CAP_RTCM1230));
+    TEST_ASSERT_EQUAL_STRING("rtcm1230", um98x_cap_name(UM98X_CAP_RTCM1230));
+    TEST_ASSERT_EQUAL_STRING("ant1groupa", um98x_cap_name(UM98X_CAP_GROUPS));
+    TEST_ASSERT_NULL(um98x_cap_name(UM98X_CAP_COUNT));
+}
+
+/* The preview lines that contain `needle`. */
+static int preview_has(const um98x_base_profile_t *p, const char *needle)
+{
+    um98x_preview_step_t prev[UM98X_PREVIEW_MAX];
+    size_t n = um98x_plan_preview(p, p->com1_baud, prev, UM98X_PREVIEW_MAX);
+    TEST_ASSERT_GREATER_THAN_size_t(0, n);
+    int k = 0;
+    for (size_t i = 0; i < n; i++) {
+        k += strstr(prev[i].text, needle) != NULL;
+    }
+    return k;
+}
+
+TEST_CASE("plan: a UM980 build without 1230 and ANT1GROUPA is never sent them, not even in the preview", "[um98x_plan]")
+{
+    um98x_base_profile_t p;
+    um98x_readback_t rb;
+    um98x_plan_t plan;
+    char text[512];
+    survey_profile(&p);
+    matching_readback(&p, &rb);
+    um98x_link_model_set(UM98X_MODEL_UM980);
+    um98x_link_build_set(11833);
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "RTCM1230"));
+    TEST_ASSERT_NOT_NULL(strstr(text, "RTCM1127 COM1 1"));   /* the rest of the profile as before */
+    TEST_ASSERT_EQUAL_INT(0, preview_has(&p, "RTCM1230"));
+    TEST_ASSERT_EQUAL_INT(0, preview_has(&p, "ANT1GROUPA"));
+    TEST_ASSERT_TRUE(um98x_plan_rtcm_only(&p, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_NULL(strstr(text, "RTCM1230"));
+
+    /* 23980 has both; an unknown build is tried. */
+    for (int k = 0; k < 2; k++) {
+        um98x_link_build_set(k == 0 ? 23980 : 0);
+        TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+        plan_text(&p, &plan, text, sizeof(text));
+        TEST_ASSERT_NOT_NULL(strstr(text, "RTCM1230 COM1 1"));
+        TEST_ASSERT_EQUAL_INT(1, preview_has(&p, "RTCM1230"));
+        TEST_ASSERT_EQUAL_INT(1, preview_has(&p, "ANT1GROUPA"));
+    }
+    /* A UM982 at any build: as before. */
+    um98x_link_model_set(UM98X_MODEL_UM982);
+    um98x_link_build_set(13495);
+    TEST_ASSERT_TRUE(um98x_plan_build(&p, &rb, p.com1_baud, false, &plan));
+    plan_text(&p, &plan, text, sizeof(text));
+    TEST_ASSERT_NOT_NULL(strstr(text, "RTCM1230 COM1 1"));
+    um98x_link_build_set(0);
 }

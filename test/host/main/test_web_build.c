@@ -152,6 +152,32 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     cJSON_Delete(root);
 }
 
+TEST_CASE("status receiver: the commands its build lacks, with the build that adds each", "[web_build]")
+{
+    fixture();
+    /* A UM982 on 18975: nothing missing. */
+    cJSON *root = build_status(false);
+    const cJSON *needs = at(at(root, "receiver"), "firmware_needs");
+    TEST_ASSERT_TRUE(cJSON_IsObject(needs));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(needs));
+    cJSON_Delete(root);
+    /* A UM980 on 11833: message 1230 and ANT1GROUPA come with 23980. */
+    s_snap.st.receiver.valid = true;
+    strcpy(s_snap.st.receiver.model, "UM980");
+    strcpy(s_snap.st.receiver.firmware, "R4.10Build11833");
+    s_snap.st.receiver.build = 11833;
+    root = build_status(false);
+    needs = at(at(root, "receiver"), "firmware_needs");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(needs));
+    TEST_ASSERT_EQUAL(23980, at(needs, "rtcm1230")->valueint);
+    TEST_ASSERT_EQUAL(23980, at(needs, "ant1groupa")->valueint);
+    cJSON_Delete(root);
+    /* The public form has none of it. */
+    root = build_status(true);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(at(root, "receiver"), "firmware_needs"));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("status receiver: GLONASS and message 1230 for Onocoy's quality score, admin form only", "[web_build]")
 {
     fixture();
@@ -3030,15 +3056,37 @@ TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none"
 
 /* ---- receiver queries ------------------------------------------------------------------------- */
 
-static cJSON *build_query(const station_query_status_t *q, const char *text)
+static cJSON *build_query_rx(const station_query_status_t *q, const char *text, const um98x_info_t *rx)
 {
     wj_t w;
     wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
-    web_build_query(&w, q, text);
+    web_build_query(&w, q, text, rx);
     TEST_ASSERT_TRUE(wj_finish(&w));   /* one whole object, as the response writes it */
     cJSON *root = cJSON_Parse(s_out);
     TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
     return root;
+}
+
+static cJSON *build_query(const station_query_status_t *q, const char *text)
+{
+    return build_query_rx(q, text, NULL);
+}
+
+TEST_CASE("receiver query: ANT1GROUPA names the build that adds it on a receiver without it", "[web_build]")
+{
+    station_query_status_t q = { 0 };
+    um98x_info_t rx = { .valid = true, .build = 11833 };
+    strcpy(rx.model, "UM980");
+    cJSON *root = build_query_rx(&q, "", &rx);
+    const cJSON *cmds = cJSON_GetObjectItem(root, "commands");
+    TEST_ASSERT_EQUAL(23980, cJSON_GetObjectItem(cJSON_GetArrayItem(cmds, UM98X_QUERY_GROUPS), "needs_build")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(cJSON_GetArrayItem(cmds, UM98X_QUERY_VERSION), "needs_build")));
+    cJSON_Delete(root);
+    rx.build = 23980;
+    root = build_query_rx(&q, "", &rx);
+    cmds = cJSON_GetObjectItem(root, "commands");
+    TEST_ASSERT_TRUE(cJSON_IsNull(cJSON_GetObjectItem(cJSON_GetArrayItem(cmds, UM98X_QUERY_GROUPS), "needs_build")));
+    cJSON_Delete(root);
 }
 
 TEST_CASE("receiver query: the reply as text once done, the list with what pauses the servers", "[web_build]")

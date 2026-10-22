@@ -64,6 +64,7 @@
 
 #include "gnss_types.h"
 #include "um98x_apply.h"
+#include "um98x_caps.h"
 #include "um98x_reply.h"
 
 #ifdef __cplusplus
@@ -103,7 +104,7 @@ uint32_t um98x_applied_hash(const um98x_base_profile_t *p);
 
 /** The receiver models this layer configures (exact match). */
 #define UM98X_SUPPORTED_MODEL "UM982"
-#define UM98X_MODEL_NAME_UM980 "UM980"   /**< UNTESTED: configured from the N4 manual, never on hardware */
+#define UM98X_MODEL_NAME_UM980 "UM980"   /**< configured from the N4 manual, tested on the NTRIP-X */
 
 /**
  * Which model the plan is for. UM982 is 0, so a zeroed state plans for the
@@ -121,6 +122,13 @@ typedef enum {
 /** The model of the receiver on the link, set from its identity (UM982 until then). */
 void um98x_link_model_set(um98x_model_t model);
 um98x_model_t um98x_link_model(void);
+
+/** The build of the receiver on the link, set with its model (0 = unknown until then). */
+void um98x_link_build_set(uint32_t build);
+uint32_t um98x_link_build(void);
+
+/** The receiver on the link takes `cap` (um98x_caps.h; an unknown build is tried). */
+bool um98x_link_cap(um98x_cap_t cap);
 
 /** The model a version log names: UM980 for "UM980", UM982 for anything else (only "UM982" is configured besides). */
 um98x_model_t um98x_model_of(const char *model);

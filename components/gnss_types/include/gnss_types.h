@@ -128,6 +128,7 @@ typedef enum {
     UM98X_BANDS_OK,            /**< reported: group, present and mask are valid */
     UM98X_BANDS_REFUSED,       /**< the receiver refused the query (a firmware without it): unknown, never a fault */
     UM98X_BANDS_UNREAD,        /**< answered in a form this firmware does not read: unknown */
+    UM98X_BANDS_FIRMWARE,      /**< not asked: the receiver's build does not have the query (um98x_caps.h): unknown */
 } um98x_bands_state_t;
 
 /**

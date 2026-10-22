@@ -675,8 +675,9 @@ static const char *const s_bands_state[] = {
     [UM98X_BANDS_OK] = "ok",
     [UM98X_BANDS_REFUSED] = "refused",
     [UM98X_BANDS_UNREAD] = "unread",
+    [UM98X_BANDS_FIRMWARE] = "needs_firmware",
 };
-_Static_assert(COUNT(s_bands_state) == (size_t)UM98X_BANDS_UNREAD + 1u, "signal report states moved: update the table");
+_Static_assert(COUNT(s_bands_state) == (size_t)UM98X_BANDS_FIRMWARE + 1u, "signal report states moved: update the table");
 
 const char *web_bands_state_name(uint8_t v)
 {

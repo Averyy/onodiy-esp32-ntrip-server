@@ -644,6 +644,7 @@ const ERR = {
   not_in_safe_mode: 'The station is not in safe mode.',
   receiver_not_streaming: 'The receiver must be streaming first.',
   unsupported_model: 'Not possible with this receiver model.',
+  needs_firmware: 'This receiver firmware does not have that command.',
   package_pinned: 'A receiver package is held for an open update session.',
   manifest_changed: 'The offered version changed since this page loaded. Check the new offer and try again.',
   not_offered: 'That version is not offered (any more).',

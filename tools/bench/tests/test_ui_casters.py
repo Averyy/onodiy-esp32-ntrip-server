@@ -527,6 +527,15 @@ async function receiverPageView(c) {
     r.invalid = { open: !!adv.open, focused: focused, puts: sent.slice(n).filter(x => x.method === 'PUT').length,
       errors: [...visible(el)].filter(e => e.tagName === 'SMALL' && e.className === 'err').map(e => e.textContent) };
   }
+  if (c.pick) {
+    /* c.pick: the list holding that option set to it: what the page shows then, and whether Ask is greyed out. */
+    const sel = [...visible(el)].find(e => e.tagName === 'SELECT' && e.options.some(o => o.v === c.pick));
+    sel.value = c.pick;
+    sel.fire('change');
+    await settle();
+    r.picked = pageParts(el);
+    r.picked.ask_disabled = !![...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Ask').disabled;
+  }
   if (c.press) {
     /* c.press: a button pressed (by its text), then c.confirm2 in the dialog it opens, if any: the requests that went out. */
     const n = sent.length;
@@ -3285,6 +3294,21 @@ def test_ask_the_receiver_sends_the_chosen_command_and_shows_the_answer():
     # Nothing asked yet: no answer box, no line.
     assert fresh["pres"] == [] and "Copy" not in fresh["buttons"] and "Ask" in fresh["buttons"]
     assert not any(t.startswith(("Asking", "VERSIONA:")) for t in fresh["lines"])
+
+
+def test_ask_the_receiver_greys_out_a_command_the_receiver_build_lacks():
+    """Ask the receiver: a command the receiver's build does not have (needs_build, from the station's table of builds)
+    says which build has it, and Ask is greyed out while it is chosen; the other commands ask as before."""
+    cmds = [{"command": c, "pauses_servers": c in ("CONFIG", "ANT1GROUPA"),
+             "needs_build": 23980 if c == "ANT1GROUPA" else None}
+            for c in ("VERSIONA", "CONFIG", "MODE", "ANT1GROUPA", "BASEPOSA", "SPPNAVA")]
+    q = {"state": "none", "commands": cmds}
+    old, other = run_editor([rx_page("settings", st_status(), GNSS, SIG_MSGS, query=q, pick="ANT1GROUPA"),
+                             rx_page("settings", st_status(), GNSS, SIG_MSGS, query=q, pick="MODE")])
+    hint = "This receiver firmware does not have it: build 23980 or later does."
+    assert hint in old["picked"]["hints"] and old["picked"]["ask_disabled"]
+    assert "The NTRIP servers pause for about a second while it answers." not in old["picked"]["hints"]
+    assert hint not in other["picked"]["hints"] and not other["picked"]["ask_disabled"]
 
 
 def test_receiver_update_that_changes_the_partition_layout_needs_its_own_tick():

@@ -33,5 +33,17 @@ build 13495 (the type-4 backup at the primary address); 23980 and 25735 carry th
 table of UM982 builds 18975 and 23575, and the same bootloader block as UM982
 build 23575.
 
-**Still to do:** flash one on hardware (the NTRIP-X, then the UM980 board) before
-receiver flashing is turned on for station builds.
+**What each build takes.** Seen on the NTRIP-X (2026-10-22). The station keeps this in
+one table (`components/um98x_ctl/include/um98x_caps.h`) and never sends a command to a
+build that lacks it; the web UI names the build that adds it.
+
+| Command | 11833 | 23980 |
+|---|---|---|
+| `RTCM1230` (GLONASS biases, for Onocoy and other brands' rovers) | refused | taken |
+| `ANT1GROUPA` (the signals a group configures) | refused (`NO MATCHING FUNC`) | taken |
+| `MASK` in the settings dump (`CONFIG`) | not listed | listed |
+
+Builds between 11833 and 23980 are unknown and count as lacking both. Every UM982 build
+seen (18975, 23575, 25164) takes both.
+
+**Still to do:** the UM980 board (Alibaba) once it arrives.

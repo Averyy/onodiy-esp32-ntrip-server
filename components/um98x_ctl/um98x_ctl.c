@@ -247,6 +247,7 @@ static void remember_identity(const gnss_versiona_t *v)
     s_info = info;
     portEXIT_CRITICAL(&s_lock);
     um98x_link_model_set(um98x_model_of(info.model));
+    um98x_link_build_set(info.build);
     put_str_if_changed(SETTINGS_KEY_GNSS_MODEL, info.model);
     put_str_if_changed(SETTINGS_KEY_GNSS_FW, info.firmware);
 }

@@ -356,6 +356,10 @@ function bandsRow(g) {
   const b = g.rx_bands || {};
   const muted = t => ['Bands configured', h('span', { class: 'muted' }, t)];
   if (b.state === 'refused') return muted('Not reported by this firmware');
+  if (b.state === 'needs_firmware') {
+    const min = (g.firmware_needs || {}).ant1groupa;
+    return muted('Not reported by this firmware' + (min ? ' (' + min + ' or later reports it)' : ''));
+  }
   if (b.state === 'unread') return muted('Unknown');
   if (b.state !== 'ok') return muted('After the next configuration');
   const list = [];

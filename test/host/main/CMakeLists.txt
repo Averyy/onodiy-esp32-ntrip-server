@@ -100,6 +100,7 @@ idf_component_register(
         "${_fw}/um98x_ctl/um98x_exec.c"
         "${_fw}/um98x_ctl/um98x_bands.c"
         "${_fw}/um98x_ctl/um98x_fixcheck.c"
+        "${_fw}/um98x_ctl/um98x_caps.c"
         "${_fw}/um98x_flash/flash_journal.c"
         "${_fw}/um98x_flash/fl_util.c"
         "${_fw}/um98x_flash/fl_rx.c"

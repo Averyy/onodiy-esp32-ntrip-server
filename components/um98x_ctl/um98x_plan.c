@@ -16,8 +16,9 @@
 
 /* The receiver port the link is wired to (index 0 = COM1). */
 static uint8_t s_port = 1u;
-/* The model on the link (um98x_model_t). */
+/* The model on the link (um98x_model_t) and its build (0 = unknown). */
 static uint8_t s_model = UM98X_MODEL_UM982;
+static uint32_t s_build;
 static const char *const PORT_NAME[] = { "COM1", "COM2", "COM3" };
 static const char *const UNLOG[] = { "UNLOG COM1", "UNLOG COM2", "UNLOG COM3" };
 
@@ -61,6 +62,22 @@ void um98x_link_model_set(um98x_model_t model)
 um98x_model_t um98x_link_model(void)
 {
     return (um98x_model_t)s_model;
+}
+
+void um98x_link_build_set(uint32_t build)
+{
+    s_build = build;
+}
+
+uint32_t um98x_link_build(void)
+{
+    return s_build;
+}
+
+bool um98x_link_cap(um98x_cap_t cap)
+{
+    const char *name = s_model == UM98X_MODEL_UM980 ? UM98X_MODEL_NAME_UM980 : UM98X_SUPPORTED_MODEL;
+    return um98x_cap_ok(name, s_build, cap);
 }
 
 um98x_model_t um98x_model_of(const char *model)
@@ -126,9 +143,18 @@ bool um98x_rtcm_optional(uint16_t msg)
     return msg == UM98X_RTCM_GLO_BIASES || (msg >= 1131u && msg <= 1137u);
 }
 
+/* A profile message the receiver's build takes (1230 only from the build that adds it: um98x_caps.h). */
+static bool rtcm_sendable(uint16_t msg)
+{
+    return msg != UM98X_RTCM_GLO_BIASES || um98x_link_cap(UM98X_CAP_RTCM1230);
+}
+
 static void add_rtcm(const um98x_base_profile_t *p, um98x_plan_t *out)
 {
     for (size_t i = 0; i < p->rtcm_count; i++) {
+        if (!rtcm_sendable(p->rtcm[i].msg)) {
+            continue;   /* never sent: it would only be refused (rtcm1230_ok stays false) */
+        }
         add(out, UM98X_STEP_RTCM, !um98x_rtcm_optional(p->rtcm[i].msg), p->rtcm[i].msg, p->rtcm[i].period_s);
     }
 }
@@ -278,7 +304,8 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
               preview_add(out, cap, &n, UM98X_CMD_CONFIG, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_add(out, cap, &n, UM98X_CMD_MODE, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false) &&
               preview_step(p, out, cap, &n, UM98X_STEP_SIGNALGROUP, 0, 0, UM98X_PREVIEW_IF_DIFFERS, true) &&
-              preview_add(out, cap, &n, UM98X_CMD_GROUPS, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false);
+              (!um98x_link_cap(UM98X_CAP_GROUPS) ||
+               preview_add(out, cap, &n, UM98X_CMD_GROUPS, UM98X_PREVIEW_QUERY, UM98X_PREVIEW_ALWAYS, false));
     if (ok && p->com1_baud != link_baud) {
         ok = preview_step(p, out, cap, &n, UM98X_STEP_BAUD, 0, 0, UM98X_PREVIEW_IF_DIFFERS, false);
     }
@@ -295,6 +322,9 @@ size_t um98x_plan_preview(const um98x_base_profile_t *p, uint32_t link_baud, um9
     }
     ok = ok && preview_step(p, out, cap, &n, UM98X_STEP_MASK, 0, 0, UM98X_PREVIEW_ALWAYS, false);
     for (size_t i = 0; ok && i < p->rtcm_count; i++) {
+        if (!rtcm_sendable(p->rtcm[i].msg)) {
+            continue;
+        }
         ok = preview_step(p, out, cap, &n, UM98X_STEP_RTCM, p->rtcm[i].msg, p->rtcm[i].period_s, UM98X_PREVIEW_ALWAYS,
                           false);
     }

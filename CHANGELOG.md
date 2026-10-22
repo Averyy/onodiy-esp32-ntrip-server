@@ -4,6 +4,13 @@ What each release changes, newest first. A release's notes on GitHub start with 
 section here. Changes since the last release collect under `## Unreleased`; before you
 tag, rename that heading to the new version ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Receiver: commands that older receiver firmware refuses are no longer sent to it. A
+  UM980 before build 23980 lacks message 1230 and the signal report (`ANT1GROUPA`).
+  The station leaves both out, and the Signals card, Onocoy's card and Ask the receiver
+  name the build that has them.
+
 ## v0.1.6
 
 - Receiver firmware updates are on in releases: the update banner offers a newer

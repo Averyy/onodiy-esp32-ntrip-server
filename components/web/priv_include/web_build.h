@@ -272,7 +272,7 @@ web_err_t web_query_refusal(station_query_why_t why);
  * GET /api/gnss/query: the last query (q) with its reply text (state done),
  * and the list of commands to ask.
  */
-void web_build_query(wj_t *w, const station_query_status_t *q, const char *text);
+void web_build_query(wj_t *w, const station_query_status_t *q, const char *text, const um98x_info_t *rx);
 
 /** Live view window limits (the station's Kconfig). */
 typedef struct {

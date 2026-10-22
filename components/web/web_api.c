@@ -959,9 +959,10 @@ static esp_err_t send_query(httpd_req_t *req)
     if (err != ESP_OK) {
         return web_send_internal(req, err);
     }
+    station_snapshot(&s_st);
     web_resp_t resp;
     resp_begin(&resp, req, 200);
-    web_build_query(&resp.w, &q, s_query_text);
+    web_build_query(&resp.w, &q, s_query_text, &s_st.receiver);
     return web_resp_end(&resp);
 }
 

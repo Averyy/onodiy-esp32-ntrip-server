@@ -516,6 +516,7 @@ static sim_t *sim_init(void)
     s->mask = -1;
     s->mmp = 'E';
     um98x_link_model_set(UM98X_MODEL_UM982);   /* the plan's model: set again by every apply from the identity */
+    um98x_link_build_set(0);
     s->r1137 = true;
     s->b1c = s->saved_b1c = 'E';   /* the factory value per public dumps */
     s->version = TV_VERSIONA_UM982;
@@ -1705,6 +1706,12 @@ TEST_CASE("exec: a UM980 (untested on hardware) gets group 2 in its one-number f
     TEST_ASSERT_TRUE(r.sg_read.known);
     TEST_ASSERT_EQUAL_UINT8(2, r.sg_read.master);
     TEST_ASSERT_EQUAL_UINT8(0, r.sg_read.slave);
+    /* Build 7923 has neither message 1230 nor the signal report (um98x_caps.h): never sent, so never refused. */
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RTCM1230"));
+    TEST_ASSERT_EQUAL_INT(0, count(s, "ANT1GROUPA"));
+    TEST_ASSERT_FALSE(r.rtcm1230_ok);
+    TEST_ASSERT_EQUAL_UINT8(UM98X_BANDS_FIRMWARE, r.bands.state);
+    TEST_ASSERT_EQUAL_UINT8(0, r.rtcm_refused_n);
 
     /* Again: the group and MMP read back as wanted, neither is sent. */
     s->nrx = 0;
@@ -1729,6 +1736,7 @@ TEST_CASE("exec: a UM980 (untested on hardware) gets group 2 in its one-number f
     TEST_ASSERT_TRUE(r.rolled_back);
     TEST_ASSERT_EQUAL_INT(0, count(s, "SAVECONFIG"));
     um98x_link_model_set(UM98X_MODEL_UM982);
+    um98x_link_build_set(0);
 }
 
 TEST_CASE("exec: the elevation mask goes out in every session before the outputs; a refusal is not fatal", "[um98x_exec]")

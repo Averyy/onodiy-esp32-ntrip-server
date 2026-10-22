@@ -1045,6 +1045,7 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
             return UM98X_E_FAILED;
         }
         um98x_link_model_set(um98x_model_of(v.model));
+        um98x_link_build_set(v.build);
         s->r->um980 = um98x_link_model() == UM98X_MODEL_UM980;
     }
     copy_str(s->r->firmware, sizeof(s->r->firmware), identity->firmware);
@@ -1079,7 +1080,14 @@ static um98x_res_t run_plan(session_t *s, const um98x_apply_opts_t *opts, gnss_v
      * the port is quiet (never fatal: a firmware without the query just
      * leaves it unknown). */
     s->r->bands_asked = true;
-    (void)um98x_exec_groups(ex, &s->r->bands, s->r->bands_reply, sizeof(s->r->bands_reply));
+    if (um98x_link_cap(UM98X_CAP_GROUPS)) {
+        (void)um98x_exec_groups(ex, &s->r->bands, s->r->bands_reply, sizeof(s->r->bands_reply));
+    } else {
+        /* A build without the query: never sent, it would only be refused. */
+        memset(&s->r->bands, 0, sizeof(s->r->bands));
+        s->r->bands.state = UM98X_BANDS_FIRMWARE;
+        s->r->bands_reply[0] = '\0';
+    }
 
     for (size_t i = 0; i < plan.count; i++) {
         const um98x_step_t *st = &plan.step[i];
@@ -1241,6 +1249,7 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
         return UM98X_E_UNSUPPORTED;
     }
     um98x_link_model_set(um98x_model_of(identity->model));
+    um98x_link_build_set(identity->build);
     r->um980 = um98x_link_model() == UM98X_MODEL_UM980;
 
     um98x_res_t res = run_plan(&s, opts, identity, queried);

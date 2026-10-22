@@ -1447,7 +1447,7 @@ function askLine(q) {
  * {nodes, load(), destroy()}.
  */
 function askCtl() {
-  let pauses = { CONFIG: true, ANT1GROUPA: true }, timer = 0, gone = false;
+  let pauses = { CONFIG: true, ANT1GROUPA: true }, needs = {}, timer = 0, gone = false, asking = false;
   const sel = selectInput(ASK.map(a => [a[0], a[0] + ': ' + a[1]]), 'VERSIONA');
   const f = field('Command', sel);
   const pauseHint = h('small', { class: 'hint', hidden: true }, 'The NTRIP servers pause for about a second while it answers.');
@@ -1458,19 +1458,29 @@ function askCtl() {
   const copyBox = h('span');
   const copy = btn('Copy', () => copyText(out.textContent, copyBox), 'small');
   const copyRow = h('div', { class: 'form-actions', hidden: true }, copy, copyBox);
+  /* A command this receiver's build lacks (needs_build): the station would refuse it, so no Ask. */
+  const needHint = h('small', { class: 'hint', hidden: true });
   const setHint = () => {
-    pauseHint.hidden = !pauses[sel.value];
+    const min = needs[sel.value];
+    pauseHint.hidden = !pauses[sel.value] || !!min;
+    needHint.hidden = !min;
+    needHint.textContent = min ? 'This receiver firmware does not have it: build ' + min + ' or later does.' : '';
+    go.disabled = asking || !!min;
   };
   sel.addEventListener('change', setHint);
   setHint();
   const show = q => {
+    const busy = q.state === 'waiting' || q.state === 'running';
+    asking = busy;
     if (q.commands) {
       pauses = {};
-      for (const c of q.commands) pauses[c.command] = c.pauses_servers;
-      setHint();
+      needs = {};
+      for (const c of q.commands) {
+        pauses[c.command] = c.pauses_servers;
+        if (c.needs_build) needs[c.command] = c.needs_build;
+      }
     }
-    const busy = q.state === 'waiting' || q.state === 'running';
-    go.disabled = busy;
+    setHint();
     say(askLine(q), q.state === 'done' && q.result !== 'answered');
     const reply = q.state === 'done' && q.reply ? q.reply + (q.cut ? '\n…' : '') : '';
     out.textContent = reply;
@@ -1486,19 +1496,22 @@ function askCtl() {
       if (gone) return;
       if (show(q) && left > 0) timer = setTimeout(() => follow(left - 1), 1000);
     }, () => {
-      go.disabled = false;
+      asking = false;
+      setHint();
     });
   };
   const ask = () => {
-    go.disabled = true;
+    asking = true;
+    setHint();
     api('POST', '/api/gnss/query', { command: sel.value }).then(() => follow(60), e => {
-      go.disabled = false;
+      asking = false;
+      setHint();
       say(errText(e), true);
     });
   };
   return {
     nodes: [cardHead('Ask the receiver'), h('p', { class: 'hint' }, 'Read-only: nothing here changes the receiver.'),
-      f.el, pauseHint, h('div', { class: 'form-actions' }, go), line, out, copyRow],
+      f.el, pauseHint, needHint, h('div', { class: 'form-actions' }, go), line, out, copyRow],
     load: () => follow(60),
     destroy() {
       gone = true;

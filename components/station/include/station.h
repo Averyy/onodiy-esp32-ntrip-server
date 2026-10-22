@@ -953,6 +953,7 @@ typedef enum {
     STATION_QUERY_WHY_JOURNAL,       /**< a receiver update session is open */
     STATION_QUERY_WHY_NOT_STREAMING, /**< the receiver does not stream */
     STATION_QUERY_WHY_UNSUPPORTED,   /**< an identified receiver of a model this firmware does not configure */
+    STATION_QUERY_WHY_FIRMWARE,      /**< the receiver's build does not have the command (um98x_caps.h) */
 } station_query_why_t;
 
 typedef struct {

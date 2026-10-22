@@ -44,6 +44,7 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_NOT_IN_SAFE_MODE] = { "not_in_safe_mode", 409, "The station is not in safe mode" },
     [WEB_ERR_RECEIVER_NOT_STREAMING] = { "receiver_not_streaming", 409, "The receiver is not streaming" },
     [WEB_ERR_UNSUPPORTED_MODEL] = { "unsupported_model", 409, "This receiver model is not supported" },
+    [WEB_ERR_NEEDS_FIRMWARE] = { "needs_firmware", 409, "This receiver firmware does not have that command" },
     [WEB_ERR_PACKAGE_PINNED] = { "package_pinned", 409, "A receiver package is held by an open update session" },
     [WEB_ERR_MANIFEST_CHANGED] = { "manifest_changed", 409, "The offered update changed" },
     [WEB_ERR_NOT_OFFERED] = { "not_offered", 409, "This version is not offered" },

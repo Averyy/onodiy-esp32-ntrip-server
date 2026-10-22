@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "um98x_bands.h"
+#include "um98x_caps.h"
 #include "um98x_fixcheck.h"
 #include "um98x_profile.h"
 #include "um98x_query.h"
@@ -487,6 +488,19 @@ static void signal_test_brief(wj_t *w, const station_sgt_brief_t *b)
     wj_obj_close(w);
 }
 
+/* The commands this receiver's build lacks, each with the first build that has it (um98x_caps.h); {} when none
+ * or the build is unknown. */
+static void firmware_needs(wj_t *w, const um98x_info_t *rx)
+{
+    wj_obj_open(w, "firmware_needs");
+    for (unsigned c = 0; rx->valid && c < UM98X_CAP_COUNT; c++) {
+        if (!um98x_cap_ok(rx->model, rx->build, (um98x_cap_t)c)) {
+            wj_uint(w, um98x_cap_name((um98x_cap_t)c), um98x_cap_min_build(rx->model, (um98x_cap_t)c));
+        }
+    }
+    wj_obj_close(w);
+}
+
 static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
 {
     const station_status_t *st = &s->st;
@@ -525,6 +539,7 @@ static void sec_receiver(wj_t *w, const web_status_snap_t *s, bool pub)
         } else {
             wj_null(w, "rtcm1230_supported");   /* never applied: neither accepted nor refused */
         }
+        firmware_needs(w, &st->receiver);
     }
     if (!pub) {
         wj_str(w, "journal", web_journal_name(web_journal_view(st, s->boot.safe_mode)));
@@ -1086,6 +1101,7 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     } else {
         wj_null(w, "rtcm1230_supported");   /* never applied: neither accepted nor refused */
     }
+    firmware_needs(w, &st->receiver);
     wj_bool(w, "config_failed", st->config_failed);
     wj_uint(w, "config_retry_in_s", st->config_retry_in_s);
     wj_bool(w, "config_auto_retry", st->config_auto_retry);
@@ -1636,12 +1652,14 @@ web_err_t web_query_refusal(station_query_why_t why)
         return WEB_ERR_RECEIVER_NOT_STREAMING;
     case STATION_QUERY_WHY_UNSUPPORTED:
         return WEB_ERR_UNSUPPORTED_MODEL;
+    case STATION_QUERY_WHY_FIRMWARE:
+        return WEB_ERR_NEEDS_FIRMWARE;
     default:
         return WEB_ERR_INTERNAL;
     }
 }
 
-void web_build_query(wj_t *w, const station_query_status_t *q, const char *text)
+void web_build_query(wj_t *w, const station_query_status_t *q, const char *text, const um98x_info_t *rx)
 {
     static const char *const states[] = { "none", "waiting", "running", "done" };
     static const char *const results[] = { "answered", "refused", "no_answer", "not_sent" };
@@ -1671,6 +1689,12 @@ void web_build_query(wj_t *w, const station_query_status_t *q, const char *text)
         wj_obj_open(w, NULL);
         wj_str(w, "command", um98x_query_command(i));
         wj_bool(w, "pauses_servers", um98x_query_leased(i));
+        /* The build that adds it, when this receiver's build lacks it (um98x_caps.h): the station refuses it. */
+        if (i == UM98X_QUERY_GROUPS && rx != NULL && rx->valid && !um98x_cap_ok(rx->model, rx->build, UM98X_CAP_GROUPS)) {
+            wj_uint(w, "needs_build", um98x_cap_min_build(rx->model, UM98X_CAP_GROUPS));
+        } else {
+            wj_null(w, "needs_build");
+        }
         wj_obj_close(w);
     }
     wj_arr_close(w);
