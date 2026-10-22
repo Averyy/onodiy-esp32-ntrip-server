@@ -3264,3 +3264,16 @@ def test_ask_the_receiver_sends_the_chosen_command_and_shows_the_answer():
     # Nothing asked yet: no answer box, no line.
     assert fresh["pres"] == [] and "Copy" not in fresh["buttons"] and "Ask" in fresh["buttons"]
     assert not any(t.startswith(("Asking", "VERSIONA:")) for t in fresh["lines"])
+
+
+def test_last_receiver_update_message_can_be_dismissed():
+    """Settings, Updates: "Updated: the receiver runs ..." stays until the user dismisses it (its ×); then it is gone."""
+    last = {"outcome": "success", "failed_rule": 0, "cross_layout": False, "check_only": False, "reapply_ok": True,
+            "firmware": "R4.10Build11833", "build": 11833, "reason": "updated", "ended_unix": 1792678804,
+            "ended_age_s": 4}
+    flash = {"journal": "none", "flash_available": True, "last": last, "actions": {}}
+    shown, = run_editor([{"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE,
+                          "flash": flash, "click": "×"}])
+    said = [t for _, t in shown["msgs"]]
+    assert "Updated: the receiver runs R4.10Build11833.×" in said
+    assert not any(t.startswith("Updated:") for _, t in shown["after"]["msgs"])

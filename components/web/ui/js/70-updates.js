@@ -82,6 +82,22 @@ function outcomeText(m) {
   }
 }
 
+/* The last receiver session's outcome is shown until dismissed in this browser (by that session: a new one shows again). */
+let flashSeenKey = null; /* fallback when the browser storage is unavailable */
+const lastKey = l => [l.outcome, l.firmware, l.build, l.ended_unix || 0].join('|');
+const lastDismissed = l => store.get('flashSeen', flashSeenKey) === lastKey(l);
+
+/** The last session's outcome with its ×, or null once dismissed; onDismiss redraws. */
+function lastOutcomeMsg(last, onDismiss) {
+  if (!last || lastDismissed(last)) return null;
+  return h('div', { class: 'msg dismissable ' + outcomeTone(last.outcome) }, h('span', null, outcomeText(last)),
+    h('button', { type: 'button', class: 'btn small dismiss', 'aria-label': 'Dismiss', onclick: () => {
+      flashSeenKey = lastKey(last);
+      store.set('flashSeen', flashSeenKey);
+      onDismiss();
+    } }, '×'));
+}
+
 /* Uploads the station did not take because they wait for the user's answer: nothing failed. */
 const NOT_INSTALLED = ['same_image', 'rolled_back_ack_required'];
 
@@ -450,7 +466,7 @@ const updatesPart = {
         P.gnss_check.el,
         P.gnss_flash.el,
         rflow && rflow.text ? msg(rflow.tone || 'info', rflow.text) : null,
-        !rflow && last ? msg(outcomeTone(last.outcome), outcomeText(last)) : null,
+        !rflow ? lastOutcomeMsg(last, renderGnss) : null,
         !rflow && !last && lr && (lr.job === 'gnss_update' || lr.job === 'gnss_upload') && lr.result !== 'ok' ?
           h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
         gnssErr);
@@ -538,7 +554,7 @@ const updatesPart = {
         ]) : null,
         pr && pr.bytes_total ? bar(pr.bytes_sent / pr.bytes_total) : null,
         f.receiver_text ? [h('h3', { class: 'sub' }, 'What the receiver sent'), h('pre', { class: 'log short' }, f.receiver_text)] : null,
-        f.last && f.last.ended_unix && f.journal === 'none' ? msg(outcomeTone(f.last.outcome), outcomeText(f.last)) : null,
+        f.last && f.last.ended_unix && f.journal === 'none' ? lastOutcomeMsg(f.last, renderSession) : null,
         f.flash_available ? null : msg('', notEnabled(f.flash_reason) + ' Retrying and restarting the receiver from here wait for that; clearing works.'),
         sessionErr,
         h('div', { class: 'form-actions' }, buttons.slice().reverse()),
