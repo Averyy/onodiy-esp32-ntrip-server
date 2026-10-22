@@ -79,6 +79,24 @@ bool settings_is_available(void);
 /** Schema version found in NVS at boot (0 = fresh device). */
 uint16_t settings_stored_schema(void);
 
+/**
+ * The station's name while sys/hostname holds none: the build's name
+ * (CONFIG_LWIP_LOCAL_HOSTNAME), '-' and the last two bytes of the base MAC
+ * address as four lower-case hex digits, the four of the setup AP's name
+ * ("onodiy-c978" for the AP "onodiy-C978"). Each board has its own, so two
+ * stations on one network never claim the same .local name or DHCP
+ * hostname. Never stored: a rename stores sys/hostname.
+ */
+void settings_default_hostname(char *out, size_t size);
+
+/**
+ * The rule of settings_default_hostname for `name` and `mac`: the name is
+ * cut so the whole fits 32 characters and the digits always survive.
+ * @return length written (excluding the terminator), 0 if `out` is too
+ *         small for "-" and the digits.
+ */
+size_t settings_hostname_with_mac(const char *name, const uint8_t mac[6], char *out, size_t size);
+
 /** Read a string. ESP_ERR_NVS_NOT_FOUND if absent; out is always terminated. */
 esp_err_t settings_get_str(const char *ns, const char *key, char *out, size_t out_size);
 /** Write a string and post SETTINGS_EVENT_CHANGED. */

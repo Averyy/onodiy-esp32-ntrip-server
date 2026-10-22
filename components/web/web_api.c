@@ -173,7 +173,8 @@ void web_snap_status(web_status_snap_t *s)
 {
     memset(s, 0, sizeof(*s));
     s->uptime_s = web_now_s();
-    strlcpy(s->hostname, web_hostname_active(), sizeof(s->hostname));
+    web_station_name(s->hostname, sizeof(s->hostname));
+    strlcpy(s->hostname_active, web_hostname_active(), sizeof(s->hostname_active));
     strlcpy(s->version, esp_app_get_description()->version, sizeof(s->version));
     s->clock = ledger_clock_source();
     s->time_unix = s->clock != LEDGER_CLOCK_NONE ? diag_utc_now() : 0;   /* the trusted clock (GNSS sets no system time) */
@@ -390,6 +391,8 @@ static esp_err_t h_session_get(web_req_t *r)
         memset(&s_net, 0, sizeof(s_net));
     }
     bool authed = r->sess >= 0;
+    char name[33];
+    web_station_name(name, sizeof(name));
     web_session_snap_t snap = {
         .authenticated = authed,
         .admin_set = admin != WEB_ADMIN_NONE,
@@ -399,7 +402,7 @@ static esp_err_t h_session_get(web_req_t *r)
         .public_status = web_public_status(),
         .settings_available = settings_ok(),
         .idle_left_s = authed ? web_auth_session_left_s(r->sess) : 0,
-        .hostname = web_hostname_active(),
+        .hostname = name,
         .mdns_host = s_net.mdns_host,
         .ap_ssid = s_net.ap_ssid,
         .setup_step = authed ? read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_STEP, WEB_SETUP_STEP_NONE)
@@ -1764,6 +1767,7 @@ static esp_err_t h_system_put(web_req_t *r)
         if (err != ESP_OK) {
             return web_send_internal(r->req, err);
         }
+        web_station_name_set(in.hostname);
         reboot = (reboot == 1 || strcasecmp(in.hostname, web_hostname_active()) != 0) ? 1 : 0;
     }
     if (in.have_public_status) {

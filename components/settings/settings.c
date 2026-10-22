@@ -9,7 +9,9 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "nvs.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "settings";
 
@@ -113,6 +115,41 @@ uint16_t settings_stored_schema(void)
 {
     return s_stored_schema;
 }
+
+size_t settings_hostname_with_mac(const char *name, const uint8_t mac[6], char *out, size_t size)
+{
+    static const char hex[] = "0123456789abcdef";
+    const size_t tail = 5;   /* "-" and four digits */
+    if (out == NULL || mac == NULL || size < tail + 1) {
+        return 0;
+    }
+    size_t max_total = size - 1 < 32 ? size - 1 : 32;
+    size_t len = name != NULL ? strlen(name) : 0;
+    if (len > max_total - tail) {
+        len = max_total - tail;
+    }
+    if (len > 0) {
+        memcpy(out, name, len);
+    }
+    out[len] = '-';
+    out[len + 1] = hex[mac[4] >> 4];
+    out[len + 2] = hex[mac[4] & 0x0F];
+    out[len + 3] = hex[mac[5] >> 4];
+    out[len + 4] = hex[mac[5] & 0x0F];
+    out[len + tail] = '\0';
+    return len + tail;
+}
+
+#ifdef CONFIG_LWIP_LOCAL_HOSTNAME   /* not in the host test build (no lwip): settings_hostname_with_mac is tested there */
+void settings_default_hostname(char *out, size_t size)
+{
+    uint8_t mac[6] = { 0 };
+    if (esp_read_mac(mac, ESP_MAC_BASE) != ESP_OK) {
+        (void)esp_read_mac(mac, ESP_MAC_WIFI_STA);   /* as the setup AP's name */
+    }
+    (void)settings_hostname_with_mac(CONFIG_LWIP_LOCAL_HOSTNAME, mac, out, size);
+}
+#endif
 
 /* ---- generic open/read/write helpers -------------------------------------- */
 

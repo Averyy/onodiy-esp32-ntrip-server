@@ -61,7 +61,7 @@
  *    address, and the countdown to the AP closing: ap_close_in_s).
  *  - mDNS (Espressif's mdns component): the station answers
  *    <hostname>.local (the name in use, the stored sys/hostname or the
- *    default) on the home network and on its own AP, and advertises its web
+ *    board's own default, settings_default_hostname) on the home network and on its own AP, and advertises its web
  *    page as an _http._tcp service. When another device holds that name
  *    (a lost probe or an address conflict), the responder renames itself
  *    (<name>-2, then -3, ...); the status shows the name it answers

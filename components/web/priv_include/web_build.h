@@ -56,7 +56,7 @@ typedef struct {
     bool public_status;
     bool settings_available;
     uint32_t idle_left_s;          /**< with a session: until it expires idle */
-    const char *hostname;          /**< name in use (status device.hostname) */
+    const char *hostname;          /**< the station's name (status device.hostname) */
     const char *mdns_host;         /**< label the mDNS responder answers ("" = not running) */
     const char *ap_ssid;           /**< the station's own AP name ("" = not known yet) */
     uint8_t setup_step;            /**< sys/setup_step (web_setup_step_t, 0 = none) */
@@ -117,7 +117,8 @@ const char *web_flash_action_why(const web_flash_ctx_t *c, web_flash_action_t a,
 /** Everything /api/status (and the WebSocket status topic) is built from. */
 typedef struct {
     uint32_t uptime_s;
-    char hostname[33];             /**< hostname in use */
+    char hostname[33];             /**< the station's name (web_station_name) */
+    char hostname_active[33];      /**< hostname in use (another until the restart after a rename) */
     char version[32];              /**< running app version */
     int64_t time_unix;             /**< 0 = no trusted clock */
     ledger_clock_t clock;

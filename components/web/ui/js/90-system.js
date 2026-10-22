@@ -362,7 +362,7 @@ const systemPart = {
       /* The .local name answers only while the mDNS responder runs (mdns_host set). */
       const active = wifi && wifi.mdns_host;
       mount(deviceBox,
-        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'The new name takes effect at the next restart: http://' +
+        sys.hostname_active && sys.hostname_active !== sys.hostname ? msg('info', 'The new address works after the next restart: http://' +
           sys.hostname + '.local/' + (active ? ' (until then http://' + active + '.local/).' : '.')) : null,
         h('form', { oninput: () => {
           devDirty = name.value.trim() !== sys.hostname || pub.input.checked !== !!sys.public_status;
@@ -383,7 +383,8 @@ const systemPart = {
           if (r === undefined) return;
           devDirty = false;
           sys = r;
-          toast(r.reboot_required ? 'Saved. The new name takes effect after the next restart.' : 'Saved.', 'ok');
+          if (body.hostname) setBrand(body.hostname);
+          toast(r.reboot_required ? 'Saved. The new address works after the next restart.' : 'Saved.', 'ok');
           renderDevice();
         } }, fName.el, pub.el, err, h('div', { class: 'form-actions' }, save)));
     }

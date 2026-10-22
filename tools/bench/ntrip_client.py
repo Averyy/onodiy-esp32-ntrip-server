@@ -40,9 +40,9 @@ stream-NNNN.bin + .idx (NTRIP 2.0 chunking removed; ntrip_timing.py's
 format, so `ntrip_timing.py report` reads it).
 
 Examples:
-  uv run ntrip_client.py --host onodiy.local --sourcetable
+  uv run ntrip_client.py --host onodiy-1a2b.local --sourcetable
   export ROVER_PASSWORD=...     # the password chosen on the station's "Your rover" card
-  uv run ntrip_client.py --host onodiy.local --mount onodiy --password-env ROVER_PASSWORD \\
+  uv run ntrip_client.py --host onodiy-1a2b.local --mount onodiy-1a2b --password-env ROVER_PASSWORD \\
       --ntrip-version 2 --duration 600
   uv run ntrip_client.py --host 127.0.0.1 --port 2101 --mount ROVER --password-prompt --save --json
 

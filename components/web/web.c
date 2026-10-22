@@ -100,6 +100,8 @@ static httpd_handle_t s_server;
 static esp_netif_t *s_sta;
 static esp_netif_t *s_ap;
 static char s_hostname[33];
+static portMUX_TYPE s_name_lock = portMUX_INITIALIZER_UNLOCKED;
+static char s_name[33];   /* s_name_lock: web_station_name */
 static char s_etag[64];   /* "<app version>-<UI digest>" with quotes */
 static bool s_public;
 static esp_timer_handle_t s_tick_timer;
@@ -425,6 +427,20 @@ const char *web_hostname_active(void)
     return s_hostname;
 }
 
+void web_station_name(char *out, size_t size)
+{
+    taskENTER_CRITICAL(&s_name_lock);
+    strlcpy(out, s_name[0] != '\0' ? s_name : s_hostname, size);
+    taskEXIT_CRITICAL(&s_name_lock);
+}
+
+void web_station_name_set(const char *name)
+{
+    taskENTER_CRITICAL(&s_name_lock);
+    strlcpy(s_name, name, sizeof(s_name));
+    taskEXIT_CRITICAL(&s_name_lock);
+}
+
 char *web_http_buf(size_t *cap)
 {
     *cap = sizeof(s_http_buf);
@@ -443,7 +459,12 @@ static void load_hostname(void)
     if (s_sta != NULL && esp_netif_get_hostname(s_sta, &name) == ESP_OK && name != NULL && name[0] != '\0') {
         strlcpy(s_hostname, name, sizeof(s_hostname));
     } else {
-        strlcpy(s_hostname, CONFIG_LWIP_LOCAL_HOSTNAME, sizeof(s_hostname));
+        settings_default_hostname(s_hostname, sizeof(s_hostname));
+    }
+    char stored[33] = "";
+    if (settings_get_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, stored, sizeof(stored)) == ESP_OK &&
+        web_hostname_valid(stored)) {
+        web_station_name_set(stored);   /* as the network component takes it; else the name in use */
     }
 }
 

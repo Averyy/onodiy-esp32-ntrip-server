@@ -6,6 +6,15 @@ tag, rename that heading to the new version ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Network: each station has its own name, `onodiy-` and its hotspot's four characters
+  (`onodiy-c978.local` for the hotspot `onodiy-C978`). Two stations on one network
+  took `onodiy.local` from each other and both ended up under other names. A station
+  without a name set in Settings answers at its new name after the update; one with a
+  name keeps it. The local server's default mountpoint is the name, as before.
+- A new station name shows in the header and the tab title as soon as it is saved; the
+  station answers at the new address after the next restart, as before.
+- Receiver settings: Onocoy's message set with MSM4 observations (about 40% less data,
+  for a slow link or a server with a rate limit) next to the default MSM7 set.
 - Boards: the firmware knows which board it runs on and names it on Logs (Chip and
   Wi-Fi). NTRIP-X (GNS Electronics) support, in testing: its own install with 8 MB
   flash (`onodiy-install-um980-ntrx.bin` in the release), its receiver on GPIO16/15,

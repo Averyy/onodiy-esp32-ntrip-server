@@ -7,9 +7,9 @@ Read-only: besides logging in and out (POST/DELETE /api/session) it only
 sends GET requests. It never changes settings, reboots or starts updates.
 
 The admin password comes from $STATION_PASSWORD or a prompt; it is never
-written to the logs. The host is --host, $STATION_HOST, or onodiy.local
-(the station's mDNS name; use its IP address if your network has no mDNS,
-or 192.168.4.1 when joined to its setup AP).
+written to the logs. The host is --host or $STATION_HOST: the station's IP
+address, its mDNS name (onodiy-1a2b.local until it is renamed: the setup
+AP's four characters), or 192.168.4.1 when joined to its setup AP.
 
 Subcommands:
   dump    save status, receiver, signals, sky, casters, Wi-Fi, system, update,
@@ -22,7 +22,7 @@ Subcommands:
 
 Examples:
   STATION_HOST=192.168.1.50 uv run station.py dump
-  uv run station.py --host onodiy.local watch --logs
+  uv run station.py --host onodiy-1a2b.local watch --logs
   uv run station.py get /api/health
 """
 
@@ -339,8 +339,8 @@ def main() -> int:
         epilog=__doc__.split("\n\n", 1)[1],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--host", default=os.environ.get("STATION_HOST", "onodiy.local"),
-                    help="station address (default: $STATION_HOST or onodiy.local)")
+    ap.add_argument("--host", default=os.environ.get("STATION_HOST"), required="STATION_HOST" not in os.environ,
+                    help="station address (default: $STATION_HOST)")
     ap.add_argument("--timeout", type=float, default=8.0, help="HTTP timeout in seconds (default 8)")
     add_log_args(ap)
     sub = ap.add_subparsers(dest="cmd")

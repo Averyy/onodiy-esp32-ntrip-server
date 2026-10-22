@@ -108,8 +108,8 @@ remove multicast filter for IPv6` when mDNS stops before a planned restart)
 and `QEMU development build: emulated Ethernet instead of Wi-Fi, no setup
 AP`. The mDNS responder
 runs as on a station, on the emulated Ethernet port, under the overlay's own
-host name: `network: mDNS: answering as onodiy-qemu.local (web page as
-service onodiy-qemu)`. QEMU's user-mode network sends the guest's
+host name: `network: mDNS: answering as onodiy-qemu-0000.local (web page
+as service onodiy-qemu-0000)`. QEMU's user-mode network sends the guest's
 multicast announcements out of this computer onto its LAN, so under the
 station's default name an emulated station would announce `onodiy.local`
 beside a real one and could take the name from it; `sdkconfig.qemu` sets

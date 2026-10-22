@@ -8,10 +8,11 @@
  * network card and Settings.
  */
 
-/** The name in use (the DHCP name): from the object itself, the status or the session. */
+/** The name in use (the DHCP name; after a rename, the old one until the restart): from the object itself, the status or
+ * the session. */
 function stationHostname(net) {
-  return (net && net.hostname) || (S.status && S.status.device && S.status.device.hostname) ||
-    (S.session && S.session.hostname) || '';
+  const d = S.status && S.status.device;
+  return (net && net.hostname) || (d && (d.hostname_active || d.hostname)) || (S.session && S.session.hostname) || '';
 }
 
 /** http://<mdns_host>.local/ while the mDNS responder runs, else null. */

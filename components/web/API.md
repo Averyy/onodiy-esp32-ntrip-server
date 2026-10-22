@@ -418,7 +418,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 {"api": 1, "authenticated": true, "admin_set": true, "setup_done": false,
  "claim_allowed": false, "on_setup_ap": false, "public_status": false,
  "settings_available": true, "idle_left_s": 1740,
- "hostname": "onodiy", "mdns_host": "onodiy", "ap_ssid": "onodiy-1A2B",
+ "hostname": "onodiy-1a2b", "mdns_host": "onodiy-1a2b", "ap_ssid": "onodiy-1A2B",
  "setup_step": "reception"}
 ```
 
@@ -429,7 +429,7 @@ form, login form, setup wizard or dashboard.
 
 | Field | Notes |
 |---|---|
-| `hostname` | the station name in use (status `device.hostname`); the login page shows it |
+| `hostname` | the station's name (status `device.hostname`): the stored one, also before the restart that puts a new one in use, else the name in use; the login page shows it |
 | `mdns_host` | the host label the mDNS responder answers, without `.local`: the hostname, or `<hostname>-2` (then `-3`, ...) after the responder renamed itself because another device answered the name; `null` while the responder does not run (and from the goodbye before a planned restart on). The renamed label is never stored: the next boot probes the hostname again. The web page's `_http._tcp` service carries the same label as its instance name and follows a rename; IPv6 (AAAA) queries for the name are answered too (section 16) |
 | `ap_ssid` | the station's own access point name (`onodiy-XXXX`), `null` before Wi-Fi is set up |
 | `setup_step` | the setup wizard's next step as the station keeps it (`POST /api/setup/step`): `wifi`, `reception`, `onocoy`, `casters`; `null` without a session, once setup is done, or when none is stored |
@@ -498,12 +498,12 @@ object as sections (section 7), so the UI keeps one model. Admin form:
   "api": 1,
   "public": false,
   "uptime_s": 86400,
-  "device": {"hostname": "onodiy", "version": "v0.3.0", "dev_build": false,
+  "device": {"hostname": "onodiy-1a2b", "hostname_active": "onodiy-1a2b", "version": "v0.3.0", "dev_build": false,
              "time_unix": 1760090000, "time_source": "gnss", "settings_available": true},
   "safe_mode": {"active": false, "retry_in_s": null, "crashes": 0},
   "network": {"online": true, "ssid": "Home", "ip": "192.168.1.50", "rssi": -61,
               "upstream": "ok", "probe_age_s": 120, "offline_s": 0, "ap_active": false, "ap_reasons": [],
-              "ap_close_in_s": null, "mdns_host": "onodiy",
+              "ap_close_in_s": null, "mdns_host": "onodiy-1a2b",
               "assoc_no_ip_s": 0, "ladder_triggers": [],
               "cred_trial": false, "cred_trial_left_s": 0, "cred_pending": false, "pending_ssid": null,
               "cred_reverted": false, "cred_reverted_why": null},
@@ -548,6 +548,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 
 | Field | Notes |
 |---|---|
+| `device.hostname`, `device.hostname_active` | the station's name (as `GET /api/session`'s `hostname`: a new one from when it is saved) and the name in use on the network (the old one until the restart after a rename; admin form only) |
 | `device.time_source` | `ledger_clock_source()`: `gnss`, `sntp` or `none` (then `time_unix` is `null`) |
 | `safe_mode` | `lifecycle_get_boot_info()`: `retry_in_s` until the automatic normal-boot retry; the public form has `active` only |
 | `network.upstream` | last probe: `none`, `ok`, `no_ip`, `dns_failed`, `no_upstream` |
@@ -598,7 +599,7 @@ Public form (no session, public status on):
 
 ```json
 {"api": 1, "public": true, "uptime_s": 86400,
- "device": {"hostname": "onodiy"},
+ "device": {"hostname": "onodiy-1a2b"},
  "safe_mode": {"active": false},
  "receiver": {"state": "streaming", "best_bands": 4},
  "casters": [{"slot": 0, "name": "Onocoy", "state": "streaming"}],
@@ -1826,7 +1827,7 @@ never lock the owner's rover out.
 
 ```json
 {
-  "config": {"enabled": true, "mountpoint": "onodiy", "username": "rover", "password_set": true},
+  "config": {"enabled": true, "mountpoint": "onodiy-1a2b", "username": "rover", "password_set": true},
   "status": {
     "state": "listening", "port": 2101, "max_clients": 4,
     "clients": [
@@ -1841,7 +1842,7 @@ never lock the owner's rover out.
 
 | Field | Notes |
 |---|---|
-| `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the build's), the username `rover`, no password. The password is never returned: `password_set` says whether one is stored |
+| `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the default name), the username `rover`, no password. The password is never returned: `password_set` says whether one is stored |
 | `status.state` | `local_caster_state_t`: `off`; `wait_network` (on, but the station has no IPv4 address on the home network); `listening`; `error` (the port could not be opened; tried again every 10 s) |
 | `status.port`, `status.max_clients` | the build's: 2101 and 4 |
 | `status.clients[]` | the rovers streaming now, oldest first: `addr` (IPv6 in RFC 5952 form, an IPv4-mapped address as IPv4), `ntrip_version` (2 when its request said `Ntrip-Version: Ntrip/2.0`, else 1), `chunked` (its data goes in HTTP chunks: NTRIP 2.0 over HTTP/1.1), `connected_s` (since its success reply), `bytes_sent` (RTCM bytes its socket took; no reply header, no chunk framing), `epochs_dropped` (whole epochs the hub dropped because it read too slowly), `agent` (its `User-Agent`, printable ASCII cut to 47; `null` when it sent none) |
@@ -1891,7 +1892,7 @@ outside safe mode (the caster did not initialise).
 
 ```json
 {
-  "mdns_host": "onodiy",
+  "mdns_host": "onodiy-1a2b",
   "configured": true, "credentials_unreadable": false, "ssid": "Home",
   "online": true, "associated": true, "ip": "192.168.1.50", "rssi": -60, "channel": 6,
   "bssid": "AA:BB:CC:DD:EE:FF", "tx_power_dbm": 19.5, "ap_steering": true,
@@ -2026,7 +2027,7 @@ Errors: `409 busy` (a scan runs, or the station is connecting),
 ### `GET /api/system` (adm)
 
 ```json
-{"hostname": "onodiy", "hostname_active": "onodiy", "public_status": false,
+{"hostname": "onodiy-1a2b", "hostname_active": "onodiy-1a2b", "public_status": false,
  "setup_done": true, "settings_available": true,
  "version": "v0.3.0", "project": "onodiy-esp32-ntrip-server", "idf": "v6.1", "mac": "AA:BB:CC:DD:EE:FF",
  "chip": {"model": "esp32s3", "revision": "v0.2", "flash_mb": 16, "psram_mb": 8},
@@ -2070,7 +2071,10 @@ NTRIP-X) do not use.
 
 `{"hostname": "roof-station", "public_status": true}`, both optional.
 `hostname` 1-32 of `[A-Za-z0-9-]`, not starting or ending with `-`; it takes
-effect at the next boot (`"reboot_required": true`).
+effect at the next boot (`"reboot_required": true`). Until one is stored the
+station's name is `onodiy-` and the last two bytes of its base MAC address in
+lower-case hex, the four characters of its setup AP's name (`onodiy-1a2b` for
+`onodiy-1A2B`), so no two stations share a name.
 
 `"wiring": {"rx_gpio": 17, "tx_gpio": 18, "port": 2}` saves the receiver
 wiring for the next start; `"wiring": null`, or the build's own, erases the
@@ -2863,7 +2867,7 @@ browsers drop the entry at once. The pinned mDNS component does not
 withdraw the service's SRV and TXT records or the old host name's A/AAAA
 records: they expire from caches within their 120 s TTL, and until then a
 client using the old name reaches the station and gets `421 bad_host`.
-The QEMU development build answers as `onodiy-qemu` (its own host name:
+The QEMU development build answers as `onodiy-qemu-0000` (its own host name:
 QEMU's user-mode network carries its announcements onto the developer's
 LAN).
 

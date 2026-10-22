@@ -343,7 +343,7 @@ when any check is FAIL, so it can gate a script.
 ### `station.py`: our firmware over Wi-Fi
 
 ```sh
-export STATION_HOST=192.168.1.50     # or onodiy.local, or 192.168.4.1 on the setup AP
+export STATION_HOST=192.168.1.50     # or onodiy-1a2b.local, or 192.168.4.1 on the setup AP
 export STATION_PASSWORD=...          # else it asks
 uv run station.py                    # = dump
 uv run station.py watch --logs
@@ -712,10 +712,10 @@ station's own caster for a rover ("Your rover" on the NTRIP page, port
 field, or a mountpoint's stream frame by frame.
 
 ```sh
-uv run ntrip_client.py --host onodiy.local --sourcetable
+uv run ntrip_client.py --host onodiy-1a2b.local --sourcetable
 export ROVER_PASSWORD=...        # the password chosen on the "Your rover" card
-uv run ntrip_client.py --host onodiy.local --mount onodiy --password-env ROVER_PASSWORD --duration 600
-uv run ntrip_client.py --host onodiy.local --mount onodiy --password-env ROVER_PASSWORD --ntrip-version 2 --save
+uv run ntrip_client.py --host onodiy-1a2b.local --mount onodiy-1a2b --password-env ROVER_PASSWORD --duration 600
+uv run ntrip_client.py --host onodiy-1a2b.local --mount onodiy-1a2b --password-env ROVER_PASSWORD --ntrip-version 2 --save
 uv run ntrip_client.py --host 127.0.0.1 --port <run.sh --ntrip-port> --mount ROVER --password-prompt   # QEMU
 ```
 

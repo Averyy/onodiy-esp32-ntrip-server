@@ -19,7 +19,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 <tr>
 <td align="center" width="14%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
 <td align="center" width="26%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
-<td align="center" width="48%"><img src="docs/images/ntrip-x.png" width="100%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
+<td align="center" width="48%"><img src="docs/images/ntrip-x.png" width="50%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
 <td align="center" width="12%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
 </tr>
 <tr>
@@ -63,8 +63,7 @@ One firmware for every board; only the install differs.
 
 Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
 pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the
-NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise. The NTRIP-X's own
-firmware is in [`firmware/ntrip-x/`](firmware/ntrip-x/README.md), to go back to it.
+NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise.
 
 ## Install
 
@@ -86,8 +85,9 @@ ntrip-x-backup.bin`). After that, updates install from the web UI. Changes:
 1. Power the station and join its hotspot, `onodiy-XXXX`, with a phone (or open
    `http://192.168.4.1/`).
 2. Choose the admin password and your Wi-Fi network.
-3. Back on your Wi-Fi, open **`http://onodiy.local/`** and **Login**. Setup continues
-   with an antenna check and Onocoy.
+3. Back on your Wi-Fi, open **`http://onodiy-xxxx.local/`** (the hotspot's four
+   characters) and **Login**. Setup continues with an antenna check and Onocoy. Rename
+   the station under Settings.
 
 **Onocoy:** in the Onocoy console add an NTRIP credential (Reference Stations, NTRIP
 Credentials) and enter its username and password. The station connects to
@@ -103,9 +103,9 @@ NTRIP client to:
 
 | Setting | Value |
 |---|---|
-| Host | `onodiy.local`, or the station's IP address |
+| Host | `onodiy-xxxx.local`, or the station's IP address |
 | Port | `2101` |
-| Mountpoint | the one on the card (default `onodiy`) |
+| Mountpoint | the one on the card (default: the station's name) |
 | Username / password | the ones on the card (default username `rover`) |
 | NTRIP version | 2.0 (1.0 if the rover shows garbled data) |
 

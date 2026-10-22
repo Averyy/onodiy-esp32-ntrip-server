@@ -103,7 +103,8 @@ const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  arpCopy: g => arpCopyable(g), recoveryNow: hl => recoveryNow(hl),\n' +
   '  noRx: a => [noReceiverText(a[0], a[1]), noReceiverLead(a[0], a[1]), alertText(a[0], { link: a[1] })[1]],\n' +
   '  notEnabled: a => { S.status = a[0]; const r = notEnabled(a[1]); S.status = null; return r; },\n' +
-  '  pkgNeeded: p => packageNeededText(p),\n' +
+  '  pkgNeeded: p => packageNeededText(p), onocoySet: l => onocoySet(l), rtcmName: n => rtcmName(n),\n' +
+  '  addrRows: a => { S.status = a[0]; const r = stationAddressRows(a[1]).map(x => x[0]); S.status = null; return r; },\n' +
   '  refusalText: r => errText(new ApiError(r.status, r.error)) };\n})()', ctx);
 const out = JSON.parse(casesJson).map(([fn, arg]) => fns[fn](arg));
 process.stdout.write(JSON.stringify(out));
@@ -1319,6 +1320,21 @@ def test_regional_messages_without_satellites_are_not_red():
         UI_JS / "60-receiver.js").read_text()
 
 
+def test_onocoy_set_with_msm4_or_msm7():
+    """The message editor offers Onocoy's list with MSM7 (the default) or MSM4 observations; both read as the Onocoy set
+    (in any order, each every second), anything else as custom."""
+    msm7 = [[m, 1] for m in (1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230)]
+    msm4 = [[m, 1] for m in (1230, 1134, 1124, 1114, 1094, 1084, 1074, 1033, 1005)]
+    mixed = [[m, 1] for m in (1005, 1033, 1074, 1087, 1097, 1117, 1127, 1137, 1230)]
+    slow = [[m, 30 if m == 1005 else 1] for m in (1005, 1033, 1074, 1084, 1094, 1114, 1124, 1134, 1230)]
+    out = run_ui([("onocoySet", msm7), ("onocoySet", msm4), ("onocoySet", mixed), ("onocoySet", slow),
+                  ("onocoySet", msm4[:-1]), ("rtcmName", 1134)])
+    assert out == ["MSM7", "MSM4", None, None, None, "NavIC observations (MSM4)"]
+    text = (UI_JS / "60-receiver.js").read_text()
+    assert "btn('Onocoy set, MSM7', () => useSet(ONOCOY_RTCM)" in text
+    assert "btn('Onocoy set, MSM4', () => useSet(ONOCOY_RTCM_MSM4)" in text
+
+
 def test_message_and_satellite_lists_are_one_line_rows():
     """No stacked blocks for the RTCM messages and the satellites on a phone: a table row each. The satellites keep one
     line; a message's name wraps in its half-width card rather than ending in "…"."""
@@ -2242,3 +2258,18 @@ def test_receiver_updates_off_says_why():
     (pending,) = run_ui([("refusalText", {"status": 409, "error": {"code": "busy", "reason": "wiring_pending",
                                                                      "message": "busy"}})])
     assert pending == "The receiver wiring changes at the next restart. Restart the station first, then update the receiver."
+
+
+def test_renamed_station_before_its_restart_is_no_name_conflict():
+    """Saved under a new name, the station answers its old one until the restart: the header shows the new name
+    (device.hostname), and the address rows compare the mDNS name with the name in use (device.hostname_active), so no
+    "used by another device" line. A real conflict (onodiy-c978-2 for onodiy-c978) still gets it."""
+    renamed = {"device": {"hostname": "roof", "hostname_active": "onodiy-c978"}}
+    net = {"mdns_host": "onodiy-c978", "ip": "192.168.1.50"}
+    clash = {"mdns_host": "onodiy-c978-2", "ip": "192.168.1.50"}
+    same = {"device": {"hostname": "onodiy-c978", "hostname_active": "onodiy-c978"}}
+    public = {"device": {"hostname": "onodiy-c978"}}
+    out = run_ui([("addrRows", [renamed, net]), ("addrRows", [same, clash]), ("addrRows", [public, net])])
+    assert out == [["Name", "Address"], ["Name", "", "Address"], ["Name", "Address"]]
+    text = (UI_JS / "90-system.js").read_text()
+    assert "if (body.hostname) setBrand(body.hostname);" in text

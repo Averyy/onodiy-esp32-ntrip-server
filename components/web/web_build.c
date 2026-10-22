@@ -374,6 +374,7 @@ static void sec_device(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_obj_open(w, "device");
     wj_str(w, "hostname", s->hostname);
     if (!pub) {
+        wj_str(w, "hostname_active", s->hostname_active[0] != '\0' ? s->hostname_active : s->hostname);
         wj_str(w, "version", s->version);
         wj_bool(w, "dev_build", dev_build(s->version));
         if (s->clock == LEDGER_CLOCK_NONE) {

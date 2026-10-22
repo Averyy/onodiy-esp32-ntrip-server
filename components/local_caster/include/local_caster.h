@@ -181,7 +181,7 @@ esp_err_t local_caster_start(void);
 /**
  * The config. password is always "" (password_set says whether one is
  * stored). With nothing stored, the mountpoint is the station's hostname
- * (settings sys/hostname, else CONFIG_LWIP_LOCAL_HOSTNAME), read now.
+ * (settings sys/hostname, else settings_default_hostname), read now.
  * @return ESP_ERR_INVALID_STATE before local_caster_init() (safe mode),
  *         ESP_ERR_INVALID_ARG for NULL.
  */

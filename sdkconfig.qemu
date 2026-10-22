@@ -40,10 +40,11 @@ CONFIG_NETWORK_QEMU_ETHERNET=y
 CONFIG_ETH_OPENETH_DMA_RX_BUFFER_NUM=16
 
 # A name of its own. QEMU's user-mode network (slirp) carries the guest's
-# multicast mDNS out of the developer's machine onto its LAN, where a real
-# station may answer onodiy.local: under the station's default name the
-# emulated one would announce itself there too and could take the name
-# from the station (or be renamed by it). Running slirp with restrict=on
+# multicast mDNS out of the developer's machine onto its LAN, where real
+# stations answer their names: the default name (this one, '-' and the
+# MAC's last four digits: onodiy-qemu-0000, the emulated MAC being zero)
+# says the station there is an emulated one and never matches a real
+# station's. Running slirp with restrict=on
 # would keep the packets in, but it also cuts the guest's outbound update
 # check and needs a guestfwd per local caster port.
 CONFIG_LWIP_LOCAL_HOSTNAME="onodiy-qemu"

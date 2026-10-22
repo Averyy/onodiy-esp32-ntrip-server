@@ -392,3 +392,24 @@ TEST_CASE("settings: every device-state writer stores without a change event; se
     TEST_ASSERT_EQUAL(ESP_OK, esp_event_handler_unregister(SETTINGS_EVENT, SETTINGS_EVENT_CHANGED, count_changed));
     nvs_down();
 }
+
+TEST_CASE("settings: the default hostname is the build's name and the setup AP's four digits", "[settings]")
+{
+    const uint8_t mac[6] = { 0x24, 0x58, 0x7c, 0x34, 0xC9, 0x78 };
+    char out[33];
+    TEST_ASSERT_EQUAL_size_t(11, settings_hostname_with_mac("onodiy", mac, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("onodiy-c978", out);   /* the AP is "onodiy-C978" */
+    const uint8_t zero[6] = { 0 };
+    TEST_ASSERT_EQUAL_size_t(16, settings_hostname_with_mac("onodiy-qemu", zero, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("onodiy-qemu-0000", out);
+    /* A long name is cut to 32 characters in all; the digits survive. */
+    TEST_ASSERT_EQUAL_size_t(32, settings_hostname_with_mac("abcdefghijabcdefghijabcdefghij-long", mac, out,
+                                                            sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("abcdefghijabcdefghijabcdefg-c978", out);
+    TEST_ASSERT_EQUAL_size_t(5, settings_hostname_with_mac("", mac, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("-c978", out);
+    char small[6];
+    TEST_ASSERT_EQUAL_size_t(5, settings_hostname_with_mac("onodiy", mac, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("-c978", small);
+    TEST_ASSERT_EQUAL_size_t(0, settings_hostname_with_mac("onodiy", mac, small, 5));
+}

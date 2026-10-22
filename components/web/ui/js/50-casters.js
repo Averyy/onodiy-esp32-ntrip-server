@@ -698,7 +698,7 @@ function casterSummary(c, st, preset) {
     casterDetail(st, { unreached: true, tls: plain }),
     /* Public servers ban fast streams: a warning only when this one gets close. */
     avg !== null && avg > 28000 ? h('div', { class: 'small t-warn' }, 'Average over 60s: ' + fmt.kbps(avg) +
-      '. That is close to the limits of public servers; consider MSM4 messages instead of MSM7.') : null,
+      '. That is close to the limits of public servers; consider the Onocoy set with MSM4 in Receiver settings.') : null,
     st.unreached_s ? h('div', { class: 'hintline' }, 'Server not reached for ' + fmt.dur(st.unreached_s) +
       (st.reason && st.reason !== 'none' ? ': ' + lbl(L.fail, st.reason) : '') + '.') : null,
     casterEvidence(st, plain),

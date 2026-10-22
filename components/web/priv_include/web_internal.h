@@ -83,6 +83,16 @@ void web_public_status_set_cached(bool on);
 /** Hostname in use (DHCP / mDNS name of the station interface). */
 const char *web_hostname_active(void);
 
+/**
+ * The station's name as the pages show it (header, tab title): the stored
+ * sys/hostname, also before the restart that puts a new one in use, else
+ * the name in use. Any task.
+ */
+void web_station_name(char *out, size_t size);
+
+/** A name just stored (PUT /api/system): shown from now on. */
+void web_station_name_set(const char *name);
+
 /** Queue the periodic work now (events, progress) instead of waiting for the next tick. */
 void web_kick(void);
 

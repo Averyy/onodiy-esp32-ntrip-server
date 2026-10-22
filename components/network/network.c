@@ -1579,10 +1579,10 @@ static void flush_move_record(void)
 
 /* ---- mDNS -------------------------------------------------------------------------------- */
 
-/* The name in use: the stored sys/hostname, else the build's default. */
+/* The name in use: the stored sys/hostname, else the board's default (load_hostname). */
 static const char *hostname_in_use(void)
 {
-    return s_hostname[0] != '\0' ? s_hostname : CONFIG_LWIP_LOCAL_HOSTNAME;
+    return s_hostname;
 }
 
 /* The responder renamed itself (a lost probe, or another host answering for
@@ -3279,19 +3279,18 @@ static void net_task(void *arg)
 static void load_hostname(void)
 {
     char name[33] = "";
+    settings_default_hostname(s_hostname, sizeof(s_hostname));
     if (settings_is_available() &&
         settings_get_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, name, sizeof(name)) == ESP_OK && name[0] != '\0') {
         if (net_hostname_valid(name)) {
             strlcpy(s_hostname, name, sizeof(s_hostname));
         } else {
-            ESP_LOGW(TAG, "stored hostname \"%s\" is not valid: using \"%s\"", name, CONFIG_LWIP_LOCAL_HOSTNAME);
+            ESP_LOGW(TAG, "stored hostname \"%s\" is not valid: using \"%s\"", name, s_hostname);
         }
     }
-    if (s_hostname[0] != '\0') {
-        esp_err_t err = esp_netif_set_hostname(s_sta, s_hostname);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "hostname: %s", esp_err_to_name(err));
-        }
+    esp_err_t err = esp_netif_set_hostname(s_sta, s_hostname);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "hostname: %s", esp_err_to_name(err));
     }
 }
 

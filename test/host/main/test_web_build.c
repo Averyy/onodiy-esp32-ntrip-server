@@ -20,7 +20,8 @@ static void fixture(void)
     web_status_snap_t *s = &s_snap;
     memset(s, 0, sizeof(*s));
     s->uptime_s = 86400;
-    strcpy(s->hostname, "onodiy");
+    strcpy(s->hostname, "roof");
+    strcpy(s->hostname_active, "onodiy");   /* renamed, not restarted yet */
     strcpy(s->version, "v0.3.0");
     s->time_unix = 1760090000;
     s->clock = LEDGER_CLOCK_GNSS;
@@ -105,6 +106,8 @@ TEST_CASE("admin status maps sentinels, alerts and the protected slot", "[web_bu
     TEST_ASSERT_EQUAL(1, at(root, "api")->valueint);
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "public")));
     const cJSON *dev = at(root, "device");
+    TEST_ASSERT_EQUAL_STRING("roof", at(dev, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("onodiy", at(dev, "hostname_active")->valuestring);
     TEST_ASSERT_EQUAL_STRING("v0.3.0", at(dev, "version")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(dev, "dev_build")));
     TEST_ASSERT_EQUAL_STRING("gnss", at(dev, "time_source")->valuestring);
@@ -301,7 +304,7 @@ TEST_CASE("public status leaves out hosts, addresses, SSID and versions", "[web_
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(sm, "active")));
     const cJSON *dev = at(root, "device");
     TEST_ASSERT_EQUAL(1, cJSON_GetArraySize(dev));
-    TEST_ASSERT_EQUAL_STRING("onodiy", at(dev, "hostname")->valuestring);
+    TEST_ASSERT_EQUAL_STRING("roof", at(dev, "hostname")->valuestring);   /* not the name in use */
     const cJSON *rx = at(root, "receiver");
     TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(rx));
     TEST_ASSERT_EQUAL(4, at(rx, "best_bands")->valueint);

@@ -25,11 +25,20 @@ const RTCM_NAMES = {
   1074: 'GPS observations (MSM4)', 1075: 'GPS observations (MSM5)', 1077: 'GPS observations (MSM7)',
   1084: 'GLONASS observations (MSM4)', 1087: 'GLONASS observations (MSM7)', 1094: 'Galileo observations (MSM4)',
   1097: 'Galileo observations (MSM7)', 1114: 'QZSS observations (MSM4)', 1117: 'QZSS observations (MSM7)',
-  1124: 'BeiDou observations (MSM4)', 1127: 'BeiDou observations (MSM7)', 1137: 'NavIC observations (MSM7)',
+  1124: 'BeiDou observations (MSM4)', 1127: 'BeiDou observations (MSM7)', 1134: 'NavIC observations (MSM4)',
+  1137: 'NavIC observations (MSM7)',
   1230: 'GLONASS biases',
 };
 const EPHEMERIS_MSGS = [1019, 1020, 1042, 1045, 1046];
 const ONOCOY_RTCM = [1005, 1033, 1077, 1087, 1097, 1117, 1127, 1137, 1230];
+/* The same with MSM4 observations: Onocoy takes MSM4 to MSM7. */
+const ONOCOY_RTCM_MSM4 = [1005, 1033, 1074, 1084, 1094, 1114, 1124, 1134, 1230];
+/** Which Onocoy set `list` ([msg, period_s] each) is, every second: 'MSM7', 'MSM4' or null. */
+function onocoySet(list) {
+  if (!list.every(x => x[1] === 1)) return null;
+  const is = set => list.length === set.length && set.every(m => list.some(x => x[0] === m));
+  return is(ONOCOY_RTCM) ? 'MSM7' : is(ONOCOY_RTCM_MSM4) ? 'MSM4' : null;
+}
 const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
 /* The profile's default link speed (um98x_profile.h). */
 const DEFAULT_BAUD = 460800;
@@ -828,11 +837,11 @@ function receiverForms(g, latest, done, onCompare, fold) {
     const list = Array.from(rows.children, r => [Number(r.children[0].value.trim()), Number(r.children[1].value.trim())]);
     const n = list.length;
     const each = list.every(x => x[1] === 1);
-    const onocoy = n === ONOCOY_RTCM.length && each && ONOCOY_RTCM.every(m => list.some(x => x[0] === m));
+    const onocoy = onocoySet(list);
     const c = !n ? ['None', 'warn'] : onocoy ? ['Recommended', 'ok'] : ['Custom', ''];
     setChip.textContent = c[0];
     setChip.className = 'badge ' + c[1];
-    summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? 'The Onocoy set: ' : '') +
+    summary.textContent = !n ? 'No messages: the receiver sends no corrections.' : (onocoy ? 'The Onocoy set, ' + onocoy + ': ' : '') +
       n + (n === 1 ? ' message' : ' messages') + (!each ? '.' : n === 1 ? ', every second.' : ', each every second.');
     patch(msgList, list.filter(x => x[0]).map(x => h('li', null, h('b', null, String(x[0])), ' ' + rtcmName(x[0]),
       x[1] !== 1 ? ' · every ' + x[1] + 's' : '')));
@@ -867,13 +876,17 @@ function receiverForms(g, latest, done, onCompare, fold) {
         sumUp();
         saveSync();
       }, 'small'),
-      btn('Use the Onocoy set', () => {
-        clear(rows);
-        for (const m of ONOCOY_RTCM) addRow(m, 1);
-        profDirty = true;
-        sumUp();
-        saveSync();
-      }, 'small')));
+      btn('Onocoy set, MSM7', () => useSet(ONOCOY_RTCM), 'small'),
+      btn('Onocoy set, MSM4', () => useSet(ONOCOY_RTCM_MSM4), 'small')),
+    h('p', { class: 'hint' }, 'MSM7 (the default) carries every observation at full precision. MSM4 is about 40% less data, ' +
+      'for a slow link or a server with a rate limit. Onocoy takes both.'));
+  function useSet(set) {
+    clear(rows);
+    for (const m of set) addRow(m, 1);
+    profDirty = true;
+    sumUp();
+    saveSync();
+  }
   const antBox = h('div', { class: 'stack' }, F.antenna_model.el, h('div', { class: 'cols c2' }, F.antenna_serial.el, F.antenna_setup_id.el),
     h('p', { class: 'hint' }, 'Serial and setup ID are only sent with a model.'));
 

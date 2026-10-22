@@ -71,8 +71,7 @@ _Static_assert(CONFIG_LWIP_MAX_SOCKETS >= 28 && CONFIG_LWIP_MAX_ACTIVE_TCP >= 28
                "the local caster needs CONFIG_LWIP_MAX_SOCKETS and CONFIG_LWIP_MAX_ACTIVE_TCP of at least 28 "
                "(sdkconfig.defaults); an existing sdkconfig keeps its old value: set both to 28 in it or start a "
                "new build directory");
-_Static_assert(sizeof(CONFIG_LWIP_LOCAL_HOSTNAME) <= LOCAL_CASTER_MOUNT_LEN,
-               "the build's hostname must fit the default mountpoint");
+_Static_assert(33u <= LOCAL_CASTER_MOUNT_LEN, "a hostname (1-32 characters) must fit the default mountpoint");
 _Static_assert(LCAST_CHUNK_DATA >= RTCM_HUB_MIN_READ_BUF, "a hub read must fit one chunk");
 _Static_assert(LOCAL_CASTER_MAX_CONNS <= 16u, "the connection index goes into 4 bits of the journal records");
 
@@ -321,7 +320,7 @@ static void set_sock_opts(int fd)
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 }
 
-/* The station's host name (settings sys/hostname, else the build's). A
+/* The station's host name (settings sys/hostname, else the board's default). A
  * stored name the mountpoint rule refuses is passed over, as the network
  * component passes over an invalid one. Not from the caster task (NVS). */
 static bool host_name(char *out, size_t size)
@@ -332,9 +331,9 @@ static bool host_name(char *out, size_t size)
         strlcpy(out, name, size);
         return true;
     }
-    strlcpy(out, CONFIG_LWIP_LOCAL_HOSTNAME, size);
-    /* None stored, or one that cannot be a mountpoint: the build's for good. Else (NVS not
-     * readable now) the build's for the moment, and false: read it again later. */
+    settings_default_hostname(out, size);
+    /* None stored, or one that cannot be a mountpoint: the default for good. Else (NVS not
+     * readable now) the default for the moment, and false: read it again later. */
     return err == ESP_OK || err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_NVS_INVALID_LENGTH;
 }
 
@@ -1343,7 +1342,7 @@ esp_err_t local_caster_init(void)
         return ESP_ERR_NO_MEM;
     }
     if (!host_name(s_default_mount, sizeof(s_default_mount))) {
-        /* NVS not readable now: the build's name until a later read works. */
+        /* NVS not readable now: the default name until a later read works. */
         __atomic_store_n(&s_mount_failed_ms, now_ms(), __ATOMIC_RELEASE);
         __atomic_store_n(&s_mount_failed, true, __ATOMIC_RELEASE);
         __atomic_store_n(&s_mount_stale, true, __ATOMIC_RELEASE);
