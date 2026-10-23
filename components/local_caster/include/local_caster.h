@@ -188,6 +188,14 @@ esp_err_t local_caster_start(void);
 esp_err_t local_caster_get_config(local_caster_cfg_t *out);
 
 /**
+ * The stored password, for the web page's Show button (the only reader).
+ * "" when none is stored. The caller wipes its copy.
+ * @return ESP_OK; ESP_ERR_INVALID_ARG for NULL or cap 0;
+ *         ESP_ERR_INVALID_STATE before local_caster_init() (safe mode).
+ */
+esp_err_t local_caster_get_password(char *out, size_t cap);
+
+/**
  * Check, store (one blob, replaced as a unit) and apply. An empty password
  * keeps the stored one. Sessions end (LOCAL_CASTER_END_SETTINGS) when the
  * caster is turned off or the mountpoint, username or password changes.

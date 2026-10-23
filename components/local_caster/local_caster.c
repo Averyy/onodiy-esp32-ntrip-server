@@ -1455,6 +1455,20 @@ esp_err_t local_caster_get_config(local_caster_cfg_t *out)
     return ESP_OK;
 }
 
+esp_err_t local_caster_get_password(char *out, size_t cap)
+{
+    if (out == NULL || cap == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_ready) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreTake(s_cfg_mutex, portMAX_DELAY);
+    strlcpy(out, s_cfg.password, cap);
+    xSemaphoreGive(s_cfg_mutex);
+    return ESP_OK;
+}
+
 esp_err_t local_caster_set_config(const local_caster_cfg_t *cfg, const char **field, const char **rule)
 {
     if (!s_ready) {

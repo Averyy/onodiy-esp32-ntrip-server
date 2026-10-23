@@ -374,10 +374,13 @@ status is on, **adm** = admin session, **claim** = section 3.
 | DELETE | `/api/casters/{n}` | adm | Remove slot n's server: the slot is empty again | `ntrip_server_remove_slot` |
 | PUT, DELETE | `/api/casters/{n}/ca` | adm | Store / remove the slot's CA certificate | settings `cstN/ca_pem` |
 | POST | `/api/casters/{n}/retry` | adm | Try a stopped (or waiting) slot once now | `ntrip_server_retry_slot` |
+| GET | `/api/casters/{n}/password` | adm | The slot's stored password (the Show button) | `ntrip_server_get_config` |
 | GET | `/api/local-caster` | adm | Local server: config and live status | `local_caster_get_config`, `local_caster_get_status` |
 | PUT | `/api/local-caster` | adm | Edit it, turn it on or off | `local_caster_set_config` |
+| GET | `/api/local-caster/password` | adm | The stored rover password (the Show button) | `local_caster_get_password` |
 | GET | `/api/wifi` | adm | Wi-Fi state, AP, cached scan | network |
 | PUT | `/api/wifi` | adm | Station credentials, AP password | `network_set_credentials`, settings |
+| GET | `/api/wifi/ap-password` | adm | The setup hotspot's stored password (the Show button) | settings |
 | POST | `/api/wifi/scan` | adm | Fresh scan | `network_scan_start` |
 | POST | `/api/wifi/pending/retry` | adm | Try the pending credentials again | `network_retry_pending_credentials` |
 | POST | `/api/wifi/pending/discard` | adm | Forget the pending credentials | `network_discard_pending_credentials` |
@@ -1563,7 +1566,9 @@ removed slot's old name never shows.
  "dup_stream_ack": false, "test_onocoy": false}
 ```
 
-Passwords are never returned (`password_set` only). Every entry
+Passwords are not in this answer (`password_set` only).
+`GET /api/casters/{n}/password` returns `{"password": "..."}` (`""` when none is stored;
+`405` for other methods): the page asks only when the user presses Show. Every entry
 (`{"slot", "config", "status", "onocoy_ready"}`) says with `onocoy_ready`
 whether it is an Onocoy slot that is set up: a slot that counts as Onocoy
 (host in `onocoy.com`, or a test Onocoy slot), `mountpoint`, `username` and
@@ -1893,13 +1898,18 @@ never lock the owner's rover out.
 
 | Field | Notes |
 |---|---|
-| `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the default name), the username `rover`, no password. The password is never returned: `password_set` says whether one is stored |
+| `config` | `local_caster_get_config()`; `null` in safe mode (not loaded). With nothing stored: off, the mountpoint the station's hostname (`sys/hostname`, else the default name), the username `rover`, no password. The password is not in this answer: `password_set` says whether one is stored, `GET /api/local-caster/password` returns it |
 | `status.state` | `local_caster_state_t`: `off`; `wait_network` (on, but the station has no IPv4 address on the home network); `listening`; `error` (the port could not be opened; tried again every 10 s) |
 | `status.port`, `status.max_clients` | the build's: 2101 and 4 |
 | `status.clients[]` | the rovers streaming now, oldest first: `addr` (IPv6 in RFC 5952 form, an IPv4-mapped address as IPv4), `ntrip_version` (2 when its request said `Ntrip-Version: Ntrip/2.0`, else 1), `chunked` (its data goes in HTTP chunks: NTRIP 2.0 over HTTP/1.1), `connected_s` (since its success reply), `bytes_sent` (RTCM bytes its socket took; no reply header, no chunk framing), `epochs_dropped` (whole epochs the hub dropped because it read too slowly), `agent` (its `User-Agent`, printable ASCII cut to 47; `null` when it sent none) |
 | `status.sessions`, `status.bytes_sent`, `status.stalled` | since boot: sessions started, RTCM bytes sent in all of them, sessions closed because the rover took no data for 10 s |
 | `status.listen_errno` | the `errno` of the socket, bind or listen that failed (`ENOMEM`: no task or no memory); `null` unless `state` is `error` |
 | `status.refused` | since boot: `not_local` (closed at once without a reply: not a local address, the gateway, over the setup hotspot or from its subnet), `login` (`401`: a wrong or missing username or password), `throttled` (`429`: too many wrong logins, from that address or in total), `full` (`503`: 4 rovers streaming or no free hub consumer, or closed at once: all 6 connections rovers or answers being written), `bad_request` (`400` or `403`: not an NTRIP `GET`, too long, not complete within 5 s, or from a web browser; or closed without a reply: nothing sent within 2 s) |
+
+### `GET /api/local-caster/password` (adm)
+
+`{"password": "..."}`: the stored password, `""` when none is stored. The page asks
+only when the user presses Show. `409 safe_mode` in safe mode.
 
 ### `PUT /api/local-caster` (adm)
 
@@ -1993,6 +2003,12 @@ the setup page counts it down), or the recovery AP's lifetime left; `null`
 while the AP is down or nothing is scheduled (first setup without
 credentials, the offline fallback, a recovery AP held past its lifetime by
 a connected client).
+
+### `GET /api/wifi/ap-password` (adm)
+
+`{"password": "..."}`: the setup hotspot's stored password, `""` when it is open. The
+page asks only when the user presses Show. The station's own Wi-Fi password and the
+admin password have no such call.
 
 ### `PUT /api/wifi` (adm)
 

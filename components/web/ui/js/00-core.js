@@ -247,10 +247,40 @@ function extLink(label, url) {
 }
 
 /** Labelled input with hint and error line. Returns {el, input, error(msg)}. */
+let revealSeq = 0;
+
+/**
+ * A Show/Hide button for a password input: the typed text in plain view while it is on. Pressing Show on an empty
+ * input that has a stored password to ask for (input.revealFetch, from pwInput) fills it in first.
+ */
+function revealButton(input, labelId) {
+  input.setAttribute('aria-labelledby', labelId);
+  const b = h('button', { type: 'button', class: 'reveal', 'aria-pressed': 'false', onclick: async () => {
+    const on = input.type === 'password';
+    if (on && input.value === '' && input.revealFetch) {
+      b.disabled = true;
+      try {
+        const r = await input.revealFetch();
+        if (r && r.password && input.value === '') input.value = r.password;
+      } catch (e) {
+        toast(errText(e), 'bad');
+      }
+      b.disabled = false;
+    }
+    input.type = on ? 'text' : 'password';
+    b.textContent = on ? 'Hide' : 'Show';
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  } }, 'Show');
+  return b;
+}
+
 function field(label, input, hint) {
   const err = h('small', { class: 'err', hidden: true });
+  const reveal = input.hasAttribute('data-reveal');
+  const labelId = 'lbl' + (++revealSeq);
   const el = h('div', { class: 'field' },
-    h('label', null, h('span', { class: 'lbl' }, label), input),
+    h('label', null, h('span', { class: 'lbl', id: reveal ? labelId : null }, label),
+      reveal ? h('span', { class: 'pwwrap' }, input, revealButton(input, labelId)) : input),
     hint ? h('small', { class: 'hint' }, hint) : null,
     err);
   return {
@@ -276,8 +306,11 @@ function numInput(value, attrs) {
     autocomplete: 'off' }, attrs || {}));
 }
 
-function pwInput(attrs) {
-  return h('input', Object.assign({ type: 'password', autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false' }, attrs || {}));
+/** A password input with a Show/Hide button; storedPath: the GET that returns the stored password ({password}), for Show. */
+function pwInput(attrs, storedPath) {
+  const el = h('input', Object.assign({ type: 'password', 'data-reveal': 1, autocomplete: 'new-password', autocapitalize: 'off', spellcheck: 'false' }, attrs || {}));
+  if (storedPath) el.revealFetch = () => api('GET', storedPath);
+  return el;
 }
 
 function selectInput(options, value, attrs) {

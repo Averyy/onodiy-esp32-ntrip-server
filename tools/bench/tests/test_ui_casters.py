@@ -2442,15 +2442,15 @@ def test_settings_is_network_updates_the_receiver_and_the_danger_zone_without_fo
     assert off["subs"] == ["Setup hotspot", "Install manually"]
     rows = dict(off["rows"])
     assert rows["Wi-Fi"] == "Home" and rows["Signal"] == " Weak (\u221282\u00a0dBm)"
-    assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Set (change)"
+    assert rows["Network name"] == "onodiy-1A2B" and rows["Password"] == "Show (change)"
     # Change network small in the title row; the hotspot's password through the link in its row, no button of its own.
-    assert off["buttons"] == ["Change network", "change", "Check now", "Choose file", "Choose file", "Start",
+    assert off["buttons"] == ["Change network", "Show", "change", "Check now", "Choose file", "Choose file", "Start",
                               "Receiver settings", "Restart", "Change password", "Revert", "Edit pins", "Factory reset"]
     assert off["lines"] == ["Opens for first setup, when the station cannot reach your Wi-Fi, and after BOOT is held.",
                             "Position, signals, correction messages and how the receiver is set up."]
     # The hotspot's password: its field and buttons once its button is pressed (the admin password's stays as it is).
     assert off["after"]["fields"] == ["Station name", "New password"]
-    assert off["after"]["buttons"][:5] == ["Change network", "change", "Cancel", "Remove password", "Set password"]
+    assert off["after"]["buttons"][:5] == ["Change network", "Show", "change", "Show", "Cancel"]
     assert off["after"]["buttons"][-5:] == ["Restart", "Change password", "Revert", "Edit pins", "Factory reset"]
     # Offline, the hotspot open without a password: no signal row (no word without its dBm), nothing to remove.
     assert "Signal" not in dict(hot["rows"]) and dict(hot["rows"])["Password"] == "None (set password)"
@@ -3008,7 +3008,7 @@ def test_rover_card_says_how_to_point_a_rover_at_the_station():
     assert off_nonet["lines"] == [ROVER_OFF]
     assert on["state"] == ["muted", "Waiting for a rover"]
     assert on["rows"] == [["Host", "onodiy.local or 192.168.1.50"], ["Port", "2101"], ["Mountpoint", "onodiy"],
-                          ["Username", "rover"], ["Password", "Set"], ["NTRIP version", "1.0 or 2.0"]]
+                          ["Username", "rover"], ["Password", "Show"], ["NTRIP version", "1.0 or 2.0"]]
     assert on["copy"] == ["onodiy.local", "192.168.1.50", "2101", "onodiy", "rover"]
     assert on["lines"] == [ROVER_LIMITS] and on["msgs"] == [] and on["rovers"] == []
     assert ip_only["rows"][0] == ["Host", "192.168.1.50"]
@@ -3062,8 +3062,8 @@ def test_rover_editor_fields_say_what_they_do_and_their_defaults():
                               "hyphens or underscores.", "Default: rover.", "8 to 63 characters, no spaces. No default: you choose it."]
         assert v["cards"] == [] and "caster" not in json.dumps(v).lower()
     assert edit["placeholder"] == "Stored, leave empty to keep" and first["placeholder"] == ""
-    assert edit["lines"] == [] and edit["buttons"] == ["Save", "Cancel"]
-    assert first["lines"] == ["Choose a password first."] and first["buttons"] == ["Save and turn on", "Cancel"]
+    assert edit["lines"] == [] and edit["buttons"] == ["Show", "Save", "Cancel"]
+    assert first["lines"] == ["Choose a password first."] and first["buttons"] == ["Show", "Save and turn on", "Cancel"]
 
 
 def test_rover_editor_sends_the_fields_and_keeps_the_stored_password():
@@ -3133,7 +3133,7 @@ def test_rover_card_on_the_ntrip_page():
     (no config) and on a station without the endpoint, the servers as before."""
     on = ntrip_rover([200, lcast()])
     assert on["cards"] == ["RTK2go", "More servers", "Local server"] and on["cls"] == "card wide"
-    assert on["sw"] == ["true", "Local server"] and on["before"]["buttons"] == ["Edit", ""]
+    assert on["sw"] == ["true", "Local server"] and on["before"]["buttons"] == ["Edit", "", "Show"]
     assert on["before"]["rows"][2] == ["Mountpoint", "onodiy"]
     safe = ntrip_rover([200, {"config": None, "status": lcast(enabled=False)["status"]}])
     old = ntrip_rover([404, {"error": {"code": "not_found"}}])

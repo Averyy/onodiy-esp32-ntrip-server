@@ -70,7 +70,7 @@ function apStatus(w, onPassword) {
   const close = typeof ap.close_in_s === 'number' ? ap.close_in_s : ap.recovery_left_s || null;
   return kv([
     ['Network name', ap.ssid],
-    ['Password', [ap.password_set ? 'Set' : h('span', { class: 't-warn' }, 'None'), ' (', pwLink, ')']],
+    ['Password', [ap.password_set ? secretValue('ap', '/api/wifi/ap-password') : h('span', { class: 't-warn' }, 'None'), ' (', pwLink, ')']],
     ap.active ? ['Open because', (ap.reasons || []).map(r => lbl(L.apReason, r)).join(', ') || DASH] : null,
     ap.active ? ['Address on it', h('a', { href: 'http://192.168.4.1/' }, 'http://192.168.4.1/')] : null,
     ap.active && w.mdns_host ? ['Web address on it', h('a', { href: 'http://' + w.mdns_host + '.local/' }, 'http://' + w.mdns_host + '.local/')] : null,
@@ -294,11 +294,14 @@ const systemPart = {
     }
 
     /* ---- The setup hotspot, in the Network card: its password form behind one button ---- */
-    const apPw = pwInput({ maxlength: 63, autocomplete: 'new-password' });
+    const apPw = pwInput({ maxlength: 63, autocomplete: 'new-password' }, '/api/wifi/ap-password');
     const apErr = errBox();
     const apField = field('New password', apPw, '8 to 63 characters, no accents or emoji. Used the next time it opens.');
     /* Only the hotspot's password: the station keeps its Wi-Fi connection. */
-    const apPut = () => api('PUT', '/api/wifi', { ap_password: apPw.value });
+    const apPut = () => {
+      delete shownSecrets.ap;
+      return api('PUT', '/api/wifi', { ap_password: apPw.value });
+    };
     const apSet = h('button', { type: 'submit', class: 'btn primary' }, 'Set password');
     const apShut = () => {
       apPw.value = '';

@@ -229,7 +229,7 @@ typedef struct {
     char mountpoint[48];   /**< Onocoy slots: the console's mountpoint (the NTRIP 2.0 POST target) */
     char username[48];     /**< NTRIP 2.0 Basic-auth user; Onocoy slots: the console's username, [A-Za-z0-9._-]
                                 (NTRIP 1.0 sends it as the mountpoint) */
-    char password[64];     /**< secret: never returned to the web UI */
+    char password[64];     /**< secret: only in the web UI's Show answer */
     bool password_set;     /**< output only: a password is stored */
     bool clear_password;   /**< input only (set_config): remove the stored password */
     ntrip_proto_t proto;

@@ -9,7 +9,7 @@
  * keeps the API's word for a server: caster.
  *
  * Editor rules mirror the station's (PUT /api/casters/{n}), which has the
- * last word; byte limits count UTF-8 bytes. Passwords are write-only: an
+ * last word; byte limits count UTF-8 bytes. Passwords are sent only on Save (Show asks for the stored one): an
  * empty field keeps the stored one while the host stays. Onocoy and an open
  * server at once need the user's acknowledgement (409 caster_policy /
  * dup_stream_ack_required); while both stream, the open server's card
@@ -302,7 +302,8 @@ function casterEditor(entry, opts) {
   const mountName = onocoyMountName(opts.hostname);
   const mp = textInput(oldLayout ? '' : cfg.mountpoint, { maxlength: 47 });
   const user = textInput(cfg.username, { maxlength: 47 });
-  const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' });
+  const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored (leave empty to keep)' : '' },
+    '/api/casters/' + slot + '/password');
   const backoff = selectInput([['standard', PACE.standard[0]], ['polite', PACE.polite[0]]], cfg.backoff_profile === 'polite' ? 'polite' : 'standard');
   /* The retry pace across server switches. presetPace: a preset set the pace (in this editor, or RTK2go's fixed
    * polite of a stored RTK2go slot), not the owner. ownPace: the owner's pace to go back to on Other server: the
@@ -802,6 +803,37 @@ function roverHosts(net) {
 /* A value to type into the rover's NTRIP client: a tap selects all of it, for a copy. */
 const copyable = v => h('code', { class: 'copy' }, breakable(String(v)));
 
+/* Passwords the user asked to see, by place: kept across the page's rebuilds until Hide (or a change of that password). */
+const shownSecrets = {};
+
+/** A Show button; it asks the station for the stored password (GET path) and says it, to copy, with a Hide button after it. */
+function secretValue(key, path) {
+  const val = h('span');
+  const toggle = h('button', { type: 'button', class: 'linkbtn' });
+  const paint = () => {
+    const pw = shownSecrets[key];
+    clear(val);
+    if (pw !== undefined) val.append(copyable(pw), ' ');
+    toggle.textContent = pw === undefined ? 'Show' : 'Hide';
+  };
+  toggle.addEventListener('click', async () => {
+    if (shownSecrets[key] !== undefined) {
+      delete shownSecrets[key];
+    } else {
+      toggle.disabled = true;
+      try {
+        shownSecrets[key] = (await api('GET', path)).password;
+      } catch (e) {
+        toast(errText(e), 'bad');
+      }
+      toggle.disabled = false;
+    }
+    paint();
+  });
+  paint();
+  return [val, toggle];
+}
+
 /*
  * Your rover's card under its head (d: GET /api/local-caster, s: the
  * status). Off: what it does, in one line. On, always in full: its state,
@@ -834,7 +866,7 @@ function roverSummary(d, s) {
     rx && !(typeof rx.rtcm_age_ms === 'number' && rx.rtcm_age_ms <= 3000) ?
       msg('warn', 'No corrections from the receiver right now: connected rovers get nothing.') : null,
     kv([['Host', hosts.length ? hosts.map((x, i) => [i ? ' or ' : '', copyable(x)]) : DASH], ['Port', copyable(port)],
-      ['Mountpoint', copyable(c.mountpoint)], ['Username', copyable(c.username)], ['Password', c.password_set ? 'Set' : 'Not set'],
+      ['Mountpoint', copyable(c.mountpoint)], ['Username', copyable(c.username)], ['Password', c.password_set ? secretValue('rover', '/api/local-caster/password') : 'Not set'],
       ['NTRIP version', '1.0 or 2.0']]),
     list.map(oneRover),
     h('p', { class: 'muted small' }, 'At most ' + (st.max_clients || 4) + ' rovers at once. ' +
@@ -855,7 +887,8 @@ function roverEditor(cfg, opts) {
   let dirty = false;
   const mp = textInput(cfg.mountpoint, { maxlength: 47 });
   const user = textInput(cfg.username, { maxlength: 31 });
-  const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored, leave empty to keep' : '' });
+  const pw = pwInput({ maxlength: 63, placeholder: cfg.password_set ? 'Stored, leave empty to keep' : '' },
+    '/api/local-caster/password');
   const F = {
     mountpoint: field('Mountpoint', mp, 'The name your rover asks for. Default: the station\'s name' +
       (opts.hostname ? ' (' + opts.hostname + ')' : '') + '. Letters, digits, dots, hyphens or underscores.'),
@@ -891,6 +924,7 @@ function roverEditor(cfg, opts) {
     }
     err.hidden = true;
     try {
+      delete shownSecrets.rover;
       const d = await busy(saveBtn, () => api('PUT', '/api/local-caster', body));
       dirty = false;
       pw.value = '';

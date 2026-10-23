@@ -141,7 +141,7 @@ extern const size_t web_api_route_count;
  * WebSocket and the catch-all (web_api.c checks the table fits at compile
  * time, so a new route can never make the server fail to start).
  */
-#define WEB_MAX_URI_HANDLERS 76
+#define WEB_MAX_URI_HANDLERS 78
 #define WEB_EXTRA_URI_HANDLERS 2   /* /ws and the catch-all */
 
 /** True if `path` (no query) is one of the API paths (for 405 versus 404). */

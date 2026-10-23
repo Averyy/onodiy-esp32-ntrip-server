@@ -623,6 +623,12 @@ select {
   padding-left: 4px;
   text-indent: 3.2px;
 }
+/* A password field with a Show/Hide button inside its right edge. */
+.pwwrap { display: block; position: relative; }
+.pwwrap > input { padding-right: 4.5rem; }
+.reveal { position: absolute; top: 0; right: 0; min-height: 44px; min-width: 4rem; padding: 0 0.8rem; border: 0; background: none;
+  color: var(--accent); font: inherit; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+.reveal:hover { text-decoration: underline; }
 textarea { min-height: 7rem; font-family: var(--mono); font-size: 0.85rem; }
 input.invalid, select.invalid, textarea.invalid { border-color: var(--bad); }
 /* Placeholders in the dark theme: the browser's grey is too faint there (the light theme keeps the browser's). */

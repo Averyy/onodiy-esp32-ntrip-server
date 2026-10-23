@@ -234,7 +234,7 @@ function wifiPicker(wifi, opts) {
   const list = h('div', { class: 'nets' });
   const other = textInput('', { maxlength: 32, placeholder: 'Network name' });
   const otherField = field('Network name', other, 'For a hidden network: type its exact name.');
-  const pw = pwInput({ autocomplete: 'off' });
+  const pw = pwInput({ autocomplete: 'off', 'data-reveal': null });
   const pwField = field('Wi-Fi password', pw, ' ');
   const pwHint = pwField.el.querySelector('.hint');
   const scanInfo = h('span', { class: 'muted small' });
@@ -766,7 +766,8 @@ async function startWizard(claim) {
     const name = String((W.system && W.system.hostname) || (S.session && S.session.hostname) || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 47);
     const mpI = textInput(current && cfg.mountpoint ? cfg.mountpoint : name, { maxlength: 47 });
     const userI = textInput(current ? cfg.username : '', { maxlength: 47 });
-    const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Saved (leave empty to keep)' : '' });
+    const pw = pwInput({ maxlength: 63, placeholder: ono && cfg.password_set ? 'Saved (leave empty to keep)' : '' },
+      ono && cfg.password_set ? '/api/casters/' + slot.slot + '/password' : null);
     const F = { mountpoint: field('Mountpoint', mpI, 'Any name; shows only in your Onocoy dashboard.'), username: field('Username', userI),
       password: field('Password', pw) };
     /* Onocoy's password rule, checked softly: a note while the typed password breaks it, saving still allowed. */

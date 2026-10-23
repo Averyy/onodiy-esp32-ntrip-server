@@ -114,6 +114,32 @@ static bool settings_ok(void)
     return settings_is_available();
 }
 
+/* Zero a secret in a way the compiler keeps. */
+static void wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = p;
+    while (n--) {
+        *v++ = 0;
+    }
+}
+
+/*
+ * {"password": pw}: the answer to a Show button. Passwords are in no other
+ * answer; the page asks for one only when the user presses Show. The answer
+ * buffer is wiped again once it has gone out.
+ */
+static esp_err_t send_secret(httpd_req_t *req, const char *pw)
+{
+    web_resp_t resp;
+    resp_begin(&resp, req, 200);
+    wj_obj_open(&resp.w, NULL);
+    wj_str(&resp.w, "password", pw);
+    wj_obj_close(&resp.w);
+    esp_err_t err = web_resp_end(&resp);
+    wipe(resp.w.buf, resp.w.len);
+    return err;
+}
+
 static uint8_t read_u8(const char *ns, const char *key, uint8_t def)
 {
     uint8_t v = def;
@@ -1281,12 +1307,15 @@ static bool parse_slot_path(const char *uri, size_t *slot, bool *ca)
 }
 
 static bool parse_retry_path(const char *uri, size_t *slot);
+static bool parse_password_path(const char *uri, size_t *slot);
+static esp_err_t caster_password(httpd_req_t *req, size_t slot);
 
 /* Not a slot or its CA: 405 for the retry action (POST only), else 404. */
 static esp_err_t slot_path_refused(httpd_req_t *req)
 {
     size_t slot = 0;
-    return web_send_err(req, parse_retry_path(req->uri, &slot) ? WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
+    return web_send_err(req, parse_retry_path(req->uri, &slot) || parse_password_path(req->uri, &slot) ?
+                                 WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
 }
 
 /* Reconnect a slot with its config unchanged (after its CA changed). */
@@ -1372,6 +1401,9 @@ static esp_err_t h_caster_get(web_req_t *r)
 {
     size_t slot = 0;
     bool ca = false;
+    if (parse_password_path(r->req->uri, &slot)) {
+        return caster_password(r->req, slot);
+    }
     if (!parse_slot_path(r->req->uri, &slot, &ca)) {
         return slot_path_refused(r->req);
     }
@@ -1422,11 +1454,10 @@ static esp_err_t h_caster_delete(web_req_t *r)
     return ca ? caster_ca(r, slot, false) : caster_delete(r, slot);
 }
 
-/* "/api/casters/<n>/retry": the slot index. */
-static bool parse_retry_path(const char *uri, size_t *slot)
+/* "/api/casters/<n><suffix>": the slot index. */
+static bool parse_suffix_path(const char *uri, const char *suffix, size_t *slot)
 {
     static const char prefix[] = "/api/casters/";
-    static const char suffix[] = "/retry";
     size_t plen = sizeof(prefix) - 1;
     if (strncmp(uri, prefix, plen) != 0) {
         return false;
@@ -1440,15 +1471,44 @@ static bool parse_retry_path(const char *uri, size_t *slot)
         v = v * 10u + (size_t)(*p - '0');
         p++;
     }
-    if (strncmp(p, suffix, sizeof(suffix) - 1) != 0) {
+    size_t slen = strlen(suffix);
+    if (strncmp(p, suffix, slen) != 0) {
         return false;
     }
-    p += sizeof(suffix) - 1;
+    p += slen;
     if ((*p != '\0' && *p != '?') || v >= slot_count()) {
         return false;
     }
     *slot = v;
     return true;
+}
+
+/* "/api/casters/<n>/retry": the slot index. */
+static bool parse_retry_path(const char *uri, size_t *slot)
+{
+    return parse_suffix_path(uri, "/retry", slot);
+}
+
+/* "/api/casters/<n>/password": the slot index. */
+static bool parse_password_path(const char *uri, size_t *slot)
+{
+    return parse_suffix_path(uri, "/password", slot);
+}
+
+/* GET /api/casters/{n}/password: the slot's stored password, for the Show button. */
+static esp_err_t caster_password(httpd_req_t *req, size_t slot)
+{
+    ntrip_caster_cfg_t *c = &s_cfg[slot];
+    esp_err_t err = ntrip_server_get_config(slot, c, true);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(req, WEB_ERR_SAFE_MODE);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(req, err);
+    }
+    esp_err_t sent = send_secret(req, c->password);
+    wipe(c->password, sizeof(c->password));
+    return sent;
 }
 
 /* POST /api/casters/{n}/retry: the user's retry of a stopped (or waiting) slot. */
@@ -1458,8 +1518,8 @@ static esp_err_t h_caster_post(web_req_t *r)
     bool ca = false;
     if (!parse_retry_path(r->req->uri, &slot)) {
         /* the slot and its CA take no POST; any other suffix is unknown */
-        return web_send_err(r->req, parse_slot_path(r->req->uri, &slot, &ca) ? WEB_ERR_METHOD_NOT_ALLOWED
-                                                                               : WEB_ERR_NOT_FOUND);
+        return web_send_err(r->req, parse_slot_path(r->req->uri, &slot, &ca) || parse_password_path(r->req->uri, &slot) ?
+                                                  WEB_ERR_METHOD_NOT_ALLOWED : WEB_ERR_NOT_FOUND);
     }
     if (!load_configs()) {
         return web_send_err(r->req, WEB_ERR_SAFE_MODE);
@@ -1493,6 +1553,22 @@ static esp_err_t send_local_caster(httpd_req_t *req)
 static esp_err_t h_lcast_get(web_req_t *r)
 {
     return send_local_caster(r->req);
+}
+
+/* GET /api/local-caster/password: the stored password, for the Show button. */
+static esp_err_t h_lcast_password(web_req_t *r)
+{
+    char pw[LOCAL_CASTER_PASS_LEN];
+    esp_err_t err = local_caster_get_password(pw, sizeof(pw));
+    if (err == ESP_ERR_INVALID_STATE) {
+        return web_send_err(r->req, WEB_ERR_SAFE_MODE);
+    }
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
+    }
+    esp_err_t sent = send_secret(r->req, pw);
+    wipe(pw, sizeof(pw));
+    return sent;
 }
 
 /* The words local_caster_check_config() has for a field the parser refused before it got there (the wrong JSON type,
@@ -1561,6 +1637,18 @@ static bool ap_password_set(void)
 {
     char pw[65];
     return settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_AP_PASS, pw, sizeof(pw)) == ESP_OK && pw[0] != '\0';
+}
+
+/* GET /api/wifi/ap-password: the setup hotspot's stored password ("" when it is open), for the Show button. */
+static esp_err_t h_wifi_ap_password(web_req_t *r)
+{
+    char pw[65] = "";
+    if (settings_get_str(SETTINGS_NS_WIFI, SETTINGS_KEY_WIFI_AP_PASS, pw, sizeof(pw)) != ESP_OK) {
+        pw[0] = '\0';
+    }
+    esp_err_t sent = send_secret(r->req, pw);
+    wipe(pw, sizeof(pw));
+    return sent;
 }
 
 static esp_err_t h_wifi_get(web_req_t *r)
@@ -2647,7 +2735,9 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/local-caster", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_lcast_get),
     { .uri = "/api/local-caster", .method = HTTP_PUT, .access = WEB_ACC_ADMIN, .body = WEB_BODY_JSON,
       .max_body = WEB_JSON_MAX_LCAST, .fn = h_lcast_put },
+    ROUTE("/api/local-caster/password", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_lcast_password),
     ROUTE("/api/wifi", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_wifi_get),
+    ROUTE("/api/wifi/ap-password", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_wifi_ap_password),
     ROUTE("/api/wifi", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_put),
     ROUTE("/api/wifi/scan", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_scan),
     ROUTE("/api/wifi/pending/retry", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_wifi_pending_retry),
@@ -2692,7 +2782,7 @@ bool web_api_path_known(const char *path)
 {
     size_t slot = 0;
     bool ca = false;
-    if (parse_slot_path(path, &slot, &ca) || parse_retry_path(path, &slot)) {
+    if (parse_slot_path(path, &slot, &ca) || parse_retry_path(path, &slot) || parse_password_path(path, &slot)) {
         return true;
     }
     for (size_t i = 0; i < web_api_route_count; i++) {
