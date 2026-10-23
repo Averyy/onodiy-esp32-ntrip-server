@@ -44,8 +44,9 @@
  *
  * Banner (web UI, every page, admin session): "App vX / receiver build Y
  * available - Update / Later". It never offers a lower version (downgrades
- * are manual uploads), a version in ota/bad_ver, or anything to a dev build
- * ("+dev": no comparable version). "Later" is browser-side state only.
+ * are manual uploads), or a version in ota/bad_ver. A dev build is offered
+ * an app release newer than the one it grew from; the receiver's build is
+ * compared on its own, whatever the app's version. "Later" is browser-side state only.
  *
  * One update at a time, across both chips: an app download, manual upload or
  * install holds lifecycle's update slot (lifecycle_update_claim, APP) from
@@ -218,14 +219,14 @@ typedef struct {
     bool rollback_available;       /**< the other slot holds a valid image */
     char rollback_version[32];     /**< the version a rollback starts (that image's), "" when unknown or none */
     char latest_version[32];       /**< "" until a check succeeded (kept over a restart: ota/manifest) */
-    bool app_update_available;     /**< banner: newer than running, not in bad_ver, running is not a dev build */
+    bool app_update_available;     /**< banner: newer than running (a dev build: than its base release), not in bad_ver */
     bool latest_rolled_back;       /**< latest_version is in ota/bad_ver: not offered, installable with a warning */
     char gnss_running[48];         /**< receiver firmware as detected */
     char gnss_latest[48];
     uint32_t gnss_latest_build;
     char gnss_release[48];         /**< the latest release's package for the detected model, offered or not; "" = none, or no release known */
     uint32_t gnss_release_build;
-    bool gnss_update_available;    /**< banner: a higher build for the detected model, running is not a dev build */
+    bool gnss_update_available;    /**< banner: a higher build for the detected model */
     fw_update_gnss_block_t gnss_blocked;
     uint32_t gnss_blocked_left_s;  /**< for FW_GNSS_BLOCK_APP_TRIAL: seconds until the trial ends */
     uint32_t gnss_expected_downtime_s; /**< for the confirmation dialog (never a gate) */
@@ -394,8 +395,7 @@ bool fw_update_is_rolled_back(const char *version);
  *
  * @param out <0, 0 or >0 like strcmp.
  * @return ESP_ERR_INVALID_ARG if either string is not a version (e.g. a dev
- *         build "v0.3.0-4-g47fc47b-dirty+dev"; dev builds are never offered
- *         updates).
+ *         build "v0.3.0-4-g47fc47b-dirty+dev").
  */
 esp_err_t fw_update_version_compare(const char *a, const char *b, int *out);
 

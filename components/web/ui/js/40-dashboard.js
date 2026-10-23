@@ -339,7 +339,7 @@ function receiverCard(s, st, lv) {
 /** Today's online share: whole at 0 % and 100 %, else two decimals, rounded down (never "100.00" short of 100). */
 function onlineShare(on, off) {
   const p = 100 * on / (on + off);
-  return (p === 0 || p === 100 ? String(p) : (Math.floor(p * 100) / 100).toFixed(2)) + NB + '%';
+  return (p === 0 || p === 100 ? String(p) : (Math.floor(p * 100) / 100).toFixed(2)) + '%';
 }
 
 /*
@@ -468,6 +468,7 @@ function sparkline(vals, label, o) {
     d += (has(i - 1) ? 'L' : 'M') + x(i) + ' ' + y(vals[i]);
     if (!has(i - 1) && !has(i + 1)) d += 'h0';
   }
+  if (n === 1 && known.length) d = 'M0 ' + y(vals[0]) + 'H' + W;   /* one bucket so far: a flat line, not a dot at the edge */
   let loss = '';
   (o.lost || []).forEach((k, i) => {
     if (k) loss += 'M' + x(i) + ' 0V' + H;
@@ -475,7 +476,6 @@ function sparkline(vals, label, o) {
   const fv = o.fmtv || (v => String(Math.round(v)));
   return h('div', { class: 'spark-box' },
     svg('svg', { class: 'spark', viewBox: '0 0 ' + W + ' ' + H, preserveAspectRatio: 'none', role: 'img', 'aria-label': label },
-      svg('path', { class: 'spark-base', d: 'M0 ' + (H - 0.5) + 'H' + W }),
       loss ? svg('path', { class: 'spark-loss', d: loss }) : null,
       d ? svg('path', { class: 'spark-line', d: d }) : null),
     h('span', { class: 'spark-scale muted' }, known.length ? fv(lo) + ' to ' + fv(hi) + (o.unit || '') : ''));
@@ -490,25 +490,31 @@ function pingNow(p) {
 
 function pingDay(p) {
   if (!p || !p.sent) return 'No readings yet';
-  const lost = p.lost ? p.lost + ' lost (' + (100 * p.lost / p.sent).toFixed(1) + NB + '%)' : 'none lost';
+  const lost = p.lost ? p.lost + ' lost (' + (100 * p.lost / p.sent).toFixed(1) + '%)' : 'none lost';
   if (p.avg_ms === null) return 'No replies · ' + lost;
   return dotted(['avg ' + pingMs(p.avg_ms), 'worst ' + pingMs(p.max_ms), lost]);
 }
 
 function perfRow(name, now, day, line) {
-  return h('div', { class: 'perf-row' }, h('span', { class: 'perf-name' }, name), h('span', { class: 'perf-now' }, now),
-    h('span', { class: 'perf-day muted' }, day), line);
+  return h('div', { class: 'perf-row' },
+    h('span', { class: 'perf-text' }, h('span', { class: 'perf-name' }, name), ' ', h('span', { class: 'perf-day muted' }, day)),
+    h('span', { class: 'perf-now' }, now), line);
 }
 
 function perfCard(s, st, mon) {
   const m = s.monitor;
   const span = m ? Math.min(m.span_s || 0, MON_DAY_S) : 0;
-  const head = cardHead('Performance', span ? badge(span >= MON_DAY_S - 300 ? 'Last 24h' : 'Last ' + fmt.dur(span), '') : null,
+  const head = cardHead('Performance', null,
     headLink(st, null, { label: 'Details', name: 'Details on the Logs page', href: '#/logs' }));
   const wrap = (...kids) => h('section', { class: 'card wide perf-card' }, head, kids);
   if (st.key === 'safe_mode') return wrap(mutedLine('Not available in safe mode.'));
   if (!m || !m.running || !span) return wrap(mutedLine('Waiting for the first reading (every 30s).'));
-  const col = k => (mon && mon[k]) || [];
+  /* All lines share one time axis; buckets before the first reading of any figure are empty and left out. */
+  const series = k => (mon && mon[k]) || [];
+  const starts = ['router_avg', 'server_avg', 'rssi_avg', 'cpu_max', 'mem_min']
+    .map(k => series(k).findIndex(v => v !== null && v !== undefined)).filter(i => i >= 0);
+  const first = starts.length ? Math.min(...starts) : 0;
+  const col = k => series(k).slice(first);
   const server = m.server.name ? m.server.name + ' ping' : 'Server ping';
   const r = m.rssi, c = m.cpu, mem = m.memory;
   return wrap(h('div', { class: 'perf' },
@@ -516,13 +522,15 @@ function perfCard(s, st, mon) {
       sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('router_lost') })),
     perfRow(server, pingNow(m.server), pingDay(m.server),
       sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, unit: 'ms', lost: col('server_lost') })),
-    perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now) : DASH,
+    perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now, true) : DASH,
       r.avg !== null ? dotted(['avg ' + dbmText(r.avg), 'weakest ' + dbmText(r.min)]) : 'No readings yet',
       sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10, unit: NB + 'dBm', fmtv: v => String(Math.round(v)).replace('-', '\u2212') })),
     perfRow('CPU', fmt.pct(c.now), c.avg !== null ? dotted(['avg ' + fmt.pct(c.avg), 'peak ' + fmt.pct(c.max)]) : 'No readings yet',
       sparkline(col('cpu_max'), 'CPU peaks over the same time', { lo: 0, hi: 100, unit: '%' })),
     perfRow('Free memory', fmt.bytes(mem.free), mem.min !== null ? 'lowest ' + fmt.bytes(mem.min) : 'No readings yet',
-      sparkline(col('mem_min'), 'Free memory over the same time', { zero: true, fmtv: fmt.bytes }))));
+      sparkline(col('mem_min'), 'Free memory over the same time', { zero: true, fmtv: fmt.bytes }))),
+    h('p', { class: 'muted small' }, span >= MON_DAY_S - 300 ? 'Calculated from the last 24h.' :
+      'Calculated from the ' + fmt.dur(span) + ' since the station started.'));
 }
 
 /* Each constellation with satellites: its count, and a dot in its colour under every band it is tracked on (the count

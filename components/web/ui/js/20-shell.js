@@ -813,6 +813,7 @@ async function logout() {
     /* the session is gone either way */
   }
   live.stop();
+  forgetSecrets();
   S.session = Object.assign({}, S.session, { authenticated: false });
   showLogin();
 }
@@ -820,6 +821,7 @@ async function logout() {
 bus.on('unauthorized', () => {
   if (!S.session || !S.session.authenticated) return;
   live.stop();
+  forgetSecrets();
   S.session = Object.assign({}, S.session, { authenticated: false });
   showLogin('Your session ended. Login again.');
 });

@@ -378,8 +378,7 @@ esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
     fw_lock();
     const fw_manifest_gnss_t *g =
         (ok && g_fw.have_manifest)
-            ? fw_policy_gnss_offer(&g_fw.manifest, esp_app_get_description()->version, st->receiver.model,
-                                   st->receiver.build)
+            ? fw_policy_gnss_offer(&g_fw.manifest, st->receiver.model, st->receiver.build)
             : NULL;
     if (g != NULL) {
         entry = *g;

@@ -922,9 +922,11 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 
 /* Performance (Status page): per figure its name, the latest reading, its last 24 h in words and its line over the
  * same time with its scale under it, one row each with a rule between. On a phone the name and the reading on one
- * line, the words and the line under them; from 720 px the line beside its own name, all lines at the right edge. The
- * line stretches with its box; its strokes keep their width. */
+ * line, the words and the line under them; from 720 px the line beside its own name, all lines at the right edge,
+ * the name with its words on one line, and the text, the reading and the line centred on the row. The line has no axis and stretches
+ * with its box; its strokes keep their width. */
 .perf { display: grid; gap: 0.75rem; }
+.perf-text { display: contents; }
 .perf-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name now" "day day" "spark spark";
   column-gap: 0.75rem; row-gap: 0.2rem; align-items: baseline; }
 .perf-row + .perf-row { border-top: 1px solid var(--border); padding-top: 0.75rem; }
@@ -935,11 +937,13 @@ svg.sky .lbl { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .perf .spark { display: block; width: 100%; height: 28px; }
 .spark-scale { display: block; font-size: 0.75rem; text-align: right; margin-top: 0.1rem; }
 @media (min-width: 720px) {
-  .perf-row { grid-template-columns: minmax(0, 1fr) auto minmax(10rem, 20rem); grid-template-areas: "name now spark" "day day spark";
-    column-gap: 1.25rem; }
-  .perf .spark-box { align-self: center; margin-top: 0; grid-row: 1 / span 2; }
+  .perf-row { grid-template-columns: minmax(0, 1fr) auto minmax(10rem, 20rem); grid-template-areas: "text now spark";
+    column-gap: 1.25rem; align-items: center; }
+  .perf-text { display: block; grid-area: text; }
+  .perf-day { margin-left: 0.4rem; }
+  .perf-now { grid-area: now; }
+  .perf .spark-box { grid-area: spark; align-self: center; margin-top: 0; }
 }
-.spark-base { stroke: var(--border); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
   vector-effect: non-scaling-stroke; }
 .spark-loss { stroke: var(--bad); stroke-width: 1.5; vector-effect: non-scaling-stroke; }

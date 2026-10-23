@@ -255,18 +255,21 @@ let revealSeq = 0;
  */
 function revealButton(input, labelId) {
   input.setAttribute('aria-labelledby', labelId);
+  let filled = null;   /* what Show put in the box: Hide takes it out again unless it was edited */
   const b = h('button', { type: 'button', class: 'reveal', 'aria-pressed': 'false', onclick: async () => {
     const on = input.type === 'password';
     if (on && input.value === '' && input.revealFetch) {
       b.disabled = true;
       try {
         const r = await input.revealFetch();
-        if (r && r.password && input.value === '') input.value = r.password;
+        if (r && r.password && input.value === '') input.value = filled = r.password;
       } catch (e) {
         toast(errText(e), 'bad');
       }
       b.disabled = false;
     }
+    if (!on && filled !== null && input.value === filled) input.value = '';
+    filled = on ? filled : null;
     input.type = on ? 'text' : 'password';
     b.textContent = on ? 'Hide' : 'Show';
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
@@ -432,10 +435,10 @@ const fmt = {
     return n === null || n === undefined || isNaN(n) ? DASH : Number(n).toLocaleString();
   },
   permille(p) {
-    return p === null || p === undefined ? DASH : (p / 10).toFixed(1) + NB + '%';
+    return p === null || p === undefined ? DASH : (p / 10).toFixed(1) + '%';
   },
   pct(p) {
-    return p === null || p === undefined ? DASH : p + NB + '%';
+    return p === null || p === undefined ? DASH : p + '%';
   },
   time(unix) {
     if (!unix) return DASH;

@@ -43,7 +43,7 @@ function keyValue(k, v) {
   if (/_s$/.test(k)) return fmt.dur(v);
   if (/_unix$/.test(k)) return fmt.time(v);
   if (/bytes|capacity/.test(k)) return fmt.bytes(v);
-  if (/_pct$/.test(k)) return v + ' %';
+  if (/_pct$/.test(k)) return v + '%';
   if (/_permille$/.test(k)) return fmt.permille(v);
   return fmt.num(v);
 }

@@ -9,13 +9,36 @@
 
 #include "semver.h"
 
+/* The version to compare: the running release, or for a dev build ("v0.3.0-4-g47fc47b-dirty+dev") the release it
+ * grew from (the text before its first '-' or '+'). False for anything else ("unknown+dev", ""). */
+static bool running_base(const char *running, semver_t *out)
+{
+    if (running == NULL) {
+        return false;
+    }
+    if (semver_parse(running, out)) {
+        return true;
+    }
+    if (strchr(running, '+') == NULL) {
+        return false;
+    }
+    char base[32];
+    size_t n = strcspn(running, "-+");
+    if (n == 0 || n >= sizeof(base)) {
+        return false;
+    }
+    memcpy(base, running, n);
+    base[n] = '\0';
+    return semver_parse(base, out);
+}
+
 void fw_policy_app_offer(const char *running, const char *latest, bool (*is_bad)(const char *v, void *ctx),
                          void *bad_ctx, const char *stage1_version, fw_app_offer_t *out)
 {
     memset(out, 0, sizeof(*out));
     semver_t run;
     semver_t lat;
-    if (latest == NULL || latest[0] == '\0' || !semver_parse(running, &run) || !semver_parse(latest, &lat) ||
+    if (latest == NULL || latest[0] == '\0' || !running_base(running, &run) || !semver_parse(latest, &lat) ||
         semver_compare(&lat, &run) <= 0) {
         return;
     }
@@ -40,11 +63,9 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered)
     return semver_compare(&off, &run) > 0;
 }
 
-const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *running, const char *model,
-                                               uint32_t current_build)
+const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build)
 {
-    semver_t run;
-    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0 || !semver_parse(running, &run)) {
+    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0) {
         return NULL;
     }
     const fw_manifest_gnss_t *best = NULL;

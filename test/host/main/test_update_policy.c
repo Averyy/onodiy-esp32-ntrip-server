@@ -48,10 +48,13 @@ TEST_CASE("banner offers a newer release only", "[update_policy]")
     TEST_ASSERT_FALSE(offer("v0.2.0", "garbage", "").available);
 }
 
-TEST_CASE("banner offers nothing to a dev build", "[update_policy]")
+TEST_CASE("banner offers a dev build a release newer than its base", "[update_policy]")
 {
-    TEST_ASSERT_FALSE(offer("v0.3.0-4-g47fc47b-dirty+dev", "v9.0.0", "").available);
-    TEST_ASSERT_FALSE(offer("unknown+dev", "v9.0.0", "").available);
+    TEST_ASSERT_TRUE(offer("v0.3.0-4-g47fc47b-dirty+dev", "v0.3.1", "").available);
+    TEST_ASSERT_TRUE(offer("v0.3.0+dev", "v9.0.0", "").available);
+    TEST_ASSERT_FALSE(offer("v0.3.0-4-g47fc47b-dirty+dev", "v0.3.0", "").available);   /* its own base */
+    TEST_ASSERT_FALSE(offer("v0.3.1-2-gabc+dev", "v0.3.0", "").available);             /* no downgrades */
+    TEST_ASSERT_FALSE(offer("unknown+dev", "v9.0.0", "").available);                   /* no base release */
     TEST_ASSERT_FALSE(offer("", "v9.0.0", "").available);
 }
 
@@ -102,7 +105,6 @@ static void add_gnss(fw_manifest_t *m, const char *model, uint32_t build)
     g->build = build;
 }
 
-#define REL "v1.2.0"   /* a release build */
 
 TEST_CASE("receiver offer: exact model, higher build only", "[update_policy]")
 {
@@ -113,19 +115,19 @@ TEST_CASE("receiver offer: exact model, higher build only", "[update_policy]")
     add_gnss(&m, "UM982", 13495);
     add_gnss(&m, "UM982C", 40000);
 
-    const fw_manifest_gnss_t *g = fw_policy_gnss_offer(&m, REL, "UM982", 13495);
+    const fw_manifest_gnss_t *g = fw_policy_gnss_offer(&m, "UM982", 13495);
     TEST_ASSERT_NOT_NULL(g);
     TEST_ASSERT_EQUAL_UINT32(18975, g->build);
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 18975));   /* same build */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 20000));   /* never a downgrade */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 0));       /* build unknown */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "", 1));            /* model unknown */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "um982", 1));       /* exact match */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM98", 1));
-    g = fw_policy_gnss_offer(&m, REL, "UM982C", 1);
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "UM982", 18975));   /* same build */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "UM982", 20000));   /* never a downgrade */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "UM982", 0));       /* build unknown */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "", 1));            /* model unknown */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "um982", 1));       /* exact match */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "UM98", 1));
+    g = fw_policy_gnss_offer(&m, "UM982C", 1);
     TEST_ASSERT_NOT_NULL(g);
     TEST_ASSERT_EQUAL_UINT32(40000, g->build);
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(NULL, REL, "UM982", 1));
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(NULL, "UM982", 1));
 }
 
 TEST_CASE("receiver release: the release's package for the model, offered or not", "[update_policy]")
@@ -139,23 +141,11 @@ TEST_CASE("receiver release: the release's package for the model, offered or not
     const fw_manifest_gnss_t *g = fw_policy_gnss_release(&m, "UM982");
     TEST_ASSERT_NOT_NULL(g);
     TEST_ASSERT_EQUAL_UINT32(18975, g->build);                       /* the highest, older than a receiver on 25164 */
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 25164));  /* which is offered nothing */
+    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "UM982", 25164));  /* which is offered nothing */
     TEST_ASSERT_NULL(fw_policy_gnss_release(&m, "UM982C"));         /* exact model */
     TEST_ASSERT_NULL(fw_policy_gnss_release(&m, ""));
     TEST_ASSERT_NULL(fw_policy_gnss_release(&m, NULL));
     TEST_ASSERT_NULL(fw_policy_gnss_release(NULL, "UM982"));
-}
-
-TEST_CASE("receiver offer: a dev build is offered nothing", "[update_policy]")
-{
-    fw_manifest_t m;
-    memset(&m, 0, sizeof(m));
-    add_gnss(&m, "UM982", 18975);
-    TEST_ASSERT_NOT_NULL(fw_policy_gnss_offer(&m, REL, "UM982", 13495));
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "v0.3.0-4-g47fc47b-dirty+dev", "UM982", 13495));
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "unknown+dev", "UM982", 13495));
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, "", "UM982", 13495));
-    TEST_ASSERT_NULL(fw_policy_gnss_offer(&m, NULL, "UM982", 13495));
 }
 
 /* ---- schedule ---------------------------------------------------------------------- */

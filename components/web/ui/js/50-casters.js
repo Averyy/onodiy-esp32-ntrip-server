@@ -806,6 +806,11 @@ const copyable = v => h('code', { class: 'copy' }, breakable(String(v)));
 /* Passwords the user asked to see, by place: kept across the page's rebuilds until Hide (or a change of that password). */
 const shownSecrets = {};
 
+/* Forget every shown password (logout, a session that ended). */
+function forgetSecrets() {
+  for (const k of Object.keys(shownSecrets)) delete shownSecrets[k];
+}
+
 /** A Show button; it asks the station for the stored password (GET path) and says it, to copy, with a Hide button after it. */
 function secretValue(key, path) {
   const val = h('span');

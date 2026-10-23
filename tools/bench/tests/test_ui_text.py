@@ -519,11 +519,11 @@ def test_event_list_names_a_rovers_sessions():
 
 
 def test_today_online_share_on_the_dashboard():
-    """Whole numbers at 0 % and 100 % (no "0.00 %"), two decimals in between, rounded down: never "100.00 %"
+    """Whole numbers at 0% and 100% (no "0.00%"), two decimals in between, rounded down: never "100.00%"
     while the caster was offline for a moment."""
     out = run_ui([("onlineShare", [0, 600]), ("onlineShare", [600, 0]), ("onlineShare", [1, 2]),
                   ("onlineShare", [86399, 1])])
-    assert out == ["0\u00a0%", "100\u00a0%", "33.33\u00a0%", "99.99\u00a0%"], out
+    assert out == ["0%", "100%", "33.33%", "99.99%"], out
 
 
 # ---- The station's state (stationState): the Status page's top card, Onocoy's day, the notices it covers ----
@@ -956,7 +956,7 @@ def test_onocoy_today_verdict_from_one_rule():
     assert out[5]["verdict"] == "At risk" and out[5]["hero"] == "rx_stopped"
     assert out[6]["verdict"] == "At risk" and out[6]["why"] == "Most of today's offline time is used."
     # The data rate shows only as the cause, and only after 10 minutes connected.
-    assert out[7]["verdict"] == "At risk" and out[7]["why"].startswith("Data rate 97.0 %")
+    assert out[7]["verdict"] == "At risk" and out[7]["why"].startswith("Data rate 97.0%")
     assert out[8]["verdict"] == "On track" and out[8]["why"] is None
     # The top card says the quality problem: the verdict does not repeat it.
     assert out[9]["verdict"] == "At risk" and out[9]["hero"] == "quality" and out[9]["why"] is None
@@ -1299,10 +1299,10 @@ def test_update_card_trial_and_receiver_lines():
                   ("gnssRel", [{**rx, "release": "R4.10Build25164", "release_build": 25164}, app]),
                   ("gnssRel", [{**rx, "release": None, "release_build": None}, app]),
                   ("gnssRel", [{**rx, "release": None}, {"latest": None, "dev_build": False}]),
-                  ("gnssRel", [{**rx, "release": "R4.10Build18975", "release_build": 18975}, {"dev_build": True}])])
+                  ("gnssRel", [{**rx, "release": "R4.10Build18975", "release_build": 18975}, {**app, "dev_build": True}])])
     assert out == ["Up to date: newer than R4.10Build18975 in the latest release.", "Up to date.",
                    "The latest release has no firmware for this receiver.", "No release information yet.",
-                   "Development build: no release offers."]
+                   "Up to date: newer than R4.10Build18975 in the latest release."]
 
 
 def test_position_message_waits_for_the_survey():

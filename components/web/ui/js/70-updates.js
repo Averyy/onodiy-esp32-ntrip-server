@@ -154,7 +154,7 @@ function progressWidget() {
        * the same package again within the caps, or a stop for your decision). */
       const phase = m.job === 'gnss_flash' && !m.done && m.phase === 'failed' ? TRANSFER_FAILED : lbl(L.phase, m.phase);
       label.textContent = lbl(L.job, m.job) + ': ' + (m.done ? resultText(m) : finishing ? FINISHING_WAIT : phase +
-        (frac !== null ? ' ' + Math.round(frac * 100) + ' %' : '') + (counts ? ' (' + counts + ')' : ''));
+        (frac !== null ? ' ' + Math.round(frac * 100) + '%' : '') + (counts ? ' (' + counts + ')' : ''));
     },
     hide() {
       el.hidden = true;
@@ -227,7 +227,6 @@ const firstChecks = t => !!t && (t.stage === 'confirming' || t.stage === 'verify
 
 /* The receiver's line when nothing is offered, against the latest release's package for its model (g: u.gnss, app: u.app). */
 function gnssReleaseText(g, app) {
-  if (app.dev_build) return 'Development build: no release offers.';
   if (!app.latest) return 'No release information yet.';
   if (!g.release) return 'The latest release has no firmware for this receiver.';
   if (!g.running_build || !g.release_build) return 'The latest release has ' + fwText(g.release, g.release_build) + '.';
@@ -432,7 +431,7 @@ const updatesPart = {
         text = a.latest + ' was rolled back here before, so it is not offered.';
         b = btn('Install anyway', () => installApp(a.latest, true, b));
       } else {
-        text = a.dev_build ? 'Development build: no release offers.' : a.latest ? 'Up to date.' : 'No release information yet.';
+        text = a.dev_build ? 'Development build: no newer release.' : a.latest ? 'Up to date.' : 'No release information yet.';
       }
       if (trial.stage && trial.stage !== 'none') text += ' ' + trialText(trial);
       if (!b && firstChecks(trial)) b = btn('Finish checks now', () => finishChecks(b));

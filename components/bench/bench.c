@@ -420,6 +420,18 @@ static int cmd_safemode(int argc, char **argv)
     return err == ESP_OK ? 0 : 1;
 }
 
+/* The crash runs on a task pinned to core 0: the console task has no core, and QEMU boots twice (sometimes hanging)
+ * when the restart after a panic runs on the APP CPU (tools/qemu/README.md, "A planned restart on the APP CPU boots
+ * twice"). A board restarts the same from either core. */
+#define CRASH_PRIO 2
+
+static void crash_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(200));   /* the reply reaches the console first */
+    abort();
+}
+
 /* A crash on request: the panic handler saves a core dump, then the chip restarts (the dump's size against the
  * coredump partition, the crash's journal and boot record). */
 static int cmd_crash(int argc, char **argv)
@@ -428,8 +440,11 @@ static int cmd_crash(int argc, char **argv)
         return 1;
     }
     say("BENCH crash requested: abort() now, a core dump and a restart follow\n");
-    vTaskDelay(pdMS_TO_TICKS(200));   /* the reply reaches the console first */
-    abort();
+    if (xTaskCreatePinnedToCore(crash_task, "bench_crash", 3072, NULL, CRASH_PRIO, NULL, 0) != pdPASS) {
+        say("BENCH no memory for the crash task\n");
+        return 1;
+    }
+    return 0;
 }
 
 /* Names next to the numbers in `status`: the station state, the update phase

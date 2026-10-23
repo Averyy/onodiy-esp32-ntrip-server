@@ -245,6 +245,9 @@ class Board8mb(bench_console.BenchConsole):
         text = self.wait_text(start, lambda t: SAVED in t or NO_ROOM in t, self.args.timeout)
         line = next((x.strip()[:160] for x in text.splitlines() if "BENCH" in x), "no answer")
         self.check("BENCH crash requested" in line, f"crash: {line}")
+        # A crash on the APP CPU makes QEMU boot twice and sometimes hang (tools/qemu/README.md): it runs on core 0.
+        self.check("abort() was called" in text and " on core 0" in text.split("abort() was called", 1)[1][:60],
+                   "the crash ran on core 0")
         self.check(SAVED in text and NO_ROOM not in text,
                    f"the panic saved the core dump in the 128 KB partition"
                    + ("" if SAVED in text else f" (\"{NO_ROOM}\" on the console)" if NO_ROOM in text else

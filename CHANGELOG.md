@@ -1,8 +1,15 @@
 # Changelog
 
 Changes per release, newest first. A release's GitHub notes start with its section here.
-Changes since the last release go under `## Unreleased`; rename it to the new version
-before tagging ([releases](docs/releases.md)).
+Changes since the last release go under `## Unreleased
+
+- Web UI: shown passwords are cleared at logout; Hide empties a box Show filled.
+- Status: Performance card: no axis line, rows centred, Wi-Fi reading without dBm,
+  percentages without a space, empty leading buckets dropped, the "Last ..." chip is fine
+  print at the bottom.
+- Updates: a dev build is offered releases newer than its base; receiver builds are offered
+  whatever the app's version.
+- QEMU test: the bench `crash` runs on core 0 (fixes an occasional 8 MB board failure).
 
 ## v0.1.7
 

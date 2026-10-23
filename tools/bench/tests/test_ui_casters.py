@@ -979,7 +979,7 @@ for (const c of JSON.parse(casesJson)) {
         wide: cls(sec).indexOf(' wide ') >= 0,
         /* The Performance card: per figure its name, latest reading and 24 h words; its lines (aria-label, viewBox,
          * each path [class, d]). */
-        perf: v.filter(e => e.className === 'perf-row').map(r => r.kids.slice(0, 3).map(k => k.textContent)),
+        perf: v.filter(e => e.className === 'perf-row').map(r => [r.kids[0].kids[0].textContent, r.kids[1].textContent, r.kids[0].kids[2].textContent]),
         scales: v.filter(e => cls(e).indexOf(' spark-scale ') >= 0).map(e => e.textContent),
         sparks: v.filter(e => e.tagName === 'SVG' && e.attrs.class === 'spark').map(e => ({ label: e.attrs['aria-label'],
           viewBox: e.attrs.viewBox, paths: e.kids.map(k => [k.attrs.class, k.attrs.d]) })),
@@ -1781,13 +1781,13 @@ def test_casters_card_lists_counting_onocoy_first():
     out = dashboards(*[MATRIX[n] for n in names], swapped, no_slots)
     pub = dashboards(public, public_safe, {**public, "casters": []}, admin=False)
     cas = {n: o["cards"]["NTRIP"] for n, o in zip(names + ["swapped", "no_slots"], out)}
-    assert cas["healthy"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97 % today"]
+    assert cas["healthy"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97% today"]
     # Each separator stays with the part after it: a phone breaks before a separator, never after it.
-    assert [" ".join(p.split()) for p in cas["healthy"]["nowrap"]] == ["· Streaming", "· Streaming", "· 99.97 % today"]
-    assert cas["swapped"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97 % today",
+    assert [" ".join(p.split()) for p in cas["healthy"]["nowrap"]] == ["· Streaming", "· Streaming", "· 99.97% today"]
+    assert cas["swapped"]["lines"] == ["Onocoy · Streaming", "RTK2go · Streaming · 99.97% today",
                                        "Spare · Off"]
-    assert cas["setup"]["lines"] == cas["onooff"]["lines"] == ["RTK2go · Streaming · 99.97 % today"]
-    assert cas["partly"]["lines"][1] == "RTK2go · Login refused · 0 % today"
+    assert cas["setup"]["lines"] == cas["onooff"]["lines"] == ["RTK2go · Streaming · 99.97% today"]
+    assert cas["partly"]["lines"][1] == "RTK2go · Login refused · 0% today"
     assert cas["onooff_none"]["lines"] == [] and cas["onooff_none"]["notes"] == [["No other servers.", "muted"]]
     for n in ("nocasters", "no_slots"):
         assert cas[n]["lines"] == [] and cas[n]["notes"] == [["No servers yet.", "muted"]], n
@@ -3185,7 +3185,7 @@ def test_status_ntrip_card_says_your_rover_in_one_line():
                      over(MATRIX["safe"], local_caster=lc("off", enabled=False)), over(BASE, local_caster=lc("off")))
     cas = [o["cards"]["NTRIP"] for o in out]
     assert cas[8]["lines"][2:] == ["Local server · starting"]
-    servers = ["Onocoy · Streaming", f"RTK2go · Streaming · 99.97{NB}% today"]
+    servers = ["Onocoy · Streaming", "RTK2go · Streaming · 99.97% today"]
     assert [c["lines"][2:] for c in cas[:5]] == [["Local server · 1 connected"], ["Local server · 2 connected"],
                                                  ["Local server · waiting for a rover"], ["Local server · waiting for Wi-Fi"],
                                                  ["Local server · not listening"]]
@@ -3218,22 +3218,25 @@ MON_SERIES = {"sample_s": 30, "bucket_s": 300, "buckets": 5, "samples": [10, 10,
 
 def test_status_performance_card():
     """The Performance card: per figure its name, its latest reading and the last 24 h in words (a ping without a reply
-    in the warning colour), a chip for the time covered ("Last 2h"; "Last 24h" once a day is covered), one link to the
+    in the warning colour), fine print for the time covered, one link to the
     Logs page; a line per figure over that time from the left edge to the right (a gap where a bucket has nothing, a lone
-    value a dot, red marks where a ping got no reply, at least 10 ms of range so a millisecond's jitter stays flat). Before
+    value a dot (one bucket alone: a flat line), red marks where a ping got no reply, at least 10 ms of range so a millisecond's jitter stays flat). Before
     the first reading, and in safe mode, one muted line."""
     nb = " "
     (o, day, unnamed, waiting, none) = dashboards(over(BASE, monitor=MON), over(BASE, monitor={**MON, "span_s": 86100}),
                                                   over(BASE, monitor={**MON, "server": {**MON["server"], "name": ""}}),
                                                   over(BASE, monitor={**MON, "span_s": 0}), BASE, mon=MON_SERIES)
     card = o["cards"]["Performance"]
-    assert card["chip"][0] == "Last 2h" and day["cards"]["Performance"]["chip"][0] == "Last 24h"
+    assert card["chip"] is None and day["cards"]["Performance"]["chip"] is None
+    # The time the figures cover, as fine print at the bottom.
+    assert card["notes"] == [["Calculated from the 2h since the station started.", "muted small"]]
+    assert day["cards"]["Performance"]["notes"] == [["Calculated from the last 24h.", "muted small"]]
     assert card["links"] == [["Details", "#/logs", "Details on the Logs page", True]] and card["buttons"] == 0
     assert card["perf"] == [
         ["Router ping", "3ms", "avg 4ms · worst 80ms · none lost"],
-        ["Onocoy ping", "No reply", f"avg 117ms · worst 410ms · 2 lost (0.8{nb}%)"],
-        ["Wi-Fi signal", f" Weak (−79{nb}dBm)", f"avg −78{nb}dBm · weakest −84{nb}dBm"],
-        ["CPU", f"12{nb}%", f"avg 10{nb}% · peak 40{nb}%"],
+        ["Onocoy ping", "No reply", f"avg 117ms · worst 410ms · 2 lost (0.8%)"],
+        ["Wi-Fi signal", " Weak", f"avg −78{nb}dBm · weakest −84{nb}dBm"],
+        ["CPU", "12%", "avg 10% · peak 40%"],
         ["Free memory", f"117{nb}KB", f"lowest 96{nb}KB"],
     ]
     assert ["warn", "No reply"] in card["tones"]
@@ -3245,8 +3248,7 @@ def test_status_performance_card():
     # Each line says its own scale (bottom to top) under it.
     assert card["scales"] == ["0 to 10ms", "0 to 120ms", f"−80 to −70{nb}dBm", "0 to 100%", f"0{nb}B to 97{nb}KB"]
     # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost a ping; 0..10 ms (its 5 ms would fill it).
-    assert sparks[0]["paths"] == [["spark-base", "M0 31.5H4"], ["spark-loss", "M2 0V32"],
-                                  ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
+    assert sparks[0]["paths"] == [["spark-loss", "M2 0V32"], ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
     # CPU on 0..100 %.
     assert sparks[3]["paths"][-1] == ["spark-line", "M0 26.4L1 23.8L2 21.2L3 18.6L4 16.0"]
     assert unnamed["cards"]["Performance"]["perf"][1][0] == "Server ping"
@@ -3255,10 +3257,10 @@ def test_status_performance_card():
         assert c["perf"] == [] and c["notes"] == [["Waiting for the first reading (every 30s).", "muted"]] and c["chip"] is None
     safe = matrix()["safe"]["cards"]["Performance"]
     assert safe["notes"] == [["Not available in safe mode.", "muted"]] and safe["perf"] == []
-    # One bucket so far: one dot at the right edge.
+    # One bucket so far: a flat line across the box.
     (one,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "buckets": 1, "router_avg": [4], "router_lost": [0]})
     assert one["cards"]["Performance"]["sparks"][0]["viewBox"] == "0 0 1 32"
-    assert one["cards"]["Performance"]["sparks"][0]["paths"][-1] == ["spark-line", "M1 18.6h0"]
+    assert one["cards"]["Performance"]["sparks"][0]["paths"][-1] == ["spark-line", "M0 18.6H1"]
 
 
 def test_update_banner_shows_on_the_status_page_too():
@@ -3385,7 +3387,7 @@ def test_open_session_message_is_hidden_while_the_receiver_update_runs():
     # The last step has no count to show: a moving bar and a line that says to wait.
     norm = lambda r: [[t, c.split()] for t, c in r["progress"]]
     assert ["Receiver update: Finishing, please wait. This can take a few minutes.", ["bar", "indet"]] in norm(done)
-    assert ["Receiver update: Transferring 23 % (block 696 of 2,954)", ["bar"]] in norm(going)
+    assert ["Receiver update: Transferring 23% (block 696 of 2,954)", ["bar"]] in norm(going)
     said = lambda r: [t for _, t in r["msgs"]]
     assert not any(t.startswith("Not possible right now") for t in said(on))
     assert "Not possible right now: a receiver update session is open." in said(off)
