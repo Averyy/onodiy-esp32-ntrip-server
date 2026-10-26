@@ -311,12 +311,12 @@ size_t net_scan_insert(net_scan_entry_t *list, size_t count, size_t cap, const n
 
 /* ---- changed station credentials on trial -------------------------------------------- */
 
-net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used)
+net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used, bool no_trial)
 {
     if (!wifi_used) {
         return NET_CRED_PLAN_STORE_ONLY;
     }
-    return (have_active && !same_as_active) ? NET_CRED_PLAN_TRIAL : NET_CRED_PLAN_ACTIVE;
+    return (have_active && !same_as_active && !no_trial) ? NET_CRED_PLAN_TRIAL : NET_CRED_PLAN_ACTIVE;
 }
 
 bool net_trial_reason_refused(uint16_t reason)

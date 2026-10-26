@@ -1178,6 +1178,16 @@ void web_build_gnss(wj_t *w, const web_gnss_snap_t *g)
     wj_bool(w, "unfinished", st->survey_unfinished);
     wj_obj_close(w);
 
+    wj_obj_open(w, "own_position");
+    wj_bool(w, "valid", st->own_position_valid);
+    wj_double(w, "lat_deg", st->own_position_valid ? st->own_lat_deg : NAN, 9);
+    wj_double(w, "lon_deg", st->own_position_valid ? st->own_lon_deg : NAN, 9);
+    wj_double(w, "height_m", st->own_position_valid ? st->own_height_m : NAN, 4);
+    wj_double(w, "horizontal_sigma_m", st->own_position_valid ? st->own_horizontal_sigma_m : NAN, 3);
+    wj_u32_or_null(w, "age_s", st->own_position_valid ? st->own_position_age_s : UINT32_MAX);
+    wj_obj_close(w);
+    wj_bool(w, "relocating", st->relocating);
+
     wj_obj_open(w, "fixed_check");
     wj_str(w, "state", web_fix_state_name(st->fix_state));
     if (st->fix_state == STATION_FIX_NEAR || st->fix_state == STATION_FIX_FAR) {

@@ -4,6 +4,24 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## v0.1.9
+
+- Position: compact card with reference coordinates; live GNSS estimates, uncertainty,
+  source and timestamps are under Position details. Keep warnings visible.
+- Position: interactive vector map with zoom to 23, scroll/pinch zoom and controls below
+  the map. Show the correction reference and live estimate separately, with the live
+  estimate's reported horizontal uncertainty.
+- Map: bundle the renderer and worker with the firmware; save viewed map resources in
+  browser storage. Clear cached tiles after a reference position change over 10 m.
+- Position: with automatic setup, consistent displacement beyond both 3 m and four
+  reported horizontal standard deviations for five minutes starts a new survey.
+  Lock the new reference automatically and hold corrections until it is verified;
+  retain the hold across restarts and failed retries. Remove Reset location.
+- Position: show the measured difference from the GNSS fix instead of the 50 m sanity
+  threshold, which could be mistaken for accuracy.
+- Wi-Fi: add “Advance deployment - Save even if connection fails” to the Join dialog.
+  Keep the new network without the 90 s trial and revert (`no_trial` in `PUT /api/wifi`).
+
 ## v0.1.8
 
 - Web UI: shown passwords are cleared at logout; Hide empties a box Show filled.

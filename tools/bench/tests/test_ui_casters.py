@@ -497,6 +497,13 @@ async function receiverPageView(c) {
   await settle();
   const r = pageParts(el);
   r.live = sent.slice(first).filter(x => x.path === '/api/gnss/live').map(x => x.method);
+  if (c.openPosition) {
+    const details = [...el.walk()].find(e => e.tagName === 'DETAILS' && e.kids[0].textContent === 'Position details');
+    details.open = true;
+    view.reload();
+    await settle();
+    r.position = pageParts(el);
+  }
   if (c.confirm) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === 'Configure the receiver now').fire('click');
     await settle();
@@ -2756,18 +2763,20 @@ def test_receiver_pages_show_everything_without_fold_outs():
     }
     out = dict(zip(cases, run_editor(list(cases.values()))))
     folded = {k for k, c in cases.items() if c["arg"] == "settings"}
-    assert {k: v["details"] for k, v in out.items()} == {k: int(k in folded) for k in cases}
+    assert all(v["details"] <= 1 for v in out.values())
+    assert all(out[k]["details"] == 1 for k in folded)
     assert all(out[k]["summaries"] == ["Advanced"] for k in folded)
     assert out["held"]["dialog"]["details"] == 0
 
     stream = out["stream"]
     assert stream["cards"] == ["Receiver", "Position", "Signals"]
     rows = dict(stream["rows"])
-    assert rows["Model"] == "UM982 \u00b7 R4.10Build25164" and rows["Source"] == "Survey-in"
-    assert rows["Latitude"].startswith("45.1") and rows["Sent to servers"] == "This position"
-    assert "Locked. If the antenna moves, reset the location." in stream["lines"]
+    assert rows["Model"] == "UM982 \u00b7 R4.10Build25164" and "Source" not in rows
+    assert rows["Latitude"].startswith("45.1") and "Sent to servers" not in rows
+    assert "Position details" in stream["summaries"]
+    assert "Set. Updates automatically after a confirmed move." in stream["lines"]
     assert "Messages" in stream["subs"] and any(r.startswith("1005 Station position") for r in stream["trs"])
-    assert "Reset location" in stream["buttons"] and "Receiver settings" in stream["buttons"]
+    assert "Reset location" not in stream["buttons"] and "Receiver settings" in stream["buttons"]
     # Logs' rows, not here.
     assert not {"Link", "Part number", "Chip ID", "Answers", "Identity confirmed", "Epochs"} & set(rows)
 
@@ -2909,7 +2918,7 @@ def test_comparison_buttons_send_their_requests():
 def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
     """What the folds held, in states the whole-page test does not build: the antenna and B1C/B2a steps the receiver
     refused, as messages under Corrections; while a survey runs, the position the receiver sends in the Position card
-    with its source in a word and Lock offered; a locked position whose stream lies away from it, in amber."""
+    with its source in a word and automatic locking explained; a locked position whose stream lies away from it, in amber."""
     refused_g = {**GNSS, "profile": {**GNSS["profile"], "antenna_model": "TESTANT1"},
                  "apply_steps": {"antenna": {"sent": True, "ok": False, "reply": "PARSING FAILED"},
                                  "b1cb2a": {"sent": True, "ok": False, "reply": None}}}
@@ -2928,13 +2937,39 @@ def test_receiver_pages_say_refusals_the_survey_and_a_stream_off_the_position():
 
     rows = dict(survey["rows"])
     assert survey["cards"] == ["Receiver", "Position", "Signals"]
-    assert rows["Latitude"].startswith("45.2") and rows["Source"] == "Survey-in (running)"
-    assert "Sent to servers" not in rows and "Locked on" not in rows
-    assert "Lock this position" in survey["buttons"] and "Reset location" not in survey["buttons"]
-    assert any(t.startswith("Surveying, about 5") for t in survey["lines"])
+    assert rows["Latitude"].startswith("45.2") and "Source" not in rows
+    assert "Sent to servers" not in rows and "Reference set on" not in rows
+    assert not {"Lock this position", "Reset location"} & set(survey["buttons"])
+    assert "Show the map" in survey["buttons"]
+    assert any(t.startswith("Surveying from GNSS data, about 5") and "automatically" in t for t in survey["lines"])
 
     assert dict(offset["rows"])["Sent to servers"] == "1.32\u00a0m from this position"
     assert "1.32\u00a0m from this position" in offset["warn"]
+
+
+def test_position_actions_only_offer_locking_after_a_manual_survey():
+    unlocked = {**GNSS, "profile": {**GNSS["profile"], "base_mode": "survey_in", "fixed": None},
+                "position": {"locked": False, "source": "none"}}
+    manual = {**unlocked, "autocfg": False}
+    states = [GNSS, {**GNSS, "autocfg": False}, unlocked, manual,
+              {**manual, "survey": {"active": True}}, {**manual, "first_apply_held": True}]
+    pages = run_editor([rx_page("", st_status(), g, SIG_MSGS) for g in states])
+    assert all("Reset location" not in page["buttons"] for page in pages)
+    assert ["Lock this position" in page["buttons"] for page in pages] == [False, False, False, True, False, False]
+    assert "Show the map" in pages[2]["buttons"]   # position from the receiver, before the station stores its lock
+
+
+def test_live_gnss_coordinates_do_not_claim_to_be_the_correction_reference():
+    own = {**GNSS["arp"], "valid": True, "age_s": 2, "horizontal_sigma_m": 1.33}
+    page, = run_editor([rx_page("", st_status(), {**GNSS, "own_position": own}, SIG_MSGS, openPosition=True)])
+    assert "Live GNSS estimate" not in dict(page["rows"])
+    rows = dict(page["position"]["rows"])
+    assert rows["Source"] == "Survey-in"
+    assert rows["Live horizontal uncertainty (σ)"] == "1.33\u00a0m"
+    assert "Live GNSS estimate" in rows
+    assert rows["Latitude"].startswith(str(GNSS["position"]["lat_deg"]))
+    assert rows["Sent to servers"] == "Correction reference"
+    assert "Reference set on" in rows and "Reference accuracy (σ)" in rows
 
 
 def test_logs_receiver_card_says_the_descriptor_once():

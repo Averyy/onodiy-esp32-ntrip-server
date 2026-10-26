@@ -128,18 +128,26 @@
  * latest 1005 becomes the fixed position, applied as ECEF, and the next 1005
  * must be within 5 mm (else STATION_ALERT_POSITION_MISMATCH). A fixed base
  * that sends no RTCM after a receiver restart while it still reports a fixed
- * base raises STATION_ALERT_ANTENNA_MOVED; it is never re-surveyed on its own.
+ * base raises STATION_ALERT_ANTENNA_MOVED. With automatic setup, significant
+ * movement confirmed by the independent GNSS solution starts a new survey.
  *
  * Fixed-position check: with a fixed profile (typed in or locked), the
  * receiver's own single-point solution is asked without a lease (one
- * line, nothing paused; um98x_fixcheck.h): 60 s after streaming began, a
- * receiver restart or an apply, then every 20 s until three solutions
- * agree, again every hour. More than 50 m off horizontally or vertically
+ * line, nothing paused; um98x_fixcheck.h): with automatic setup, every 20 s,
+ * including during survey-in, for live coordinates and movement detection.
+ * Manual setup keeps the first check after 60 s, three solutions 20 s apart,
+ * then an hourly recheck. More than 50 m off horizontally or vertically
  * raises STATION_ALERT_FIXED_FAR and journals it, and so does a fixed height
  * that is the receiver's height above sea level instead of its ellipsoidal
  * height (more than 10 m off, within 5 m of the sea-level height:
  * fix_sea_level); within the limits again (40 m, and not that height)
- * clears it. Streaming is never held back for it.
+ * clears it. Automatic relocation requires five minutes of consistent horizontal
+ * displacement beyond max(3 m, 4 * hypot(sd_lat, sd_lon)), with no gaps over
+ * 40 s or unusable fixes. This heuristic cannot guarantee small-move detection.
+ * It holds all RTCM
+ * consumers until a new survey is locked and its 1005 matches. A persisted
+ * relocation flag retains that hold across resets. No relocation in manual
+ * setup, receiver maintenance or after a configuration failure.
  *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the
@@ -608,6 +616,13 @@ typedef struct {
     bool fix_height_only;            /**< FAR by the height alone (always with fix_sea_level) */
     bool fix_sea_level;              /**< FAR: the fixed height is the receiver's height above sea level, not its ellipsoidal height */
     uint32_t fix_checked_age_s;      /**< since the latest usable solution, UINT32_MAX = none */
+    bool own_position_valid;
+    double own_lat_deg;
+    double own_lon_deg;
+    double own_height_m;
+    double own_horizontal_sigma_m;  /**< reported latitude/longitude standard deviations combined */
+    uint32_t own_position_age_s;
+    bool relocating;
 } station_status_t;
 
 /**

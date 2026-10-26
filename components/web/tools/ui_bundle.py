@@ -43,6 +43,7 @@ import argparse
 import gzip
 import hashlib
 import html.parser
+import json
 import pathlib
 import re
 import sys
@@ -55,6 +56,10 @@ ASSETS = (
     ("/app.js", None, "text/javascript; charset=utf-8"),
     ("/app.css", "app.css", "text/css; charset=utf-8"),
     ("/favicon.svg", "favicon.svg", "image/svg+xml"),
+    ("/vendor/maplibre-gl.mjs", "vendor/maplibre-gl.mjs", "text/javascript; charset=utf-8"),
+    ("/vendor/maplibre-gl-worker.mjs", "vendor/maplibre-gl-worker.mjs", "text/javascript; charset=utf-8"),
+    ("/vendor/maplibre-gl.css", "vendor/maplibre-gl.css", "text/css; charset=utf-8"),
+    ("/vendor/maplibre-LICENSE.txt", "vendor/maplibre-LICENSE.txt", "text/plain; charset=utf-8"),
 )
 
 SPDX_HEADER = "/* SPDX-FileCopyrightText: 2026 Avery L.\n * SPDX-License-Identifier: MIT */\n"
@@ -430,6 +435,14 @@ def c_ident(path):
 def build(ui, max_gz):
     served = {p for p, _, _ in ASSETS}
     errors = []
+    try:
+        manifest = json.loads((ui / 'vendor/manifest.json').read_text(encoding='utf-8'))
+        for name, expected in manifest['files'].items():
+            actual = hashlib.sha256((ui / 'vendor' / name).read_bytes()).hexdigest()
+            if actual != expected:
+                errors.append(f'vendor/{name}: differs from the pinned MapLibre distribution')
+    except (OSError, ValueError, KeyError) as e:
+        errors.append(f'vendor/manifest.json: {e}')
     sources = {}
     for path, src, _ in ASSETS:
         if src is None:
@@ -488,6 +501,9 @@ def build(ui, max_gz):
         gz = gzip.compress(raw, compresslevel=9, mtime=0)
         out.append((path, ctype, raw, gz))
     total = sum(len(gz) for _, _, _, gz in out)
+    own_total = sum(len(gz) for path, _, _, gz in out if not path.startswith('/vendor/'))
+    if own_total > 150 * 1024:
+        raise CheckError(f"Project UI is {own_total} bytes gzipped, over the 150 KiB budget")
     if total > max_gz:
         raise CheckError(f"UI is {total} bytes gzipped, over the {max_gz}-byte budget")
     return out, total
@@ -529,7 +545,7 @@ def main():
     ap.add_argument("--ui", required=True, type=pathlib.Path, help="UI source directory")
     ap.add_argument("--c-out", type=pathlib.Path, help="generated C file")
     ap.add_argument("--out-dir", type=pathlib.Path, help="also write the uncompressed bundle here")
-    ap.add_argument("--max-gz", type=int, default=150 * 1024, help="budget for the compressed total")
+    ap.add_argument("--max-gz", type=int, default=640 * 1024, help="budget for the compressed total, including MapLibre")
     args = ap.parse_args()
     try:
         assets, total = build(args.ui, args.max_gz)
@@ -542,7 +558,9 @@ def main():
     if args.out_dir:
         args.out_dir.mkdir(parents=True, exist_ok=True)
         for p, _, raw, _ in assets:
-            (args.out_dir / p.lstrip("/")).write_bytes(raw)
+            target = args.out_dir / p.lstrip("/")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(raw)
     sizes = ", ".join(f"{p.lstrip('/')} {len(gz)}" for p, _, _, gz in assets)
     print(f"web UI: {total} bytes gzipped ({sizes})")
     return 0

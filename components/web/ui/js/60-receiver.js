@@ -4,7 +4,7 @@
  *
  * Receiver page (#/receiver): the receiver (state, model, configuration,
  * problems as messages, the messages it sends), its base position (where,
- * the checks, the map on request, Lock or Reset location), then the signals
+ * the checks, the map on request and automatic locking), then the signals
  * (65-signals.js) with the sky map (66-live.js).
  * Receiver settings (#/receiver/settings): the base position, the receiver
  * profile (signals and the sky map, correction messages, and Advanced folded
@@ -62,7 +62,7 @@ function fmtDist(m) {
 }
 
 /**
- * Lock / Reset location buttons with their warnings and their error box (out),
+ * Manual setup's Lock button with its warning and error box (out),
  * built once per view: a pending request (or its dialog) keeps its button and
  * box across the refresh. update(g) shows the buttons that fit the state.
  */
@@ -79,26 +79,14 @@ function positionActions(done) {
       done();
     }
   }, 'primary', { hidden: true });
-  const resurveyBtn = btn('Reset location', async () => {
-    const ok = await dialog({ title: 'Reset the location?', ok: 'Reset location', okKind: 'danger solid',
-      body: [h('p', null, 'The station forgets the locked position; the receiver works it out again (a survey-in) and it locks.'),
-        msg('warn', 'The position sent to servers changes. Onocoy may validate the station again.')],
-      check: 'I understand that the position changes.' });
-    if (!ok) return;
-    const r = await act(resurveyBtn, () => api('DELETE', '/api/gnss/position/lock'), out);
-    if (r !== undefined) {
-      toast('Working out the location again…', 'ok');
-      done();
-    }
-  }, 'danger small', { hidden: true });
   return {
     out: out,
-    buttons: [resurveyBtn, lockBtn],
+    buttons: [lockBtn],
     update(g) {
       const pos = g.position || {};
       const arp = g.arp || {};
-      lockBtn.hidden = !(!pos.locked && (arp.valid || (pos.source && pos.source !== 'none')));
-      resurveyBtn.hidden = !pos.locked;
+      lockBtn.hidden = !!g.autocfg || !!g.first_apply_held || surveyRuns(g) || pos.locked ||
+        !(arp.valid || (pos.source && pos.source !== 'none'));
     },
   };
 }
@@ -197,14 +185,22 @@ function positionLine(g, delivering) {
   const pos = g.position || {};
   const sv = g.survey || {};
   const prof = g.profile || {};
-  const have = pos.source && pos.source !== 'none';
+  const have = (pos.source && pos.source !== 'none') || !!(g.arp || {}).valid;
+  if (g.relocating) return 'Movement confirmed. Corrections are paused while the receiver surveys and checks its new location.';
   if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && have)) return 'Fixed (typed in). Sent at the next configuration.';
-  if (pos.locked) return 'Locked. If the antenna moves, reset the location.';
+  if (pos.locked) return g.autocfg ? 'Set. Updates automatically after a confirmed move.' : 'Locked. This position is kept across restarts.';
   if (surveyRuns(g)) {
     if (!delivering) return 'Surveying, paused while no corrections arrive.';
-    return sv.window_left_s ? 'Surveying, about ' + inMinutes(sv.window_left_s) + ' left. Then lock it.' : 'Surveying. Lock it when it ends.';
+    const progress = sv.window_left_s ? 'Surveying from GNSS data, about ' + inMinutes(sv.window_left_s) + ' left.' : 'Surveying from GNSS data.';
+    return progress + (g.autocfg ? ' The position locks automatically when complete.' : ' With manual setup, lock it when it ends.');
   }
   if (gnssUnchecked(g)) return null;   /* the card's line says it (receiverTop) */
+  if (g.autocfg && prof.base_mode === 'survey_in') {
+    if (g.config_failed) return 'Automatic position locking waits for receiver configuration to succeed.';
+    if ((g.maintenance || {}).on) return 'Automatic position locking resumes after receiver maintenance.';
+    return have ? 'The position locks automatically after survey-in and stays the same after restarts.' :
+      'Waiting for a GNSS position. It will lock automatically after survey-in.';
+  }
   return have ? 'Not locked. Lock it so it stays the same after restarts.' : 'No position yet.';
 }
 
@@ -241,12 +237,16 @@ function receiverTop(g, st, pos) {
 function fixedCheckRow(g) {
   const c = g.fixed_check || {};
   if (!c.state || c.state === 'none') return null;
-  const label = 'Receiver\'s own position';
+  const label = 'Reference position check';
   if (c.state === 'far') {
     return [label, h('span', { class: 't-warn' }, c.height_only ? 'Fixed height ' + metresText(c.vertical_m) +
       (c.vertical_m > 0 ? ' above it' : ' below it') : metresText(c.distance_m) + ' from the fixed position')];
   }
-  if (c.state === 'ok') return [label, 'Within ' + (c.limit_m || 50) + NB + 'm of the fixed position'];
+  if (c.state === 'ok') {
+    const difference = Number.isFinite(c.distance_m) ? (c.distance_m < 1 ? 'Less than 1' + NB + 'm' :
+      'About ' + metresText(c.distance_m)) + ' from the GNSS fix (3D)' : 'No large mismatch detected';
+    return [label, difference];
+  }
   const pending = fixPendingText(c.state, (g.maintenance || {}).on, gnssUnchecked(g));
   return [label, pending === DASH ? DASH : h('span', { class: 'muted' }, pending)];
 }
@@ -267,7 +267,9 @@ function streamRow(g) {
   const label = 'Sent to servers';
   if (!arp.valid) return [label, h('span', { class: 'muted' }, 'Not received yet')];
   if (typeof arp.offset_m !== 'number') return null;
-  return [label, arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, fmtDist(arp.offset_m) + ' from this position') : 'This position'];
+  const live = !!(g.own_position || {}).valid;
+  return [label, arp.offset_m > 0.005 ? h('span', { class: 't-warn' }, fmtDist(arp.offset_m) +
+    (live ? ' from the correction reference' : ' from this position')) : live ? 'Correction reference' : 'This position'];
 }
 
 /**
@@ -276,23 +278,34 @@ function streamRow(g) {
  * fixed one and what casters get. Without a position yet, the one the
  * receiver sends (a survey's). Null when neither is known.
  */
-function positionRows(g) {
+function positionRows(g, expanded) {
   const pos = g.position || {};
   const arp = g.arp || {};
   const have = pos.source && pos.source !== 'none';
-  const at = have ? pos : arp.valid ? arp : null;
+  const own = g.own_position || {};
+  const at = have ? pos : own.valid ? own : arp.valid ? arp : null;
   if (!at) return null;
-  return kv([
+  const check = fixedCheckRow(g);
+  const sent = have ? streamRow(g) : null;
+  const checkWarn = (g.fixed_check || {}).state === 'far';
+  const sentWarn = have && (!arp.valid || arp.offset_m > 0.005);
+  return [kv([
     ['Latitude', fmt.deg(at.lat_deg)],
     ['Longitude', fmt.deg(at.lon_deg)],
     ['Height (ellipsoid)', fmt.m(at.height_m)],
-    have && pos.sigma_m ? ['Accuracy (σ)', fmtDist(pos.sigma_m)] : null,
-    have && pos.locked_unix ? ['Locked on', fmt.time(pos.locked_unix)] : null,
-    /* Without a position of the station's own: the survey's so far, or what the receiver sends (a base position it kept). */
-    ['Source', have ? lbl(L.posSource, pos.source) : surveyRuns(g) ? 'Survey-in (running)' : 'Sent by the receiver'],
-    fixedCheckRow(g),
-    have ? streamRow(g) : null,
-  ]);
+    checkWarn ? check : null,
+    sentWarn ? sent : null,
+  ]), h('details', { class: 'more', open: !!expanded }, h('summary', null, 'Position details'), kv([
+    have && pos.sigma_m ? ['Reference accuracy (σ)', fmtDist(pos.sigma_m)] : null,
+    have && pos.locked_unix ? ['Reference set on', fmt.time(pos.locked_unix)] : null,
+    ['Source', have ? lbl(L.posSource, pos.source) : own.valid ? 'Live GNSS estimate' : surveyRuns(g) ?
+      'Survey-in (running)' : 'Sent by the receiver'],
+    own.valid && have ? ['Live GNSS estimate', fmt.deg(own.lat_deg) + ', ' + fmt.deg(own.lon_deg)] : null,
+    own.valid && Number.isFinite(own.horizontal_sigma_m) ?
+      ['Live horizontal uncertainty (σ)', fmtDist(own.horizontal_sigma_m)] : null,
+    checkWarn ? null : check,
+    sentWarn ? null : sent,
+  ]))];
 }
 
 /* ---- Receiver setup ----------------------------------------------------- */
@@ -775,7 +788,8 @@ function receiverForms(g, latest, done, onCompare, fold) {
   const position = [cardHead('Position', posChip), h('div', { class: 'stack', oninput: posSync },
     mode.el,
     F.survey_in_s.el, fixedBox,
-    h('p', { class: 'muted small' }, 'For Onocoy: survey-in, then lock the result on the Receiver page. A precise fixed position is optional. ',
+    h('p', { class: 'muted small' }, 'Survey-in works out the antenna position from GNSS data. Automatic setup locks the result and keeps it across restarts. ' +
+      'With manual setup, lock the result on the Receiver page. A precise fixed position is optional. ',
       extLink('Onocoy install guide', ONOCOY_INSTALL)),
     match, posErr, h('div', { class: 'form-actions' }, posSave))];
   posSync();
@@ -1539,8 +1553,9 @@ function receiverPage(el, arg) {
   const posLine = h('p', { hidden: true });
   const posRows = h('div');
   const map = mapBox();
+  const posButtons = h('div', { class: 'form-actions sep', hidden: true }, posActions.buttons);
   const where = h('section', { class: 'card' }, h('h2', null, 'Position'), posLine, posRows, map.el, posActions.out,
-    h('div', { class: 'form-actions sep' }, posActions.buttons));
+    posButtons);
   /* Nothing known about the position but its line (no coordinates, so no map, and nothing to do): the line is a row of
    * the Receiver card, which then spans the page (as without a receiver). */
   const posAlone = () => !posRows.firstChild && map.el.hidden && posActions.buttons.every(b => b.hidden);
@@ -1628,8 +1643,15 @@ function receiverPage(el, arg) {
     sigs.messagesOff(missing);
     if (missing) nr.update(S.status || { receiver: { state: g.state } });
     posActions.update(g);
-    patch(posRows, positionRows(g));
-    map.update(g.position);
+    posButtons.hidden = posActions.buttons.every(b => b.hidden);
+    const positionDetails = posRows.querySelector('details');
+    patch(posRows, positionRows(g, positionDetails && positionDetails.open));
+    const reference = g.position && g.position.source && g.position.source !== 'none' ? g.position : null;
+    const live = g.own_position && g.own_position.valid ? Object.assign({ source: 'gnss' }, g.own_position) : null;
+    const at = reference || live || (g.arp && g.arp.valid ? Object.assign({ source: 'receiver' }, g.arp) : null);
+    /* Cache invalidation follows the locked reference, including during a
+     * relocation survey. Live scatter must not discard downloaded map data. */
+    map.update(at, reference || at, live);
     status();
     /* No receiver: the panel says it, the position is a stale fact. */
     if (missing) {
@@ -1700,6 +1722,7 @@ function receiverPage(el, arg) {
       gone = true;
       if (stop) stop();
       if (sigs) sigs.destroy();
+      map.destroy();
       if (asker) asker.destroy();
     },
     dirty: () => !!(forms && forms.dirty()) || manage.dirty(),

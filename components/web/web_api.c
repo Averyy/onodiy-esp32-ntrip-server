@@ -1713,7 +1713,7 @@ static esp_err_t h_wifi_put(web_req_t *r)
     }
     network_cred_plan_t plan = NETWORK_CRED_PLAN_STORE_ONLY;
     if (reconnect) {
-        esp_err_t err = network_set_credentials(in.ssid, pw, &plan);
+        esp_err_t err = network_set_credentials(in.ssid, pw, in.no_trial, &plan);
         memset(stored_pw, 0, sizeof(stored_pw));
         if (err == ESP_ERR_INVALID_ARG) {
             return web_send_error(r->req, WEB_ERR_INVALID_FIELD, NULL, "password", UINT32_MAX, NULL, NULL);

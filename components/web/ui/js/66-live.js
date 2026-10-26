@@ -210,86 +210,176 @@ function liveTiles(t) {
 
 /* ---- Station map (on request, in the Receiver page's Position card) ---------------------- */
 
-const MAP_ZOOM = 16, MAP_TILE = 256, MAP_W = 512, MAP_H = 320;
-const MAP_HOST = 'https://tile.openstreetmap.org/';
+const MAP_ZOOM = 18, MAP_MIN_ZOOM = 2, MAP_MAX_ZOOM = 23;
 
-/**
- * A small OpenStreetMap tile mosaic centred on the position, no library:
- * the tiles are plain images placed in percent of the frame (so it scales
- * with the page). The browser fetches them only after the user asked for
- * the map; each image sends the page's origin as Referer (the tile
- * server's usage policy), and a tile that fails hides the mosaic (no
- * internet on this device: the coordinates stay).
- */
-function tileMosaic(lat, lon, onFail) {
-  const n = Math.pow(2, MAP_ZOOM);
-  const latR = (Math.max(-85, Math.min(85, lat)) * Math.PI) / 180;
-  const x = ((lon + 180) / 360) * n * MAP_TILE;
-  const y = ((1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2) * n * MAP_TILE;
-  const left = x - MAP_W / 2, top = y - MAP_H / 2;
-  /* The tiles and the pin are one image to assistive technology; the
-   * attribution (a link the tile policy asks for) sits beside it, so it is
-   * not hidden as part of the image. */
-  const tiles = h('div', { class: 'map-tiles', role: 'img', 'aria-label': 'Map around the station position' });
-  const box = h('div', { class: 'map' }, tiles);
-  let failed = false;
-  for (let ty = Math.floor(top / MAP_TILE); ty <= Math.floor((top + MAP_H - 1) / MAP_TILE); ty++) {
-    if (ty < 0 || ty >= n) continue;
-    for (let tx = Math.floor(left / MAP_TILE); tx <= Math.floor((left + MAP_W - 1) / MAP_TILE); tx++) {
-      const wx = ((tx % n) + n) % n;
-      tiles.append(h('img', { src: MAP_HOST + MAP_ZOOM + '/' + wx + '/' + ty + '.png', alt: '', referrerpolicy: 'origin',
-        draggable: 'false', decoding: 'async',
-        style: { left: (((tx * MAP_TILE - left) / MAP_W) * 100).toFixed(3) + '%', top: (((ty * MAP_TILE - top) / MAP_H) * 100).toFixed(3) + '%',
-          width: ((MAP_TILE / MAP_W) * 100).toFixed(3) + '%', height: ((MAP_TILE / MAP_H) * 100).toFixed(3) + '%' },
-        onerror: () => {
-          if (!failed) {
-            failed = true;
-            onFail();
-          }
-        } }));
+/** Live estimate and its reported horizontal sigma, in metres, as map geometry. */
+function mapLiveGeometry(live) {
+  if (!live) return { type: 'FeatureCollection', features: [] };
+  const point = [live.lon_deg, live.lat_deg];
+  const features = [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: point } }];
+  if (Number.isFinite(live.horizontal_sigma_m) && live.horizontal_sigma_m > 0) {
+    const lat = live.lat_deg * Math.PI / 180, lon = live.lon_deg * Math.PI / 180;
+    const radius = live.horizontal_sigma_m / 6371008.8, ring = [];
+    for (let i = 0; i < 64; i++) {
+      const bearing = i * 2 * Math.PI / 64;
+      const y = Math.asin(Math.sin(lat) * Math.cos(radius) + Math.cos(lat) * Math.sin(radius) * Math.cos(bearing));
+      const x = lon + Math.atan2(Math.sin(bearing) * Math.sin(radius) * Math.cos(lat),
+        Math.cos(radius) - Math.sin(lat) * Math.sin(y));
+      ring.push([x * 180 / Math.PI, y * 180 / Math.PI]);
     }
+    ring.push(ring[0]);
+    features.unshift({ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } });
   }
-  tiles.append(h('span', { class: 'pin', 'aria-hidden': 'true' }));
-  box.append(h('span', { class: 'map-attr' }, '© ', h('a', { href: 'https://www.openstreetmap.org/copyright', target: '_blank', rel: 'noopener noreferrer' },
-      'OpenStreetMap'), ' contributors'));
-  return box;
+  return { type: 'FeatureCollection', features: features };
 }
 
-/* The station map: tiles only after "Show the map" (remembered here), then a link to OpenStreetMap beside "Hide the map".
- * {el, update(position)}. */
+/** Vector map, loaded on request. The renderer and worker come from this device;
+ * mapCache retains viewed OSM resources between visits. Keep the renderer while
+ * coordinates change, and dispose its worker/WebGL resources when leaving. */
 function mapBox() {
-  const el = h('div', { class: 'stack map-box' });
-  let key = null;
-  function render(pos) {
-    const have = pos && pos.source && pos.source !== 'none' && pos.lat_deg !== null && pos.lat_deg !== undefined;
-    el.hidden = !have;
-    if (!have) return clear(el);
-    const lat = pos.lat_deg, lon = pos.lon_deg;
-    const ext = 'https://www.openstreetmap.org/?mlat=' + lat.toFixed(7) + '&mlon=' + lon.toFixed(7) + '#map=17/' + lat.toFixed(6) + '/' + lon.toFixed(6);
-    const box = h('div');
-    const offer = () => mount(box, h('div', { class: 'row' }, btn('Show the map', show, 'small'),
-      h('span', { class: 'muted small' }, 'Loads from OpenStreetMap over the internet.')));
-    function show() {
-      store.set('map', true);
-      mount(box, tileMosaic(lat, lon, () => mount(box, msg('', 'The map did not load. This device may have no internet.'))),
-        h('div', { class: 'row foot' }, btn('Hide the map', () => {
-          store.set('map', false);
-          offer();
-        }, 'small ghost'), extLink('Open in OpenStreetMap', ext)));
+  const el = h('div', { class: 'stack map-box', hidden: true });
+  let pos = null, cacheAt = null, live = null, map = null, marker = null, generation = 0, controller = null;
+  const legend = h('div', { class: 'muted small' });
+  const liveData = () => {
+    if (map && map.getSource('live-position')) map.getSource('live-position').setData(mapLiveGeometry(live));
+    legend.textContent = pos && pos.source !== 'gnss' ?
+      'Red: correction reference. Blue: live GNSS estimate; shaded area: reported horizontal uncertainty (σ).' :
+      'Live GNSS estimate; shaded area: reported horizontal uncertainty (σ).';
+  };
+  const saved = store.get('map_zoom', MAP_ZOOM);
+  let zoom = Number.isFinite(saved) ? Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, saved)) : MAP_ZOOM;
+  let level = null, out = null, into = null, open = null;
+  const ext = () => 'https://www.openstreetmap.org/?mlat=' + pos.lat_deg.toFixed(7) + '&mlon=' + pos.lon_deg.toFixed(7) +
+    '#map=' + zoom.toFixed(2) + '/' + pos.lat_deg.toFixed(6) + '/' + pos.lon_deg.toFixed(6);
+  const sync = () => {
+    if (!level || !pos) return;
+    level.textContent = 'Zoom ' + (Number.isInteger(zoom) ? zoom : zoom.toFixed(1));
+    out.disabled = zoom <= MAP_MIN_ZOOM;
+    into.disabled = zoom >= MAP_MAX_ZOOM;
+    open.href = ext();
+  };
+  const dispose = () => {
+    generation++;
+    if (controller) controller.abort();
+    controller = null;
+    if (map) map.remove();
+    map = marker = null;
+  };
+  const offer = () => {
+    dispose();
+    mount(el, h('div', { class: 'row' }, btn('Show the map', show, 'small'),
+      h('span', { class: 'muted small' }, 'OpenStreetMap data via OpenFreeMap; saved in this browser.')));
+  };
+  async function show() {
+    dispose();
+    store.set('map', true);
+    const own = generation;
+    const cancel = new AbortController();
+    controller = cancel;
+    const viewport = h('div', { class: 'map', 'aria-label': 'Station position map' });
+    const note = h('div', { class: 'muted small', role: 'status' }, 'Loading the map…');
+    const change = delta => {
+      zoom = Math.max(MAP_MIN_ZOOM, Math.min(MAP_MAX_ZOOM, Math.round(zoom) + delta));
+      store.set('map_zoom', zoom);
+      if (map) map.zoomTo(zoom, { duration: 0 });
+      sync();
+    };
+    level = h('span', { class: 'muted small', 'aria-live': 'polite' });
+    out = btn('−', () => change(-1), 'small', { 'aria-label': 'Zoom out' });
+    into = btn('+', () => change(1), 'small', { 'aria-label': 'Zoom in' });
+    open = extLink('Open in OpenStreetMap', ext());
+    const foot = h('div', { class: 'row foot' },
+      h('div', { class: 'row', role: 'group', 'aria-label': 'Map zoom' }, out, into, level),
+      btn('Hide the map', () => { store.set('map', false); offer(); }, 'small ghost'), open);
+    mount(el, viewport, foot, legend, note);
+    sync();
+    try {
+      await mapCache.position([cacheAt.lon_deg, cacheAt.lat_deg]);
+      if (own !== generation) return;
+      const [lib, bytes] = await Promise.all([loadMapLibrary(), mapCache.resource(MAP_STYLE, cancel.signal)]);
+      if (own !== generation) return;
+      const style = JSON.parse(new TextDecoder().decode(bytes));
+      /* Road-shield filters compare an optional numeric attribute. Require
+       * it before comparison so unlabeled roads do not produce type errors. */
+      for (const layer of style.layers) {
+        if (layer.filter && JSON.stringify(layer.filter).includes('"ref_length"')) {
+          layer.filter = ['all', ['has', 'ref_length'], layer.filter];
+        }
+      }
+      map = new lib.Map({
+        container: viewport, style: style, center: [pos.lon_deg, pos.lat_deg], zoom: zoom,
+        minZoom: MAP_MIN_ZOOM, maxZoom: MAP_MAX_ZOOM, maxPitch: 0, dragRotate: false, pitchWithRotate: false,
+        attributionControl: false, refreshExpiredTiles: false, fadeDuration: 0, renderWorldCopies: false,
+        transformRequest: url => ({ url: url.startsWith(MAP_ORIGIN + '/') ? 'stationmap://' + url.slice(8) : url }),
+      });
+      map.touchZoomRotate.disableRotation();
+      marker = new lib.Marker({ element: h('span', { class: 'map-marker', 'aria-label': 'Station position' }), anchor: 'center' })
+        .setLngLat([pos.lon_deg, pos.lat_deg]).addTo(map);
+      liveData();
+      map.on('load', () => {
+        if (own !== generation || !map) return;
+        map.addSource('live-position', { type: 'geojson', data: mapLiveGeometry(live) });
+        map.addLayer({ id: 'live-uncertainty', type: 'fill', source: 'live-position',
+          filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#2275d7', 'fill-opacity': 0.18 } });
+        map.addLayer({ id: 'live-uncertainty-edge', type: 'line', source: 'live-position',
+          filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'line-color': '#2275d7', 'line-width': 1 } });
+        map.addLayer({ id: 'live-estimate', type: 'circle', source: 'live-position',
+          filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 5, 'circle-color': '#2275d7',
+            'circle-stroke-color': '#ffffff', 'circle-stroke-width': 2 } });
+      });
+      viewport.append(h('span', { class: 'map-attr' }, '© ', extLink('OpenMapTiles', 'https://www.openmaptiles.org/'), ' · ',
+        extLink('OpenStreetMap', 'https://www.openstreetmap.org/copyright'), ' contributors'));
+      map.on('zoom', () => {
+        if (own !== generation || !map) return;
+        zoom = map.getZoom();
+        store.set('map_zoom', zoom);
+        sync();
+      });
+      let loadFailed = false;
+      map.on('idle', () => {
+        note.textContent = loadFailed ? 'Some map data could not load. Previously downloaded areas remain available.' :
+          mapCache.failed ? 'This browser could not keep all map data between visits.' : '';
+      });
+      map.on('error', e => {
+        loadFailed = true;
+        console.warn('Station map:', e.error);
+        note.textContent = 'Some map data could not load. Previously downloaded areas remain available.';
+      });
+    } catch (e) {
+      if (own !== generation) return;
+      mount(note, 'The map could not load. ', btn('Try again', show, 'small'));
+      console.warn('Station map:', e);
     }
-    mount(el, box);
-    if (store.get('map', false)) show();
-    else offer();
   }
   return {
     el: el,
-    update(pos) {
-      const k = JSON.stringify(pos ? [pos.source, pos.lat_deg, pos.lon_deg] : null);
-      if (k !== key) {
-        key = k;
-        render(pos);
+    update(next, reference, estimate) {
+      live = estimate || null;
+      const have = next && Number.isFinite(next.lat_deg) && Number.isFinite(next.lon_deg) && next.source && next.source !== 'none';
+      el.hidden = !have;
+      if (!have) { dispose(); clear(el); pos = cacheAt = null; return; }
+      const before = pos;
+      const oldCache = cacheAt;
+      pos = next;
+      cacheAt = reference || pos;
+      liveData();
+      if (map && (!before || before.lat_deg !== pos.lat_deg || before.lon_deg !== pos.lon_deg ||
+          !oldCache || oldCache.lat_deg !== cacheAt.lat_deg || oldCache.lon_deg !== cacheAt.lon_deg)) {
+        const at = [pos.lon_deg, pos.lat_deg];
+        const own = generation;
+        mapCache.position([cacheAt.lon_deg, cacheAt.lat_deg]).then(moved => {
+          if (own !== generation || !map) return;
+          if (moved) { show(); return; }
+          marker.setLngLat(at);
+          map.jumpTo({ center: at });
+        });
+        sync();
+      } else if (!before) {
+        if (store.get('map', false)) show();
+        else offer();
       }
     },
+    destroy() { dispose(); },
   };
 }
 

@@ -194,6 +194,7 @@ typedef struct {
     const char *password;
     bool have_ap_password;
     const char *ap_password;
+    bool no_trial;   /**< "no_trial": the new network is the station's at once, kept even without an IP */
 } web_wifi_put_t;
 
 /** PUT /api/wifi (strings point into root). */

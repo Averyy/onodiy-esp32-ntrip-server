@@ -1,7 +1,8 @@
 # Third-party notices
 
-The source code in this repository is original and MIT-licensed (see
-[`LICENSE`](LICENSE)). The firmware image built from it
+The project's own source code is original and MIT-licensed (see
+[`LICENSE`](LICENSE)); vendored browser libraries retain their own licenses.
+The firmware image built from it
 (`onodiy-esp32-ntrip-server.bin`, and the bootloader and partition table that come
 with it) also contains code from the projects below, linked in from ESP-IDF v6.1
 and the ESP Component Registry. Their licenses apply to those parts of the image. This file ships with
@@ -21,6 +22,10 @@ every build artifact and release.
 | [HTTP parser](https://github.com/nodejs/http-parser) (ESP-IDF `http_parser`) | HTTP | MIT | Joyent, Inc. and other Node contributors; Igor Sysoev |
 | [cJSON](https://github.com/DaveGamble/cJSON) (`espressif/cjson`) | JSON | MIT | Dave Gamble and cJSON contributors |
 | [mDNS](https://github.com/espressif/esp-protocols/tree/master/components/mdns) (`espressif/mdns` 1.13.1) | local name `<host>.local` and service advertising | Apache-2.0 | Espressif Systems (Shanghai) Co., Ltd. |
+| [MapLibre GL JS](https://github.com/maplibre/maplibre-gl-js/tree/v6.16.0) (6.16.0) | Browser vector map renderer and worker, embedded in the image | BSD-3-Clause and bundled dependencies | MapLibre contributors and others; [full notices](components/web/ui/vendor/maplibre-LICENSE.txt) |
+
+The firmware also serves MapLibre's complete license and dependency notices at
+`/vendor/maplibre-LICENSE.txt`.
 
 The authoritative list for ESP-IDF, including components this project does not
 link, is ESP-IDF's

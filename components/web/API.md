@@ -166,10 +166,10 @@ Applied to every request before any handler runs.
    `Referrer-Policy: no-referrer`; HTML also gets a Content-Security-Policy
    that allows only the device's own origin (scripts, styles, images,
    connections including the WebSocket) and forbids framing, with one
-   exception for images: `https://tile.openstreetmap.org`, the tiles of the
+   exception for map resources: `https://tiles.openfreemap.org`, the vector tiles of the
    Receiver page's optional station map (section 8). The page requests tiles
-   only after the user asks for the map; the tile images carry
-   `referrerpolicy="origin"`, because the tile server's usage policy asks
+   only after the user asks for the map; map resource fetches use
+   `referrerPolicy: "origin"`, because the tile server's usage policy asks
    for a Referer (the page's origin, nothing more); everything else keeps
    `no-referrer`.
 
@@ -186,14 +186,29 @@ answers as `GET` does (status, `ETag`, `Content-Type`, `Content-Encoding`,
 `If-None-Match`) without the body; `HEAD` on `/api/` paths and `/ws` stays
 `405` (also without a body).
 
-The fixed asset names are `/app.js`, `/app.css` and `/favicon.svg` (`/` and
+The fixed asset names include `/app.js`, `/app.css`, `/favicon.svg`, and the
+MapLibre renderer, worker and stylesheet under `/vendor/` (`/` and
 `/index.html` are the page). The build generates the table of them from
 `components/web/ui/` (`tools/ui_bundle.py`: path, content type, gzip body;
 `priv_include/web_assets.h`); `web_asset_find()` maps a request URI to an
 entry (query ignored) and `web_etag_match()` evaluates `If-None-Match`. The
 page loads only these files (no inline script or style), so the
-Content-Security-Policy can stay at the device's own origin (the map tiles
-above are the one exception, images only).
+Content-Security-Policy keeps scripts, styles and workers on the device's own
+origin; only map resources connect to the OpenFreeMap vector origin. The MapLibre
+files are the pinned npm distribution with their full third-party notices.
+
+The optional vector map uses MapLibre GL JS with OSM data via OpenFreeMap,
+supports zoom 2–23, and keeps
+zoom controls below the map alongside Hide and the external map link. The
+browser stores only resources its visible map requested, in IndexedDB
+(also available on the plain-HTTP LAN origin). Tiles have no timed refresh;
+a confirmed position change over 10 m from the stored anchor clears the tile store
+and source metadata and reloads the map with the current dataset. The marker
+follows live fixes; cache invalidation uses the reference position or a
+confirmed relocation, so single-fix noise does not discard cached tiles.
+Style, sprites and fonts are retained separately. A new, uncached viewport
+needs an initial download. Nothing is prefetched for offline use. Leaving
+the page or hiding the map disposes its renderer and worker.
 
 ---
 
@@ -806,6 +821,8 @@ oldest.
   "signal_group_refused": null,
   "position": {"locked": true, "source": "survey", "lat_deg": 45.123456789, "lon_deg": -75.123456789,
                "height_m": 85.1234, "sigma_m": 0.0, "locked_unix": 1759000000},
+  "own_position": {"valid": false, "lat_deg": null, "lon_deg": null, "height_m": null, "horizontal_sigma_m": null, "age_s": null},
+  "relocating": false,
   "survey": {"active": false, "window_left_s": 0, "unfinished": false},
   "fixed_check": {"state": "ok", "horizontal_m": 2, "vertical_m": -3, "distance_m": 4, "height_only": false,
                   "sea_level": false, "checked_age_s": 1200, "limit_m": 50},
@@ -830,6 +847,8 @@ oldest.
 | `link.open`, `open_failures` | the UART driver is installed; failed installs since boot. `open: false` with a mode other than `off` = the UI's "Receiver port closed": `gnss_link` reopens it on its own |
 | `link.hands_off` | the link refuses every write and lease (receiver maintenance) |
 | `recovery` | `gnss/recovery` as stored, `health_recovery_mode_t` (a stored value out of range reads as `full`, as health reads it) |
+| `own_position` | Receiver-computed GNSS position: `valid`, `lat_deg`, `lon_deg`, ellipsoidal `height_m`, `horizontal_sigma_m` (reported latitude/longitude standard deviations combined, not an accuracy guarantee), `age_s`. Only usable single-point solutions, never FIXEDPOS echoes; invalid after 90 s without a usable solution. With automatic setup, measured every 20 s, including during survey-in. The primary coordinates and red map marker show `position`, the correction reference, when available. The live estimate appears separately in blue with its reported horizontal sigma. |
+| `relocating` | Automatic setup observed consistent displacement for at least five minutes, with each usable fix farther from the reference than both 3 m and four reported horizontal standard deviations. Fixes must remain within max(3 m, twice their combined reported horizontal sigma) of the first displaced fix. Missing/unusable fixes, gaps over 40 s and inconsistent positions restart observation. This is a standalone-GNSS movement heuristic, not guaranteed detection of small moves. A new survey starts, its result locks automatically, and all RTCM consumers are held until the new 1005 matches it. The hold is persisted across resets. Manual setup and maintenance do not initiate relocation. |
 | `first_apply_held` | `gnss/hold` is stored: the receiver's first configuration is held until the user applies. A build with `CONFIG_STATION_HOLD_FIRST_APPLY` (bench builds, the `sdkconfig.hold` overlay) writes it once at boot on a device whose profile was never applied and whose `gnss/autocfg` was never set, together with `gnss/autocfg` = 0 and `gnss/recovery` = 2 (`alerts_only`, if unset), before anything reaches the receiver; it stays in NVS whatever build runs later. While it is stored the station sends the receiver only queries (version, configuration dump, base mode, its own position) and a loader prompt met during detection gets no restart key (`receiver_in_loader`, listen-only; the user's receiver restart still works). The first successful apply erases it, and so does `PUT /api/gnss/profile` with `autocfg: true`; a factory reset erases it with the other user settings. When the hold is due but cannot be stored (settings unusable this boot, or the write failed), the station holds the first configuration for this boot only, as the batch would have stored it: `first_apply_held` true, `autocfg` false, nothing stored. A successful apply ends the hold (automatic configuration stays off for the boot); `autocfg: true` ends both. `GET /api/gnss/apply/preview` lists what the apply would send |
 | `profile.antenna_*` | the base antenna descriptor the receiver publishes in 1033: `antenna_model` the IGS antenna name with its radome (`""` = leave the receiver's own value, the default), `antenna_serial`, `antenna_setup_id` 0-255; serial and setup ID only matter with a model (stored cleared without one). UM982 build 25164 stores the name with every run of spaces collapsed to one: the IGS form `TRM59800.00     SCIS` (the name padded to 16 characters, then the radome) reads back as `TRM59800.00 SCIS` (our bench, 2026-10-14). The station therefore compares names (and serial numbers) with runs of spaces read as one and leading and trailing spaces dropped, so a receiver that holds the collapsed form is not sent the antenna again on every apply. The 1033 the receiver then sends may carry the collapsed name rather than the IGS padded form, which rovers and casters look up by; `rtcm1033.antenna` shows what it sends (to be checked with sky before a real antenna name goes to a caster) |
 | `profile.signal_group_um980` | the signal group a UM980 gets, 1-255 (default `2`: every signal it tracks, both GPS L2 signals (L2C and L2P(Y)), L1C, GLONASS G3, Galileo E6, NavIC L5; `1` its factory group). A UM980 has one antenna input: the apply sends `CONFIG SIGNALGROUP <n>` (one number) and leaves `signal_group_master`/`signal_group_slave`, the UM982's pair, alone, so a profile keeps both when the receiver is swapped. UNTESTED: UM980 support follows the N4 manual and has not run on a UM980. A UM980 also gets `CONFIG MMP ENABLE` (multipath mitigation for its pseudoranges) unless the dump shows it on (`apply_steps.mmp`); a group it refuses is an ordinary failed apply (no fallback into the profile) |
@@ -845,7 +864,7 @@ oldest.
 | `position` | locked or last surveyed (`station_status_t.position`); `source`: `none`, `survey`, `averaged`, `user`; `sigma_m` 0 = unknown |
 | `survey` | `active`: inside the survey window, the survey's length plus 120 s from its start (the receiver acknowledged the base mode, restarted, or was found surveying at boot); `window_left_s` until it ends (0 outside). The window times the station's base-mode read-back (every 60 s), the station messages (1005/1006/1033) the observed set may miss, and the survey rule of the recovery (`GET /api/health`). `unfinished`: the survey started and has not finished (the read-back no longer reports a survey, or its time is up and 60 consecutive 1005 frames lie within 1 mm): the receiver may still be surveying, inside the window and after it, since a survey makes no progress without satellites (no antenna). The station locks it once it finishes. The UI says "Surveying, paused while no corrections arrive." for an unfinished survey without corrections |
 | `arp` | latest CRC-valid 1005/1006 (`gnss_obs_get_arp`), converted to WGS84; `offset_m` = 3-D distance to the locked position, `null` when not locked; `{"valid": false}` before the first frame |
-| `fixed_check` | is the fixed position (typed in or locked) where the receiver is? A fixed base sends the position it was given in every 1005, so the stream cannot tell; the receiver's own single-point solution can. With a fixed profile and a model the station configures, the station asks it without a lease (`BASEPOSA`, the base's position as a fixed base, or `SPPNAVA` when the receiver refuses that, only echoes the set position or gives nothing usable three times; one-shot, one line, the casters never wait): 60 s after streaming began, a receiver restart or an apply, then every 20 s until three usable solutions (computed, single-point, at least 6 satellites, standard deviations at most 5 m horizontally and 10 m in height) agree, at most 15 tries; again every hour. `state` (`station_fix_state_t`): `none` (the profile surveys, or not a model the station configures), `checking` (no verdict yet), `ok` (within 50 m horizontally and vertically, and not a sea-level height), `far` (the position looks wrong: beyond the limit in all three, or `sea_level`: the `fixed_far` alert, journalled; it clears once three solutions are within 40 m, or at once when the fixed position changes; streaming is never held back), `no_solution` (no verdict: the last check got no usable solution, for example without sky), `refused` (no verdict: the receiver refused both logs). With `ok` and `far`: `horizontal_m`, `vertical_m` (the fixed height minus the receiver's ellipsoidal height, its height above sea level plus the geoid separation it reports: > 0 the fixed position is above) and `distance_m` (3-D), the medians of the three solutions that decided (else `null`); `height_only` with `far`: only the height is wrong (beyond the limit, or `sea_level`). `sea_level` with `far`: the fixed height is the receiver's height above sea level, not its ellipsoidal height, a common mistake that is under 50 m off in most places: the medians put the fixed height within 5 m of the receiver's height above sea level (as it prints it, so the separation's sign plays no part) and more than 10 m from its ellipsoidal height, and more than four times the height deviation the solutions report (their median), with the horizontal distance within the limit. 5 m is twice the receiver's vertical RMS (three solutions 20 s apart share most of their error, so their median scatters about as much as one); 10 m is four times that RMS and the largest height deviation a counted solution may report, and where the separation is about 10 m or less the two heights are too close to tell apart (only the 50 m limit applies). The solutions' own deviation keeps a right height that a poor sky puts 10 to 20 m off from reading as a sea-level height where the separation is about that: a solution that reports 8 m needs the fixed height more than 32 m off. Once raised it holds within 10 m of the sea-level height and beyond 5 m from the ellipsoidal one, so an hourly check does not flip it. The UI says "The fixed height looks like a height above sea level. Enter the height above the ellipsoid." `checked_age_s` since the latest usable solution (`null` = none this boot); `limit_m` the limit (50). The receiver's single-point accuracy is 1.5 m horizontal and 2.5 m vertical (RMS), so 50 m is far beyond its own scatter and well inside the about 300 m at which a receiver stops its corrections (`antenna_moved`). PROVISIONAL, to be confirmed on hardware: that `BASEPOSA` reports the receiver's own solution while it works as a fixed base |
+| `fixed_check` | is the fixed position (typed in or locked) where the receiver is? A fixed base sends the position it was given in every 1005, so the stream cannot tell; the receiver's own single-point solution can. With a fixed profile and a model the station configures, the station asks it without a lease (`BASEPOSA`, the base's position as a fixed base, or `SPPNAVA` when the receiver refuses that, only echoes the set position or gives nothing usable three times; one-shot, one line, the casters never wait): with manual setup, 60 s after streaming began, a receiver restart or an apply, then every 20 s until three usable solutions (computed, single-point, at least 6 satellites, standard deviations at most 5 m horizontally and 10 m in height) agree, at most 15 tries; again every hour. With automatic setup, monitoring instead starts and continues every 20 s, including during survey-in. `state` (`station_fix_state_t`): `none` (the profile surveys, or not a model the station configures), `checking` (no verdict yet), `ok` (within 50 m horizontally and vertically, and not a sea-level height), `far` (the position looks wrong: beyond the limit in all three, or `sea_level`: the `fixed_far` alert, journalled; it clears once three solutions are within 40 m, or at once when the fixed position changes; the warning alone does not hold streaming; automatic relocation does), `no_solution` (no verdict: the last check got no usable solution, for example without sky), `refused` (no verdict: the receiver refused both logs). With `ok` and `far`: `horizontal_m`, `vertical_m` (the fixed height minus the receiver's ellipsoidal height, its height above sea level plus the geoid separation it reports: > 0 the fixed position is above) and `distance_m` (3-D), the medians of the three solutions that decided (else `null`); `height_only` with `far`: only the height is wrong (beyond the limit, or `sea_level`). `sea_level` with `far`: the fixed height is the receiver's height above sea level, not its ellipsoidal height, a common mistake that is under 50 m off in most places: the medians put the fixed height within 5 m of the receiver's height above sea level (as it prints it, so the separation's sign plays no part) and more than 10 m from its ellipsoidal height, and more than four times the height deviation the solutions report (their median), with the horizontal distance within the limit. 5 m is twice the receiver's vertical RMS (three solutions 20 s apart share most of their error, so their median scatters about as much as one); 10 m is four times that RMS and the largest height deviation a counted solution may report, and where the separation is about 10 m or less the two heights are too close to tell apart (only the 50 m limit applies). The solutions' own deviation keeps a right height that a poor sky puts 10 to 20 m off from reading as a sea-level height where the separation is about that: a solution that reports 8 m needs the fixed height more than 32 m off. Once raised it holds within 10 m of the sea-level height and beyond 5 m from the ellipsoidal one, so subsequent checks do not flip it. The UI says "The fixed height looks like a height above sea level. Enter the height above the ellipsoid." `checked_age_s` since the latest usable solution (`null` = none this boot); `limit_m` the limit (50). The receiver's single-point accuracy is 1.5 m horizontal and 2.5 m vertical (RMS), so 50 m is far beyond its own scatter and well inside the about 300 m at which a receiver stops its corrections (`antenna_moved`). PROVISIONAL, to be confirmed on hardware: that `BASEPOSA` reports the receiver's own solution while it works as a fixed base |
 
 ### `PUT /api/gnss/profile` (adm)
 
@@ -995,16 +1014,20 @@ Errors: `409 safe_mode`.
 ### `POST /api/gnss/position/lock` (adm)
 
 Empty body: lock the latest surveyed position (the station switches the
-profile to `fixed` and reconfigures). `202 {"accepted": true}`. Errors:
+profile to `fixed` and reconfigures). With automatic setup enabled, the
+station does this when survey-in completes; no user action is needed.
+The UI offers manual locking only with manual setup, after the survey.
+`202 {"accepted": true}`. Errors:
 `409 no_position_yet` (no 1005 yet), `409 unsupported_model`,
 `409 journal_open`, `409 signal_test_running`, `409 safe_mode`,
 `409 receiver_maintenance`.
 
 ### `DELETE /api/gnss/position/lock` (adm)
 
-Forget the locked position and survey again. The UI warns first: the
-position sent to casters changes, and Onocoy may validate the station
-again. `202 {"accepted": true}`. Errors as for apply.
+Forget the locked position and survey again. The position sent to casters
+changes, and Onocoy may validate the station again. The Position view has
+no reset button; to survey a moved antenna, choose Survey-in in Receiver
+settings. `202 {"accepted": true}`. Errors as for apply.
 
 ### `GET /api/gnss/signals` (pub\*/adm)
 
@@ -2021,6 +2044,10 @@ Every member is optional.
   hex digits (only with `ssid`). A missing `password` keeps the stored one
   when `ssid` is unchanged, and then nothing changes and the station does
   not reconnect; for a new SSID it is required (`400 invalid_field`).
+- `no_trial` (optional boolean, with `ssid`): for an advance deployment. A
+  changed network is stored as the station's and used at once, with no
+  90 s trial and no way back: it is kept even if it gets no IP (`trial` is
+  then `false`, `applied` `true`). Missing or `false` = the trial below.
 - `ap_password` (optional): 8-63 characters sets the AP password (WPA2),
   `""` removes it (the AP is then open; the UI warns); missing = unchanged.
   It takes effect the next time the AP comes up. The UI sends it alone, so
@@ -2036,7 +2063,7 @@ settings unavailable the credentials are used for this boot only
 stored: nothing changed (the same network and password), or the QEMU
 development build, whose emulated Ethernet stays its link.
 
-`trial` is `network_set_credentials()`'s plan: `true` exactly when the
+`trial` is `network_set_credentials()`'s plan (`no_trial` forces the apply plan): `true` exactly when the
 credentials are stored as pending and tried (`NETWORK_CRED_PLAN_TRIAL`);
 `applied` is `false` for the store-only plan. From the first
 `GET /api/wifi` (or `/api/status`, or the WebSocket's network section)

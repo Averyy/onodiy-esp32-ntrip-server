@@ -327,9 +327,10 @@ typedef enum {
  * What to do with credentials the user entered. wifi_used: the station
  * connects over Wi-Fi (false in the QEMU development build, which runs on an
  * emulated Ethernet port: there is nothing to try them on, so a trial could
- * only ever end in a revert).
+ * only ever end in a revert). no_trial: the user wants the new credentials as the
+ * station's at once, kept even if they get no IP (an advance deployment).
  */
-net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used);
+net_cred_plan_t net_cred_plan(bool have_active, bool same_as_active, bool wifi_used, bool no_trial);
 
 /**
  * A trial ends early when the network refuses the new credentials: this

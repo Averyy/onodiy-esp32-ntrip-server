@@ -89,12 +89,17 @@ static stn_job_t sim_next(sim_t *w)
     return j;
 }
 
-/* Run until a job is handed out or max_s seconds pass (then STN_JOB_NONE). */
+/* Run until a job is handed out or max_s seconds pass (then STN_JOB_NONE).
+ * The live-position monitor receives no solution in this world; its answers,
+ * movement rules and scheduling have their own test_station_fixcheck.c world. */
 static stn_job_t sim_until_job(sim_t *w, int max_s)
 {
     for (int i = 0; i <= max_s; i++) {
         stn_job_t j = sim_next(w);
-        if (j.kind != STN_JOB_NONE) {
+        if (j.kind == STN_JOB_OWN_FIX) {
+            stn_done(&w->s, &(stn_result_t){ .err = STN_E_TIMEOUT }, &w->in);
+            sim_rearm(w);
+        } else if (j.kind != STN_JOB_NONE) {
             return j;
         }
         sim_tick(w);
@@ -2816,6 +2821,10 @@ TEST_CASE("station core: a survey without data outlasts its window and is locked
         stn_on_arp(&w.s, arp);
         frames++;
         j = sim_next(&w);
+        if (j.kind == STN_JOB_OWN_FIX) {
+            sim_done(&w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+            j.kind = STN_JOB_NONE;
+        }
         if (j.kind == STN_JOB_NONE) {
             sim_tick(&w);
         }

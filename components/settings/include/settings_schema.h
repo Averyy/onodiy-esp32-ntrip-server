@@ -62,6 +62,7 @@ extern "C" {
 #define SETTINGS_KEY_GNSS_MODEL     "model"       /**< str, device state: last detected model; survives factory reset */
 #define SETTINGS_KEY_GNSS_FW        "fw"          /**< str, device state: last detected firmware; survives factory reset */
 #define SETTINGS_KEY_GNSS_BASE_POS  "base_pos"    /**< blob: locked antenna position (um98x_base_position_t, encoded) */
+#define SETTINGS_KEY_GNSS_RELOCATING "relocating" /**< u8, device state: relocation detected; corrections held until the new survey is locked and checked */
 #define SETTINGS_KEY_GNSS_FLASH_JOB "flash_job"   /**< blob, device state: open receiver-flash journal (versioned record, see the flasher); survives factory reset */
 #define SETTINGS_KEY_GNSS_BENCH_RACE "bench_race" /**< u8, device state: bench builds only: 1 = the next boot streams the receiver's stop key from its earliest point (one-shot, erased before it runs) */
 #define SETTINGS_KEY_GNSS_SG_OK     "sg_ok"       /**< u16, device state: (master << 8) | slave of the signal group the receiver accepted at the last successful apply (same batch as applied_hash): where a refused group goes back to when the session's own read-back is unknown */

@@ -189,13 +189,24 @@ const systemPart = {
         const v = picker.value();
         if (!v) return;
         const ap = (wifi.ap || {}).ssid;
+        /* Only with a network to go back to is there a trial to skip. */
+        const adv = wifi.configured ? checkbox('Advance deployment - Save even if connection fails', false,
+          'Switches at once and stays on ' + v.ssid + ', even if it gets no address there. For setting up before the station moves.') : null;
+        const trialNote = wifi.configured ? 'If it gets no address there within ' + TRIAL_S + ' seconds, it goes back to ' +
+          (wifi.ssid || 'the current network') + ' by itself.' : 'If it cannot join, the setup hotspot' + (ap ? ' (' + ap + ')' : '') +
+          ' opens again so you can fix it.';
+        const note = h('p', { class: 'muted' }, trialNote);
+        if (adv) {
+          adv.input.addEventListener('change', () => {
+            note.textContent = adv.input.checked ? 'It does not go back to ' + (wifi.ssid || 'the current network') +
+              ' by itself. Without an address on ' + v.ssid + ', the setup hotspot opens beside it.' : trialNote;
+          });
+        }
         const ok = await dialog({ title: 'Join ' + v.ssid + '?', ok: 'Join',
-          body: [h('p', null, 'Servers drop for a moment while the station changes networks.'),
-            h('p', { class: 'muted' }, wifi.configured ? 'If it gets no address there within ' + TRIAL_S + ' seconds, it goes back to ' +
-              (wifi.ssid || 'the current network') + ' by itself.' : 'If it cannot join, the setup hotspot' + (ap ? ' (' + ap + ')' : '') +
-              ' opens again so you can fix it.')] });
+          body: [h('p', null, 'Servers drop for a moment while the station changes networks.'), note, adv ? adv.el : null] });
         if (!ok) return;
-        const r = await act(go, () => api('PUT', '/api/wifi', v), err);
+        const noTrial = !!(adv && adv.input.checked);
+        const r = await act(go, () => api('PUT', '/api/wifi', noTrial ? Object.assign({ no_trial: true }, v) : v), err);
         if (r === undefined) return;
         joinDirty = false;
         joinPrev = wifi.ssid || '';

@@ -66,13 +66,14 @@ idf_component_register(
 # build directory. Any check failing, or the compressed UI growing past
 # UI_GZ_BUDGET bytes, fails the build. Adding a file under ui/js/
 # reconfigures (CONFIGURE_DEPENDS).
-set(UI_GZ_BUDGET 153600)
+set(UI_GZ_BUDGET 655360)
 file(GLOB _ui_js CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/js/*.js")
+file(GLOB _ui_vendor CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/vendor/*")
 set(_ui_inputs
     "${COMPONENT_DIR}/ui/index.html"
     "${COMPONENT_DIR}/ui/app.css"
     "${COMPONENT_DIR}/ui/favicon.svg"
-    ${_ui_js})
+    ${_ui_js} ${_ui_vendor})
 set(_ui_c "${CMAKE_CURRENT_BINARY_DIR}/web_ui_assets.c")
 idf_build_get_property(_python PYTHON)
 add_custom_command(

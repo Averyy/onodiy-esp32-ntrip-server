@@ -1219,7 +1219,7 @@ def test_survey_pauses_without_data_on_both_pages():
                   ("statusPos", [{"surveying": False, "position_known": False}, True]),
                   ("statusPos", [{"surveying": False, "position_known": True}, True]),
                   ("statusPos", [{"surveying": False}, True])])
-    assert out[0] == "Surveying, about 11min left. Then lock it."
+    assert out[0] == "Surveying from GNSS data, about 11min left. With manual setup, lock it when it ends."
     assert out[1] == "Surveying, paused while no corrections arrive."
     assert out[2].startswith("Locked.") and out[3].startswith("Fixed (typed in).") and out[4] == "No position yet."
     assert out[5] == "Surveying, 11min left" and out[6] == "Surveying, paused"
@@ -1574,7 +1574,7 @@ def test_a_survey_without_data_stays_paused_after_its_window():
                   ("statusPos", [rx, False]), ("statusPos", [rx, True]),
                   ("statusPos", [{**rx, "survey_unfinished": False}, False]),
                   ("statusPos", [{**rx, "survey_unfinished": False, "position_known": True}, True])])
-    assert out == ["Surveying, paused while no corrections arrive.", "Surveying. Lock it when it ends.", "No position yet.",
+    assert out == ["Surveying, paused while no corrections arrive.", "Surveying from GNSS data. With manual setup, lock it when it ends.", "No position yet.",
                    ["Paused", ""], ["Surveying", "info"], ["Not locked", ""],
                    "Surveying, paused", "Surveying", "No position yet", "Not locked"]
 
@@ -1607,8 +1607,8 @@ def test_receiver_unchecked_during_maintenance_says_so():
                   ("profileChip", unchecked), ("profileChip", known), ("profileChip", {**unchecked, "autocfg": False}),
                   ("posChip", unchecked), ("posChip", known), ("posChip", surveying)])
     # The Receiver card says it once, in a line of its own: the position row goes (None) unless the station knows it.
-    assert out == [None, "No position yet.", "Locked. If the antenna moves, reset the location.",
-                   "Surveying, about 10min left. Then lock it.",
+    assert out == [None, "Automatic position locking resumes after receiver maintenance.", "Set. Updates automatically after a confirmed move.",
+                   "Surveying from GNSS data, about 10min left. The position locks automatically when complete.",
                    ["Not checked", ""], ["Not applied", "warn"], ["Manual setup", ""],
                    ["Not checked", ""], ["Not locked", ""], ["Surveying", "info"]]
     r = {"rx_maintenance": True, "identity_confirmed": False, "profile_applied": False, "position_locked": False,

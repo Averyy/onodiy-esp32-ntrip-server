@@ -19,6 +19,7 @@
  */
 #include "station.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -248,6 +249,8 @@ static volatile bool s_factory_reset;    /* the settings were erased for a facto
  * configuration on ends both. */
 static volatile bool s_hold_ram;
 static volatile bool s_autocfg_ram_off;
+static bool s_relocation_stored;
+static int64_t s_relocation_retry_ms;
 
 /* The live view's satellite-in-view output may be on (unsaved) across an
  * ESP32-only reset: the receiver keeps it, so the next boot turns it off.
@@ -2614,6 +2617,13 @@ static void publish_status(const stn_in_t *in)
     o->fix_height_only = fx.height_only;
     o->fix_sea_level = fx.sea_level;
     o->fix_checked_age_s = fx.checked_age_s;
+    o->own_position_valid = fx.own_valid;
+    o->own_lat_deg = fx.own.lat_deg;
+    o->own_lon_deg = fx.own.lon_deg;
+    o->own_height_m = fx.own.msl_height_m + fx.own.separation_m;
+    o->own_horizontal_sigma_m = hypot(fx.own.sd_lat_m, fx.own.sd_lon_m);
+    o->own_position_age_s = fx.own_age_s;
+    o->relocating = core.relocating;
 
     o->first_apply_held = core.first_apply_held;
     o->rx_maintenance = core.maint;
@@ -2987,6 +2997,7 @@ static void hold_casters(void)
 static void after_step(const stn_in_t *in)
 {
     bool paused;
+    bool relocating;
     bool sky_on;
     station_state_t st;
     stn_note_t notes[STN_NOTES];
@@ -2996,7 +3007,8 @@ static void after_step(const stn_in_t *in)
         stn_obs_arm(&s_obs, s_profile.rtcm, s_profile.rtcm_count, in->now_ms);
         s_core.obs_rearm = false;
     }
-    paused = s_core.paused;
+    paused = s_core.paused || s_core.relocating;
+    relocating = s_core.relocating;
     st = (station_state_t)s_core.state;
     sky_on = s_core.sky_on;
     n_notes = stn_take_notes(&s_core, notes, STN_NOTES);
@@ -3021,6 +3033,18 @@ static void after_step(const stn_in_t *in)
         esp_err_t err = ntrip_server_set_paused(paused);
         if (err != ESP_OK) {
             ESP_LOGD(TAG, "casters not %s: %s", paused ? "paused" : "resumed", esp_err_to_name(err));
+        }
+    }
+    if (relocating != s_relocation_stored && !s_factory_reset && in->now_ms >= s_relocation_retry_ms) {
+        esp_err_t err = settings_set_state_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RELOCATING, relocating ? 1 : 0);
+        if (err == ESP_OK) {
+            s_relocation_retry_ms = 0;
+            s_relocation_stored = relocating;
+            ESP_LOGI(TAG, "%s", relocating ? "movement confirmed: corrections held for a new survey" :
+                         "new reference position checked: corrections resumed");
+        } else {
+            s_relocation_retry_ms = in->now_ms + 10000;
+            ESP_LOGW(TAG, "relocation state not persisted: %s", esp_err_to_name(err));
         }
     }
     publish_status(in);
@@ -3718,9 +3742,12 @@ esp_err_t station_init(void)
 
     /* Before the station task starts: nothing has reached the receiver yet. */
     bool held = first_apply_hold_boot();
+    uint8_t relocating = 0;
+    s_relocation_stored = settings_get_u8(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_RELOCATING, &relocating) == ESP_OK && relocating == 1;
 
     portENTER_CRITICAL(&s_lock);
     stn_init(&s_core, journal_open(s_journal_err));
+    s_core.relocating = s_relocation_stored;
     stn_set_first_apply_held(&s_core, held);
     s_core.live_idle_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_IDLE_S * 1000u;
     s_core.live_max_ms = (uint32_t)CONFIG_STATION_LIVE_VIEW_MAX_MIN * 60000u;

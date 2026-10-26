@@ -484,11 +484,17 @@ TEST_CASE("Wi-Fi and system edits", "[web_parse]")
     root = body("{\"ap_password\":\"apsecret\"}");
     TEST_ASSERT_TRUE(web_parse_wifi_put(root, &w, &b));
     TEST_ASSERT_FALSE(w.have_ssid);
+    TEST_ASSERT_FALSE(w.no_trial);
+    cJSON_Delete(root);
+    root = body("{\"ssid\":\"Office\",\"password\":\"\",\"no_trial\":true}");
+    TEST_ASSERT_TRUE(web_parse_wifi_put(root, &w, &b));
+    TEST_ASSERT_TRUE(w.no_trial);
     cJSON_Delete(root);
     static const struct {
         const char *json;
         const char *field;
     } bad[] = {
+        { "{\"ssid\":\"Home\",\"no_trial\":1}", "no_trial" },
         { "{\"ssid\":\"\"}", "ssid" },
         { "{\"ssid\":\"Home\",\"password\":\"short\"}", "password" },
         { "{\"ap_password\":\"short\"}", "ap_password" },

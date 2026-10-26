@@ -1086,21 +1086,18 @@ tr.fold:has(details:not([open])) ~ tr { display: none; }
   background: var(--surface-2);
 }
 .map-box { margin-top: 0.75rem; }
-.map .map-tiles { position: absolute; inset: 0; }
-.map img { position: absolute; display: block; max-width: none; user-select: none; }
-.map .pin {
+.map .map-marker {
   position: absolute;
-  left: 50%;
-  top: 50%;
   width: 16px;
   height: 16px;
-  margin: -8px 0 0 -8px;
   border: 3px solid #ffffff;
   border-radius: 50%;
   background: #d03b3b;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
 }
 .map .map-attr {
+  z-index: 2;
+  max-width: 100%;
   position: absolute;
   right: 0;
   bottom: 0;

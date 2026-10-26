@@ -3526,7 +3526,7 @@ static void queue_apply_locked(const char *ssid, const char *pass, bool trial)
     s_apply_at_us = esp_timer_get_time() + (int64_t)APPLY_DELAY_MS * 1000;
 }
 
-esp_err_t network_set_credentials(const char *ssid, const char *password, network_cred_plan_t *plan_out)
+esp_err_t network_set_credentials(const char *ssid, const char *password, bool no_trial, network_cred_plan_t *plan_out)
 {
     if (ssid == NULL || password == NULL || !net_ssid_valid(ssid) || !net_password_valid(password)) {
         return ESP_ERR_INVALID_ARG;
@@ -3544,7 +3544,7 @@ esp_err_t network_set_credentials(const char *ssid, const char *password, networ
 #else
     const bool wifi_used = true;
 #endif
-    net_cred_plan_t plan = net_cred_plan(have, same, wifi_used);
+    net_cred_plan_t plan = net_cred_plan(have, same, wifi_used, no_trial);
 
     if (settings_is_available()) {
         esp_err_t err;

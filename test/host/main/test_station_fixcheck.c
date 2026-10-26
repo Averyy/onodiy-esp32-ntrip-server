@@ -33,7 +33,7 @@ static void world_init(world_t *w, bool fixed)
     memset(w, 0, sizeof(*w));
     stn_init(&w->s, false);
     w->in.now_ms = T0;
-    w->in.autocfg = true;
+    w->in.autocfg = false;   /* warning-only behavior; automatic relocation is tested separately below */
     w->in.model_known = true;
     w->in.profile_survey = !fixed;
     w->in.survey_s = 600;
@@ -133,6 +133,183 @@ static int64_t query(world_t *w, int max_s, const stn_result_t *r)
 static unsigned notes(world_t *w, stn_note_t *out)
 {
     return stn_take_notes(&w->s, out, STN_NOTES);
+}
+
+TEST_CASE("automatic position: wind, uncertain fixes and single outliers do not start a survey", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t wind = answer(0.8, 0.0);
+    wind.own.sd_lat_m = 0.05;
+    wind.own.sd_lon_m = 0.05;   /* even a very optimistic receiver cannot lower the 3 m floor */
+    for (int i = 0; i < 5; i++) query(&w, 120, &wind);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    stn_result_t far = answer(20.0, 0.0);
+    query(&w, 120, &far);
+    query(&w, 120, &wind);
+    query(&w, 120, &far);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    stn_result_t uncertain = answer(12.0, 0.0);
+    uncertain.own.sd_lat_m = 3.0;
+    uncertain.own.sd_lon_m = 3.0;
+    for (int i = 0; i < 4; i++) query(&w, 120, &uncertain);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    TEST_ASSERT_FALSE(w.s.apply_wanted);
+}
+
+TEST_CASE("automatic position: a sustained significant move queues a survey and holds corrections until checked", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t far = answer(12.0, 0.0);
+    query(&w, 120, &far);
+    TEST_ASSERT_INT64_WITHIN(1500, STN_FIX_PERIOD_MS, query(&w, 120, &far));
+    TEST_ASSERT_FALSE(w.s.relocating);
+    int64_t first = w.s.move_started_ms;
+    while (w.in.now_ms - first < STN_MOVE_CONFIRM_MS - STN_FIX_PERIOD_MS) {
+        query(&w, 120, &far);
+        TEST_ASSERT_FALSE(w.s.relocating);
+    }
+    query(&w, 120, &far);
+    TEST_ASSERT_TRUE(w.s.relocating);
+    stn_fix_status_t measured;
+    stn_fix_status(&w.s, w.in.now_ms, &measured);
+    TEST_ASSERT_TRUE(measured.own_valid);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, far.own.lat_deg, measured.own.lat_deg);
+    stn_job_t j = until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_RESURVEY, j.change);
+    TEST_ASSERT_TRUE(w.s.paused);
+    stn_result_t failed = res(STN_E_FAIL);
+    failed.nothing_sent = true;
+    stn_done(&w.s, &failed, &w.in);
+    TEST_ASSERT_TRUE(w.s.relocating);   /* a failed configuration must not release old corrections */
+    w.s.apply_retry_ms = w.in.now_ms;
+    j = until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_RESURVEY, j.change);  /* retry must not just reapply the old reference */
+    w.in.fixed_valid = false;
+    w.in.profile_survey = true;
+    stn_result_t ok = res(STN_OK);
+    ok.mode_sent = true;
+    stn_done(&w.s, &ok, &w.in);
+    TEST_ASSERT_TRUE(w.s.relocating);
+    TEST_ASSERT_FALSE(w.s.relocation_ready);
+    TEST_ASSERT_EQUAL(STN_NEVER, w.s.pos_check_ms);
+    w.s.survey.complete = true;
+    j = until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_LOCK, j.change);
+    w.in.fixed_valid = true;
+    w.in.profile_survey = false;
+    w.in.fixed_llh[0] = far.own.lat_deg;
+    stn_done(&w.s, &ok, &w.in);
+    TEST_ASSERT_TRUE(w.s.relocation_ready);
+    TEST_ASSERT_TRUE(w.s.relocating);
+    query(&w, 30, &far);
+    TEST_ASSERT_TRUE(w.s.relocating);
+    j = until_job(&w, 20);
+    TEST_ASSERT_EQUAL(STN_JOB_CHECK_POSITION, j.kind);
+    stn_done(&w.s, &ok, &w.in);
+    TEST_ASSERT_FALSE(w.s.relocating);
+}
+
+TEST_CASE("automatic position: small persistent offsets never relocate even with optimistic sigma", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t bias = answer(2.5, 0.0);
+    bias.own.sd_lat_m = bias.own.sd_lon_m = 0.05;
+    for (int i = 0; i < 35; i++) query(&w, 120, &bias);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    TEST_ASSERT_FALSE(w.s.apply_wanted);
+}
+
+TEST_CASE("automatic position: inconsistent displaced fixes and observation gaps restart confirmation", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t north = answer(12.0, 0.0), south = answer(-12.0, 0.0);
+    for (int i = 0; i < 35; i++) query(&w, 120, i % 2 ? &north : &south);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    for (int i = 0; i < 10; i++) query(&w, 120, &north);
+    int64_t first = w.s.move_started_ms;
+    tick(&w, STN_MOVE_MAX_GAP_MS + 1000);
+    query(&w, 120, &north);
+    TEST_ASSERT_GREATER_THAN_INT64(first, w.s.move_started_ms);
+    for (int i = 0; i < 10; i++) query(&w, 120, &north);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    stn_result_t lost = res(STN_E_TIMEOUT);
+    query(&w, 120, &lost);
+    TEST_ASSERT_EQUAL(0, w.s.move_samples);
+    for (int i = 0; i < 10; i++) query(&w, 120, &north);
+    TEST_ASSERT_FALSE(w.s.relocating);
+}
+
+TEST_CASE("automatic position: GNSS monitoring continues while surveying and stale fixes are not live", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, false);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t mode = res(STN_OK);
+    mode.mode_survey = true;
+    stn_job_t j = until_job(&w, 5);
+    TEST_ASSERT_EQUAL(STN_JOB_MODE, j.kind);
+    stn_done(&w.s, &mode, &w.in);
+    stn_result_t point = answer(1.0, 0.0);
+    query(&w, 120, &point);
+    stn_fix_status_t status;
+    stn_fix_status(&w.s, w.in.now_ms, &status);
+    TEST_ASSERT_TRUE(status.own_valid);
+    TEST_ASSERT_EQUAL(STN_FIX_OFF, status.state);
+    stn_fix_status(&w.s, w.in.now_ms + 91000, &status);
+    TEST_ASSERT_FALSE(status.own_valid);
+    TEST_ASSERT_FALSE(w.s.relocating);
+}
+
+TEST_CASE("automatic position: a lost fix breaks the movement run; a reset resumes an unfinished relocation", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    w.in.autocfg = true;
+    boot(&w, true);
+    stn_result_t far = answer(12.0, 0.0);
+    query(&w, 120, &far);
+    query(&w, 120, &far);
+    stn_result_t no_fix = answer(12.0, 0.0);
+    no_fix.own.computed = false;
+    query(&w, 120, &no_fix);
+    query(&w, 120, &far);
+    TEST_ASSERT_FALSE(w.s.relocating);
+    world_init(&w, true);
+    w.in.autocfg = true;
+    w.s.relocating = true;   /* restored from the persisted relocation flag */
+    boot(&w, true);
+    stn_job_t j = until_job(&w, 2);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_CHANGE_RESURVEY, j.change);
+    TEST_ASSERT_TRUE(w.s.relocating);
+}
+
+TEST_CASE("automatic position: enabling automatic setup does not wait for the manual hourly recheck", "[station_fixcheck]")
+{
+    world_t w;
+    world_init(&w, true);
+    boot(&w, true);
+    stn_result_t near = answer(0.0, 0.0);
+    for (int i = 0; i < 3; i++) query(&w, 120, &near);
+    TEST_ASSERT_INT64_WITHIN(1000, w.in.now_ms + STN_FIX_RECHECK_MS, w.s.fix_due_ms);
+    w.in.autocfg = true;
+    TEST_ASSERT_INT64_WITHIN(1500, STN_FIX_PERIOD_MS, query(&w, 40, &near));
 }
 
 /* Raise the warning: three answers 120 m off. */

@@ -142,8 +142,43 @@ TEST_CASE("receiver web: first_apply_held in GET /api/gnss", "[web_receiver]")
         TEST_ASSERT_TRUE(cJSON_IsBool(at(root, "first_apply_held")));
         TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "autocfg")));
         TEST_ASSERT_EQUAL_STRING("alerts_only", at(root, "recovery")->valuestring);
+        const cJSON *own = at(root, "own_position");
+        TEST_ASSERT_TRUE(cJSON_IsFalse(at(own, "valid")));
+        TEST_ASSERT_TRUE(cJSON_IsNull(at(own, "lat_deg")));
+        TEST_ASSERT_TRUE(cJSON_IsNull(at(own, "age_s")));
+        TEST_ASSERT_TRUE(cJSON_IsNull(at(own, "horizontal_sigma_m")));
+        TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "relocating")));
         cJSON_Delete(root);
     }
+}
+
+TEST_CASE("receiver web: live GNSS coordinates and relocation are separate from the correction reference", "[web_receiver]")
+{
+    memset(&s_st, 0, sizeof(s_st));
+    s_st.own_position_valid = true;
+    s_st.own_lat_deg = 45.0;
+    s_st.own_lon_deg = -75.0;
+    s_st.own_height_m = 100.0;
+    s_st.own_position_age_s = 2;
+    s_st.own_horizontal_sigma_m = 1.33;
+    s_st.relocating = true;
+    web_gnss_snap_t g;
+    memset(&g, 0, sizeof(g));
+    g.st = &s_st;
+    um98x_profile_default(&g.profile, 1234);
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_gnss(&w, &g);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = parse_out();
+    const cJSON *own = at(root, "own_position");
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(own, "valid")));
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, 45.0, at(own, "lat_deg")->valuedouble);
+    TEST_ASSERT_DOUBLE_WITHIN(1e-9, -75.0, at(own, "lon_deg")->valuedouble);
+    TEST_ASSERT_EQUAL(2, at(own, "age_s")->valueint);
+    TEST_ASSERT_DOUBLE_WITHIN(0.001, 1.33, at(own, "horizontal_sigma_m")->valuedouble);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "relocating")));
+    cJSON_Delete(root);
 }
 
 static web_status_snap_t s_snap;

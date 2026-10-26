@@ -229,9 +229,16 @@
  * after the check is armed (the profile became fixed or changed, a
  * receiver restart, a successful apply), then every STN_FIX_PERIOD_MS
  * until three usable solutions decide, or STN_FIX_TRIES queries did not;
- * the next check runs STN_FIX_RECHECK_MS later. A far verdict, or a fixed
+ * the next check runs STN_FIX_RECHECK_MS later with manual setup. Automatic
+ * setup instead continues every STN_FIX_PERIOD_MS, also while surveying,
+ * and exposes only usable measured positions (never FIXEDPOS echoes).
+ * Consistent horizontal displacement beyond both 3 m and four reported
+ * standard deviations for five minutes queues STN_CHANGE_RESURVEY. Missing
+ * fixes, gaps over 40 s, and inconsistent positions restart observation. The caller holds
+ * the RTCM hub and casters while relocating, until CHECK_POSITION succeeds.
+ * A far verdict, or a fixed
  * height that is the receiver's height above sea level, raises
- * STN_ALERT_FIXED_FAR (streaming goes on: the user decides), a near one
+ * STN_ALERT_FIXED_FAR (the warning alone does not hold streaming), a near one
  * clears it; each is noted when it changes the warning. A change of the fixed
  * position, or a survey profile, drops the verdict and the alert at once
  * (noted when the alert stood). Never in maintenance (no job at all).
@@ -290,6 +297,9 @@ extern "C" {
 #define STN_FIX_FIRST_MS       60000         /**< fixed-position check: first query after it was armed (a fix after a restart: under 30 s) */
 #define STN_FIX_PERIOD_MS      20000         /**< ... between the queries of one check */
 #define STN_FIX_TRIES          15            /**< ... queries without a decision before the check gives up */
+#define STN_MOVE_CONFIRM_MS  300000        /**< five minutes of consistent displacement */
+#define STN_MOVE_MAX_GAP_MS   40000         /**< longer gaps restart movement observation */
+#define STN_MOVE_FLOOR_M      3.0           /**< guard against optimistic standalone uncertainty */
 #define STN_FIX_BASEPOS_TRIES  3             /**< ... base-position answers without a usable solution, then the single-point log */
 #define STN_FIX_RECHECK_MS     3600000       /**< ... the next check after one ended */
 #define STN_FIX_BUSY_MS        5000          /**< ... nothing was sent (the command layer was busy) or the other log is asked: again after this */
@@ -709,6 +719,16 @@ typedef struct {
 
     /* fixed-position check */
     bool fix_on;               /**< a fixed profile is checked (armed) */
+    bool fix_reference;        /**< fixed reference available (else live GNSS monitoring during survey) */
+    bool fix_continuous;       /**< automatic setup: continue measuring and detect relocation */
+    bool relocating;           /**< corrections held until the new survey is locked and its 1005 checked */
+    bool relocation_ready;    /**< new fixed reference applied; only its check may release the hold */
+    uint8_t move_samples;      /**< nonzero while observing a candidate relocation */
+    int64_t move_started_ms;
+    int64_t move_last_ms;
+    um98x_own_fix_t move_anchor; /**< first displaced fix; later fixes must stay near it */
+    um98x_own_fix_t own_fix;    /**< latest usable measured position, never a FIXEDPOS echo */
+    int64_t own_fix_ms;
     double fix_ref[3];         /**< the fixed position the check and its verdict are about */
     int64_t fix_due_ms;        /**< next query (STN_NEVER = none) */
     bool fix_running;          /**< a check runs */
@@ -1196,6 +1216,9 @@ typedef enum {
 
 typedef struct {
     uint8_t state;           /**< stn_fix_state_t */
+    bool own_valid;
+    um98x_own_fix_t own;
+    uint32_t own_age_s;
     um98x_fix_offset_t offset; /**< NEAR, FAR: the medians that decided */
     bool height_only;        /**< FAR by the height alone (um98x_fix_height_only; always with sea_level) */
     bool sea_level;          /**< FAR: the fixed height is the receiver's height above sea level (um98x_fix_sea_level) */

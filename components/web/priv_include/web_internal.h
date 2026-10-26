@@ -51,11 +51,11 @@ extern "C" {
 #define WEB_ONOCOY_TLS_PORT 2121u
 
 /**
- * The one other origin the page may load from, for images only: the
- * OpenStreetMap tile server of the live view's station map (its tile usage
+ * The map's only external network origin: the
+ * OpenFreeMap's OpenStreetMap vector server of the Receiver page's station map (its tile usage
  * policy: this exact host, HTTPS, attribution shown, a Referer sent).
  */
-#define WEB_MAP_TILE_ORIGIN "https://tile.openstreetmap.org"
+#define WEB_MAP_TILE_ORIGIN "https://tiles.openfreemap.org"
 
 /** This project, as the app description of an image names it. */
 #define WEB_PROJECT_NAME "onodiy-esp32-ntrip-server"

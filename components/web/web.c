@@ -137,7 +137,7 @@ static uint32_t s_late_count;
 /* Server-task buffers in PSRAM. */
 EXT_RAM_BSS_ATTR static char s_http_buf[2048];
 EXT_RAM_BSS_ATTR static char s_body[WEB_JSON_MAX_CA + 1];
-static char s_csp[384];
+static char s_csp[512];
 
 /* ---- small accessors ------------------------------------------------------------------- */
 
@@ -1091,14 +1091,13 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
     httpd_resp_set_hdr(req, "ETag", s_etag);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     if (is_html(a)) {
-        /* Only the device's own origin: scripts, styles, images and the WebSocket; no framing.
-         * One exception, images only: the map tiles of the live view's optional station map,
-         * which the page fetches only after the user asks for the map.
+        /* Scripts, styles and the map's module worker come from this station.
+         * Only the optional map connects to OSM, after the user asks for it.
          * The Host was validated, so it is safe to name in the policy. */
         snprintf(s_csp, sizeof(s_csp),
-                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' " WEB_MAP_TILE_ORIGIN "; "
+                 "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob: " WEB_MAP_TILE_ORIGIN "; "
                  "font-src 'self'; "
-                 "connect-src 'self' ws://%s; object-src 'none'; base-uri 'none'; form-action 'self'; "
+                 "connect-src 'self' " WEB_MAP_TILE_ORIGIN " ws://%s; object-src 'none'; base-uri 'none'; form-action 'self'; "
                  "frame-ancestors 'none'",
                  s_host);
         httpd_resp_set_hdr(req, "Content-Security-Policy", s_csp);

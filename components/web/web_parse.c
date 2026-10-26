@@ -886,6 +886,9 @@ bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
     if (out->have_password && !out->have_ssid) {
         return invalid(bad, "ssid");   /* a password belongs to an SSID */
     }
+    if (get_bool(root, "no_trial", &out->no_trial) == M_BAD) {
+        return invalid(bad, "no_trial");
+    }
     return true;
 }
 

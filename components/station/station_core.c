@@ -5,6 +5,7 @@
 #include "station_core.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "settings_codec.h"
@@ -209,6 +210,9 @@ static void after_identity(stn_t *s, const stn_in_t *in)
     if (!s->supported) {
         return;   /* stream only: nothing is configured, nothing is flashed */
     }
+    if (s->relocating && in->fixed_valid && auto_apply_allowed(s, in)) {
+        want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
+    }
     if (!s->static_ok) {
         s->profile_applied = false;
         if (auto_apply_allowed(s, in)) {
@@ -316,8 +320,9 @@ static void fix_rearm(stn_t *s, int64_t now)
     if (!s->fix_on) {
         return;
     }
-    s->fix_due_ms = now + STN_FIX_FIRST_MS;
+    s->fix_due_ms = now + (s->fix_continuous ? STN_FIX_PERIOD_MS : STN_FIX_FIRST_MS);
     s->fix_running = false;
+    s->move_samples = 0;
     s->fix_sppnav = false;
 }
 
@@ -332,6 +337,7 @@ static void fix_drop(stn_t *s, bool changed)
         }
     }
     s->fix_on = false;
+    s->move_samples = 0;
     s->fix_due_ms = STN_NEVER;
     s->fix_running = false;
     s->fix_tries = 0;
@@ -345,18 +351,27 @@ static void fix_drop(stn_t *s, bool changed)
 /* Every step: the fixed position the caller passes (none for a survey profile). */
 static void fix_track(stn_t *s, const stn_in_t *in)
 {
-    if (!in->fixed_valid || (s->identity_ok && !s->supported)) {
+    bool enabled = !s->fix_continuous && in->autocfg;
+    if (s->fix_continuous != in->autocfg) s->move_samples = 0;
+    s->fix_continuous = in->autocfg;
+    if (enabled && s->fix_on && !s->fix_running && s->fix_due_ms > in->now_ms + STN_FIX_PERIOD_MS) {
+        s->fix_due_ms = in->now_ms + STN_FIX_PERIOD_MS;
+        s->move_samples = 0;
+    }
+    if ((!in->fixed_valid && !(in->autocfg && in->profile_survey)) || (s->identity_ok && !s->supported)) {
         if (s->fix_on) {
             fix_drop(s, !in->fixed_valid);
         }
         return;
     }
-    if (s->fix_on && (in->fixed_llh[0] != s->fix_ref[0] || in->fixed_llh[1] != s->fix_ref[1] ||
-                      in->fixed_llh[2] != s->fix_ref[2])) {
+    if (s->fix_on && (s->fix_reference != in->fixed_valid || (in->fixed_valid &&
+                     (in->fixed_llh[0] != s->fix_ref[0] || in->fixed_llh[1] != s->fix_ref[1] ||
+                      in->fixed_llh[2] != s->fix_ref[2])))) {
         fix_drop(s, true);
     }
     if (!s->fix_on) {
         s->fix_on = true;
+        s->fix_reference = in->fixed_valid;
         memcpy(s->fix_ref, in->fixed_llh, sizeof(s->fix_ref));
         fix_rearm(s, in->now_ms);
     }
@@ -375,7 +390,7 @@ static bool fix_job(stn_t *s, const stn_in_t *in, stn_job_t *out)
         um98x_fixchk_restart(&s->fix);
     }
     *out = make_job(STN_JOB_OWN_FIX);
-    out->sppnav = s->fix_sppnav;
+    out->sppnav = !s->fix_reference || s->fix_sppnav;
     return true;
 }
 
@@ -383,7 +398,7 @@ static void fix_finish(stn_t *s, int64_t now, stn_fix_end_t end)
 {
     s->fix_running = false;
     s->fix_end = (uint8_t)end;
-    s->fix_due_ms = now + STN_FIX_RECHECK_MS;
+    s->fix_due_ms = now + (s->fix_continuous ? STN_FIX_PERIOD_MS : STN_FIX_RECHECK_MS);
 }
 
 /* A decision (before: the verdict that stood): the alert follows it, noted
@@ -755,7 +770,9 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
 
     if (config_failed(s) && s->apply_retry_ms != STN_NEVER && now >= s->apply_retry_ms) {
         if (stn_config_auto_retry(s, in->autocfg)) {
-            return start_apply(s, STN_WHY_RETRY, STN_CHANGE_NONE, false);
+            return start_apply(s, STN_WHY_RETRY,
+                s->relocating && !s->relocation_ready && in->fixed_valid && !s->survey.active ?
+                STN_CHANGE_RESURVEY : STN_CHANGE_NONE, false);
         }
         /* The user configures the receiver meanwhile: look again later. */
         s->apply_retry_ms = now + stn_apply_backoff_ms(s->apply_failures);
@@ -1245,6 +1262,11 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
             s->pos_check_ms = STN_NEVER;
             s->alerts &= ~(STN_ALERT_ANTENNA_MOVED | STN_ALERT_POSITION_MISMATCH);
         }
+        if (s->relocating && in->fixed_valid && (s->job.change == STN_CHANGE_LOCK || s->survey.active)) {
+            s->relocation_ready = true;
+            s->pos_check_ms = now + STN_POS_CHECK_MS;
+            s->pos_check_tries = 0;
+        }
         if (!in->profile_survey) {
             memset(&s->survey, 0, sizeof(s->survey));
         } else if (r->mode_sent) {
@@ -1374,6 +1396,12 @@ static void done_position(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     switch (r->err) {
     case STN_OK:
         s->alerts &= ~STN_ALERT_POSITION_MISMATCH;
+        if (s->relocating && !s->relocation_ready) {
+            s->pos_check_ms = STN_NEVER;   /* an old reference check cannot release relocation */
+            break;
+        }
+        s->relocating = false;
+        s->relocation_ready = false;
         s->pos_check_ms = STN_NEVER;
         break;
     case STN_E_MISMATCH:
@@ -1392,6 +1420,7 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (!s->fix_on || !s->fix_running) {
         return;   /* dropped or re-armed meanwhile: the answer belongs to no check */
     }
+    if (r->err != STN_OK || !um98x_own_fix_usable(&r->own)) s->move_samples = 0;
     switch (r->err) {
     case STN_E_STATE:
         s->fix_due_ms = now + STN_FIX_BUSY_MS;   /* nothing was sent: not a try */
@@ -1405,6 +1434,14 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         fix_finish(s, now, STN_FIX_END_REFUSED);
         return;
     case STN_OK: {
+        if (um98x_own_fix_usable(&r->own)) {
+            s->own_fix = r->own;
+            s->own_fix_ms = now;
+            if (!in->fixed_valid) {
+                fix_finish(s, now, STN_FIX_END_NONE);
+                return;
+            }
+        }
         if (!s->job.sppnav && r->own.pos_type == UM98X_OWN_POS_FIXED) {
             s->fix_sppnav = true;   /* it only echoes the set position: ask the single-point log */
         }
@@ -1412,6 +1449,34 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         if (um98x_fix_offset(s->fix_ref[0], s->fix_ref[1], s->fix_ref[2], &r->own, &o)) {
             s->fix_usable_seen = true;
             s->fix_sample_ms = now;
+            /* Do not reduce uncertainty by averaging correlated single-point fixes.
+             * A candidate must stay displaced and near its original location for
+             * five minutes. Missing fixes and long gaps break the observation. */
+            double sigma = hypot(r->own.sd_lat_m, r->own.sd_lon_m);
+            double limit = fmax(STN_MOVE_FLOOR_M, 4.0 * sigma);
+            if (o.horizontal_m > limit && auto_apply_allowed(s, in) && !s->maint && !s->relocating) {
+                um98x_fix_offset_t drift;
+                double anchor_sigma = hypot(s->move_anchor.sd_lat_m, s->move_anchor.sd_lon_m);
+                bool consistent = s->move_samples && now - s->move_last_ms <= STN_MOVE_MAX_GAP_MS &&
+                    um98x_fix_offset(s->move_anchor.lat_deg, s->move_anchor.lon_deg,
+                                    s->move_anchor.msl_height_m + s->move_anchor.separation_m, &r->own, &drift) &&
+                    drift.horizontal_m <= fmax(STN_MOVE_FLOOR_M, 2.0 * hypot(sigma, anchor_sigma));
+                if (!consistent) {
+                    s->move_anchor = r->own;
+                    s->move_started_ms = now;
+                    s->move_samples = 1;
+                }
+                s->move_last_ms = now;
+                if (now - s->move_started_ms >= STN_MOVE_CONFIRM_MS) {
+                    s->move_samples = 0;
+                    s->relocating = true;
+                    s->relocation_ready = false;
+                    s->pos_check_ms = STN_NEVER;
+                    want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
+                }
+            } else {
+                s->move_samples = 0;
+            }
             uint8_t before = s->fix.verdict;
             uint8_t v = um98x_fixchk_feed(&s->fix, &o);
             if (v != UM98X_FIX_NONE) {
@@ -1423,6 +1488,7 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         break;
     }
     default:
+        s->move_samples = 0;
         break;   /* no log, or one this firmware does not read */
     }
     if (++s->fix_tries >= STN_FIX_TRIES) {
@@ -1936,7 +2002,14 @@ void stn_fix_status(const stn_t *s, int64_t now_ms, stn_fix_status_t *out)
 {
     memset(out, 0, sizeof(*out));
     out->checked_age_s = UINT32_MAX;
-    if (!s->fix_on) {
+    out->own_age_s = UINT32_MAX;
+    if (um98x_own_fix_usable(&s->own_fix)) {
+        int64_t age = (now_ms - s->own_fix_ms) / 1000;
+        out->own_age_s = age < 0 ? 0 : (age > UINT32_MAX ? UINT32_MAX : (uint32_t)age);
+        out->own_valid = out->own_age_s <= 90;
+        out->own = s->own_fix;
+    }
+    if (!s->fix_on || !s->fix_reference) {
         out->state = STN_FIX_OFF;
         return;
     }

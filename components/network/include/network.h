@@ -47,7 +47,8 @@
  *    are stored as the station's at once. A change made while a trial runs
  *    replaces that trial: an IP for the earlier pair that arrives before the
  *    change is applied confirms nothing, and a pending pair is cleared only
- *    when it is the pair confirmed.
+ *    when it is the pair confirmed. With no_trial the changed credentials are the
+ *    station's at once instead: no trial, no way back (an advance deployment).
  *  - Settings unavailable (degraded boot, NVS unreadable): no AP comes up on
  *    its own. Only a BOOT-button long press starts the recovery AP, so an
  *    unconfigured-looking station on a roof is never open to passers-by.
@@ -379,11 +380,13 @@ bool network_get_gateway(uint32_t *addr);
  * With the settings unavailable they are kept for this boot only.
  * The status reflects the change before this returns (cred_trial true with
  * cred_trial_left_s 91 for a trial).
+ * @param no_trial store them as the station's at once, with no trial and no way back
+ *        (an advance deployment: kept even if they get no IP)
  * @param plan what was done with them (NULL: not wanted); set on ESP_OK only.
  * @return ESP_ERR_INVALID_ARG for invalid values, ESP_ERR_INVALID_STATE before
  *         network_init(), or the settings error if they could not be stored.
  */
-esp_err_t network_set_credentials(const char *ssid, const char *password, network_cred_plan_t *plan);
+esp_err_t network_set_credentials(const char *ssid, const char *password, bool no_trial, network_cred_plan_t *plan);
 
 /**
  * Try the pending credentials again (90 s, then back to the current ones
