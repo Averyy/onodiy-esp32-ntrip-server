@@ -727,6 +727,7 @@ static void sec_monitor(wj_t *w, const web_status_snap_t *s)
     wj_uint(w, "sample_s", MONITOR_SAMPLE_S);
     wj_uint(w, "span_s", m->span_s);
     monitor_ping(w, "router", NULL, have, l->router, l->router_ms, &m->router);
+    monitor_ping(w, "internet", MONITOR_INTERNET_IP, have, l->internet, l->internet_ms, &m->internet);
     monitor_ping(w, "server", m->server_name, have, l->server, l->server_ms, &m->server);
     wj_obj_open(w, "rssi");
     if (have && l->rssi_known) {
@@ -779,6 +780,9 @@ void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n)
     SERIES(w, "router_avg", b, n, x->router.ok > 0, (x->router.sum_ms + x->router.ok / 2u) / x->router.ok);
     SERIES(w, "router_max", b, n, x->router.ok > 0, x->router.max_ms);
     SERIES(w, "router_lost", b, n, x->router.sent > 0, x->router.sent - x->router.ok);
+    SERIES(w, "internet_avg", b, n, x->internet.ok > 0, (x->internet.sum_ms + x->internet.ok / 2u) / x->internet.ok);
+    SERIES(w, "internet_max", b, n, x->internet.ok > 0, x->internet.max_ms);
+    SERIES(w, "internet_lost", b, n, x->internet.sent > 0, x->internet.sent - x->internet.ok);
     SERIES(w, "server_avg", b, n, x->server.ok > 0, (x->server.sum_ms + x->server.ok / 2u) / x->server.ok);
     SERIES(w, "server_max", b, n, x->server.ok > 0, x->server.max_ms);
     SERIES(w, "server_lost", b, n, x->server.sent > 0, x->server.sent - x->server.ok);
@@ -790,6 +794,35 @@ void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n)
 }
 
 #undef SERIES
+
+void web_build_onocoy_report(wj_t *w, const onocoy_report_status_t *s)
+{
+    static const char *const names[] = {"off", "pending", "waiting_network", "waiting_time", "ok", "empty", "auth", "error"};
+    wj_obj_open(w, NULL);
+    wj_bool(w, "enabled", s->enabled);
+    wj_bool(w, "busy", s->busy);
+    wj_str(w, "state", (unsigned)s->state < sizeof(names)/sizeof(names[0]) ? names[s->state] : "error");
+    wj_int(w, "http_status", s->http_status);
+    wj_unix(w, "checked_unix", s->checked_unix);
+    wj_uint(w, "refresh_in_s", s->refresh_in_s);
+    wj_uint(w, "manual_in_s", s->manual_in_s);
+    wj_arr_open(w, "days");
+    for (size_t i = 0; s->enabled && i < s->count && i < ONOCOY_REPORT_DAYS; i++) {
+        const onocoy_report_day_t *d = &s->days[i];
+        wj_obj_open(w, NULL);
+        wj_str(w, "date", d->date);
+        wj_u32_or_null(w, "uptime_s", d->known & ONOCOY_REPORT_UPTIME ? d->uptime_s : UINT32_MAX);
+        if (d->known & ONOCOY_REPORT_LATENCY_AVG) wj_double(w, "latency_avg", d->latency_avg, 6);
+        else wj_null(w, "latency_avg");
+        if (d->known & ONOCOY_REPORT_LATENCY_MAX) wj_double(w, "latency_max", d->latency_max, 6);
+        else wj_null(w, "latency_max");
+        if (d->known & ONOCOY_REPORT_REWARDS) wj_double(w, "rewards", d->rewards, 9);
+        else wj_null(w, "rewards");
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
+    wj_obj_close(w);
+}
 
 void web_build_section(wj_t *w, const web_status_snap_t *s, web_section_t sec, bool pub)
 {
@@ -869,6 +902,7 @@ void web_build_caster_summary(wj_t *w, const web_status_snap_t *s, size_t slot, 
         wj_uint(w, "today_offline_s", t->today_offline_s);
         day_figures(w, t, prot);
         wj_bool(w, "onocoy_ready", c != NULL && ntrip_server_onocoy_ready(c));
+        wj_bool(w, "onocoy_stats", c != NULL && c->onocoy_stats);
         wj_uint(w, "bytes_sent", t->bytes_sent);
         wj_uint(w, "lag_ms_now", t->lag_ms_now);
         wj_uint(w, "next_retry_s", t->next_retry_s);
@@ -1879,6 +1913,7 @@ void web_build_caster_config(wj_t *w, const char *key, const ntrip_caster_cfg_t 
     wj_str(w, "backoff_profile", web_ntrip_backoff_name(c->backoff_profile));
     wj_bool(w, "protected", c->protected_slot);
     wj_bool(w, "dup_stream_ack", c->dup_stream_ack);
+    wj_bool(w, "onocoy_stats", c->onocoy_stats);
     wj_bool(w, "test_onocoy", c->test_onocoy && ntrip_test_onocoy_allowed());
     wj_obj_close(w);
 }

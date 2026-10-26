@@ -123,17 +123,16 @@ CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT=y
 # Sockets in use at most: the web server 13 (max_open_sockets 10 + 3 internal),
 # the caster slots 4 (8 in an 8-slot build), captive DNS 1 (while the AP is
 # up), the upstream probe 1, the update client 1, the local caster for
-# rovers 7 (listener + 6 connections): 27 (31: an 8-slot build needs both
-# limits below raised to at least 31). A build directory made before
-# 28 keeps its old value in its own sdkconfig; local_caster.c refuses to
-# build with less (set both to 28 there, or start a new build directory).
-CONFIG_LWIP_MAX_SOCKETS=28
+# rovers 7 (listener + 6 connections), monitor ICMP 1 and optional Onocoy
+# report 1: 29 sockets (33 in an 8-slot build). Keep one spare with four
+# casters. Existing sdkconfig files need these values updated too.
+CONFIG_LWIP_MAX_SOCKETS=30
 # Same budget for TCP PCBs. With none left, lwIP frees the oldest one in
 # TIME_WAIT, then one in LAST_ACK, CLOSING, FIN_WAIT_2 or FIN_WAIT_1, and only
 # then an open connection of lower priority (tcp.c, tcp_alloc). Every socket
-# gets the same priority, so 28 open connections would refuse the next web
+# gets the same priority, so a full table would refuse the next web
 # client or OTA download.
-CONFIG_LWIP_MAX_ACTIVE_TCP=28
+CONFIG_LWIP_MAX_ACTIVE_TCP=30
 CONFIG_LWIP_LOCAL_HOSTNAME="onodiy"
 # DNS fallback server used when DHCP leaves no working one (needs
 # LWIP_DNS_MAX_SERVERS >= 3, the default). Compile-time, not a user setting.

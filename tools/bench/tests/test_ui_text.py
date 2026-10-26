@@ -285,6 +285,11 @@ def test_no_receiver_refusal_text():
     assert other != no_rx and "not looking for a receiver" in other
 
 
+def test_onocoy_refresh_refusal_has_report_specific_text():
+    (text,) = run_ui([("refusalText", {"status": 409, "error": {"code": "report_not_failed"}})])
+    assert text == "Refresh is available after a failed Onocoy report check."
+
+
 def test_unknown_rssi_never_shows_dbm():
     """A Wi-Fi drop's RSSI is a reading only from -127 to -1 dBm: null (this build's unknown), 0 and the -128
     of journal records from earlier builds are unknown and show no signal figure."""

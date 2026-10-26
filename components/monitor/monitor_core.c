@@ -53,6 +53,7 @@ void mon_add(mon_core_t *m, const monitor_sample_t *s)
     monitor_bucket_t *b = &m->ring[m->head];
     b->samples++;
     ping_add(&b->router, s->router, s->router_ms);
+    ping_add(&b->internet, s->internet, s->internet_ms);
     ping_add(&b->server, s->server, s->server_ms);
     if (s->rssi_known) {
         if (b->rssi_n == 0 || s->rssi < b->rssi_min) {
@@ -111,7 +112,7 @@ void mon_summary(const mon_core_t *m, monitor_status_t *out)
     memset(out, 0, sizeof(*out));
     out->have_last = m->have_last;
     out->last = m->last;
-    ping_tot_t router = { 0 }, server = { 0 };
+    ping_tot_t router = { 0 }, internet = { 0 }, server = { 0 };
     uint32_t samples = 0, rssi_n = 0, cpu_n = 0, cpu_sum = 0;
     int64_t rssi_sum = 0;
     int8_t rssi_min = 0;
@@ -121,6 +122,7 @@ void mon_summary(const mon_core_t *m, monitor_status_t *out)
         const monitor_bucket_t *b = &m->ring[i];
         samples += b->samples;
         ping_tot(&router, &b->router);
+        ping_tot(&internet, &b->internet);
         ping_tot(&server, &b->server);
         if (b->rssi_n) {
             if (rssi_n == 0 || b->rssi_min < rssi_min) {
@@ -144,6 +146,7 @@ void mon_summary(const mon_core_t *m, monitor_status_t *out)
     uint64_t day = (uint64_t)MONITOR_BUCKETS * MONITOR_BUCKET_S;
     out->span_s = (uint32_t)(span < day ? span : day);
     ping_out(&out->router, &router);
+    ping_out(&out->internet, &internet);
     ping_out(&out->server, &server);
     if (rssi_n) {
         /* Rounded half away from zero: -78.5 dBm is -79. */

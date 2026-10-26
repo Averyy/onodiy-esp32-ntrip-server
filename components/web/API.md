@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware`, `no_app_check` |
+| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware`, `no_app_check`, `report_not_failed` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -416,6 +416,8 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/health/power-lost/dismiss` | adm | Dismiss the "power was lost" alert | health, settings `life/pwr_ack` |
 | GET | `/api/availability` | adm | Per-day availability, budget | ledger, ntrip_server |
 | GET | `/api/monitor` | adm | The Status page's 24 h: pings, Wi-Fi signal, CPU, memory | monitor |
+| GET | `/api/onocoy/report` | adm | Cached daily Onocoy statistics; never starts a download | onocoy_report |
+| POST | `/api/onocoy/report/refresh` | adm | Queue an opted-in report download | onocoy_report |
 | GET | `/api/diag/tasks` | adm | Task statistics | `diag_task_stats` |
 | GET | `/api/diag/flash-capture` | adm | Receiver byte capture download (bench builds) | `um98x_flash_capture_read` |
 | GET | `/api/diag/frame-times` | adm | Receiver link frame and drain-pass times, CSV (bench builds) | `gnss_link_bench_timing_csv` |
@@ -611,7 +613,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `health.reboot_cap_wait_s` | seconds until the reboot cap (60 min apart, at most 3 in 24 h) allows a ladder restart; `null` when it allows one now, outside a ladder episode, while the receiver answers (as `reboot_hold`), and when `recovery_mode` is not `full` |
 | `health.reboot_cap_limit` | which limit of the cap sets `reboot_cap_wait_s`: `hour` (the last ladder restart was less than 60 min ago) or `day` (3 in the last 24 h); the later one when both hold; `null` when `reboot_cap_wait_s` is `null` |
 | `update` | the banner (section 12); admin form only |
-| `monitor` | the station's performance for the Status page (`monitor.h`); admin form only. A sample every `sample_s` (30 s); the section changes once a sample. `running`: sampling runs (not in safe mode). `span_s`: the time the 24 h figures cover (since the restart, at most 24 h). `router`: a ping to the router (the IPv4 gateway); `server`: one to the Onocoy slot's address while it is on and connected, else the first enabled slot's (the address that slot's own lookup found), else the fallback DNS server (`name` `Internet`, so there is a ping with no NTRIP server on), `name` that slot's (`""` before the first); when another server is pinged its 24 h figures start over. Each: the latest `state` (`ok`, `lost`: no reply within 2 s, `none`: no target, such as offline, which is no sample), `ms` with `ok`; over the 24 h `sent` (samples with a target), `lost`, and `avg_ms`, `max_ms` over the replies (`null` without one). `rssi` (dBm): the latest (`null` while not associated), the 24 h average and the weakest. `cpu` (%): the busier core's load over the latest sample, the 24 h average and peak. `memory` (bytes): free internal memory now, the lowest sample in the 24 h. `null` where nothing is known yet |
+| `monitor` | the station's performance for the Status page (`monitor.h`); admin form only. A sample every `sample_s` (30 s); the section changes once a sample. `running`: sampling runs (not in safe mode). `span_s`: the time the 24 h figures cover (since the restart, at most 24 h). `router`: a ping to the router (the IPv4 gateway); `internet`: an independent ping to Cloudflare's fixed IPv4 address (`name` `1.1.1.1`), without a DNS lookup, whenever the network is online; its history stays when the NTRIP target changes. `server`: one to the Onocoy slot's address while it is on and its lookup found one, else the first enabled slot's (the address that slot's own lookup found); no server target without one (the independent `internet` probe still runs). `name` is the last target slot's (`""` before the first); when another server is pinged its 24 h figures start over. Each: the latest `state` (`ok`, `lost`: no reply within 2 s, `none`: no target, such as offline, which is no sample), `ms` with `ok`; over the 24 h `sent` (samples with a target), `lost`, and `avg_ms`, `max_ms` over the replies (`null` without one). `rssi` (dBm): the latest (`null` while not associated), the 24 h average and the weakest. `cpu` (%): the busier core's load over the latest sample, the 24 h average and peak. `memory` (bytes): free internal memory now, the lowest sample in the 24 h. `null` where nothing is known yet |
 
 In safe mode the receiver section shows `state: "idle"` with the journal
 read from settings, every caster `disabled`, and `local_caster`
@@ -1586,7 +1588,7 @@ removed slot's old name never shows.
  "ntrip_version": 2, "tls": false, "trust": "bundle", "ca_pem_set": false,
  "mountpoint": "<any name>", "username": "<console username>", "password_set": true,
  "label": "", "v2_raw_body": false, "backoff_profile": "fast", "protected": true,
- "dup_stream_ack": false, "test_onocoy": false}
+ "dup_stream_ack": false, "test_onocoy": false, "onocoy_stats": false}
 ```
 
 Passwords are not in this answer (`password_set` only).
@@ -1784,11 +1786,18 @@ that does not show a field cannot reset it). Output-only fields
   (`ntrip_server_apply_host_rules()`, which every save applies too); the
   server applies them to the request only to name a refused field.
 - `dup_stream_ack`: see below.
+- `onocoy_stats`: boolean, default false (also for records predating this option).
+  Explicit opt-in to the free public statistics endpoint using this slot's
+  credentials. Only used for an enabled real Onocoy slot with credentials;
+  cleared when switched to another caster. Test slots never send credentials
+  to the public API. Saving only this flag keeps the NTRIP session connected
+  and leaves its login guard unchanged.
 - `test_onocoy`: `true` only in a build with `CONFIG_NTRIP_TEST_ONOCOY_SLOT`
   (bench and QEMU builds); elsewhere `400 invalid_field` with `field`
   `test_onocoy` and the message `only in bench and QEMU builds`. `false` is
   always accepted.
-- Any save clears a stopped slot's stop and the login guard's counts.
+- A save other than changing only `onocoy_stats` clears a stopped slot's stop
+  and the login guard's counts.
 - Another server (a `host` other than the stored one, case aside; also a
   removal): the slot's figures start over, as a new slot's: the status
   counters (connects, failures, bytes, frames and epochs sent, drops, the
@@ -2695,6 +2704,7 @@ history is in RAM). Each figure is an array with one element per bucket,
 ```json
 {"sample_s": 30, "bucket_s": 300, "buckets": 2, "samples": [10, 3],
  "router_avg": [4, 3], "router_max": [9, 3], "router_lost": [0, 0],
+ "internet_avg": [20, 19], "internet_max": [45, 22], "internet_lost": [1, 0],
  "server_avg": [118, 117], "server_max": [140, 120], "server_lost": [1, 0],
  "rssi_avg": [-79, -78], "cpu_avg": [11, 9], "cpu_max": [30, 12], "mem_min": [97000, 98200]}
 ```
@@ -2705,6 +2715,79 @@ and `cpu_max` the busier core's load in %; `mem_min` the lowest free
 internal memory sampled, bytes. The UI reads it every 5 min while the page
 is shown (its buckets close every 5 min); the latest values are in the
 status (`monitor`).
+
+The UI rows are Router ping, Onocoy ping (or the selected NTRIP server's
+name), then Cloudflare ping. Cloudflare ping uses `internet` in the status
+and `internet_*` in the series, and still runs without an enabled NTRIP
+server.
+
+The router, internet (Cloudflare, `1.1.1.1`) and NTRIP server are probed in
+the same sampling cycle. Router replies with losses at both external targets
+suggest an upstream connection problem; losses only at the NTRIP server
+suggest that host or its route. ICMP reachability does not test the NTRIP
+service, and one missed reply alone does not establish an outage.
+
+### `GET /api/onocoy/report` (adm)
+
+The optional Onocoy API report (`onocoy_report.h`). `enabled` is true only when
+a real Onocoy slot is enabled, configured with credentials and has
+`onocoy_stats` true. No API calls are made with it off. The initial setup
+and NTRIP editor label the option “Show Onocoy statistics”, unchecked by
+default, and explain that it uses the saved station credentials and requires
+API access to be enabled separately at
+[Onocoy Settings → API access](https://console.onocoy.com/settings/api-access).
+
+Downloads contact only `https://api-hub.onocoy.com/api/v1/my_stats/stations`,
+using Basic authentication and the credential username filter, with
+certificate chain, hostname and date checks. Redirects and automatic auth
+retries are disabled. Station credentials need a successful validation
+within the last seven days, as documented by Onocoy. No paid endpoints are
+used. Neither the browser nor this response receives the API password.
+
+`state`: `off`, `pending`, `waiting_network`, `waiting_time`, `ok`, `empty`,
+`auth` (HTTP 401/403), or `error`. `busy` means a download runs.
+`http_status`: the last attempt's HTTP code, 0 without a response.
+`checked_unix`: the last successful response, null before one;
+`refresh_in_s`: seconds until the next scheduled attempt;
+`manual_in_s`: seconds until manual refresh is allowed.
+Only a failed report shows a Refresh button, with this wait counting down
+once per second without another request. Successful and empty daily checks
+show neither Refresh nor Last checked controls. An auth refusal
+links directly to Onocoy Settings → API access and asks the owner to turn it
+on so the saved station credentials can download reports.
+
+`days` contains up to 30 completed UTC dates, newest first, each with
+`date` (YYYY-MM-DD), `uptime_s` (0–86400), `latency_avg`, `latency_max`
+(seconds), and `rewards` (reported ONO amount). Missing/null metrics stay
+null; zero is a reading. The station requests dates before today, with an
+exclusive end date. No missing day is filled with zero. The Status card
+shows the newest returned date together with the source and daily update
+note on one short line without wrapping. Latest rewards and Previous rewards
+show the two most recent returned dates, including across gaps. A missing
+previous report or null reward stays unknown. Logs → History lists the returned days.
+Rewards are shown as returned; the public API provides no separate base,
+bonus or streak reward fields and does not document which bonuses are included.
+Uptime is not the reward Availability Scale and does not replace the local
+streak estimate.
+
+The cache is in RAM. Enabling, booting with the option enabled or changing
+credentials starts a fresh download once internet and a trusted clock are
+available. Success schedules the next download 24 h later. Network/server
+failures retain the last good data and back off 15 min, 1 h, 6 h, then
+24 h. All rejected requests (HTTP 4xx, including auth refusals and rate
+limits) wait 24 h. Opening the page or the retry countdown never triggers an
+external request. Disabling hides and clears the cache;
+credential changes invalidate it, including a previous request in flight.
+Background report downloads do not alter or reconnect the NTRIP stream.
+
+### `POST /api/onocoy/report/refresh` (adm)
+
+Body `{}`. Only after a failed check: queues a background download and returns the cached report
+shape above (`200`), without waiting for the network. `409 slot_disabled`
+when not eligible or the service is unavailable, `429 rate_limited` while
+a download is pending/running or within 60 s of a failed attempt (5 min after
+an auth refusal). `409 report_not_failed` after a successful/empty check or
+while waiting for initial prerequisites. Safe mode starts no report worker.
 
 ### `GET /api/diag/tasks`
 

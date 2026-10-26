@@ -129,6 +129,9 @@ bool ntrip_server_apply_host_rules(ntrip_caster_cfg_t *cfg, const ntrip_backoff_
         profile = NTRIP_BACKOFF_STANDARD;      /* the slot no longer counts as Onocoy */
     }
     cfg->protected_slot = onocoy;
+    if (!onocoy) {
+        cfg->onocoy_stats = false;
+    }
     cfg->backoff_profile = profile;
     if (!ntrip_test_onocoy_allowed()) {
         cfg->test_onocoy = false;              /* a mark this build ignores is not kept */

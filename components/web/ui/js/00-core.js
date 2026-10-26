@@ -721,6 +721,7 @@ const ERR = {
   config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
   position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
   query_running: 'The receiver is still answering the last question.',
+  report_not_failed: 'Refresh is available after a failed Onocoy report check.',
 };
 
 /* Request fields as the forms label them, for "<label>: <rule>" refusals. */

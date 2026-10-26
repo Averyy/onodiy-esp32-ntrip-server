@@ -46,7 +46,8 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 - **Power:** a 5 V USB-A charger and an A-to-C cable into the USB-C printed `ESP32S3`
   (a USB-C charger gives the UM982 board no power). The NTRIP-X: a USB-C supply of 2 A or more.
 - **Weak Wi-Fi?** Choose the external-antenna module. The Status page shows the signal
-  and the ping time to your router over 24h.
+  and ping times and packet loss to your router, the NTRIP server and
+  Cloudflare (1.1.1.1) over 24h.
 
 More: [hardware details](docs/hardware.md), [board notes](reference/um982-board-onocoy.md),
 [antenna notes](reference/antenna-specs.md).
@@ -94,6 +95,19 @@ Credentials) and enter its username and password. The station connects to
 `servers.onocoy.com:2101` and sends every message
 [Onocoy's guide](https://docs.onocoy.com/documentation/3.-become-a-miner/3.-connect-your-station-to-onocoy)
 lists, every second. Add, edit or delete servers on the NTRIP page.
+
+**Optional Onocoy reports:** “Show Onocoy statistics” in setup or the Onocoy
+NTRIP editor is unchecked by default. Enabling it uses that station's saved
+Onocoy credentials to download daily API statistics while Onocoy is enabled.
+Turn on API access in [Onocoy Settings → API access](https://console.onocoy.com/settings/api-access)
+first; the station must have passed validation within the last seven days.
+The Status page adds an **Onocoy API report** card with latest and previous
+rewards; **Logs → History** lists up to 30 completed days. Downloads run daily;
+a manual Refresh button with a live retry countdown appears after a failure.
+Rejected requests wait 24 hours
+before the next automatic attempt. Reports are cached in RAM and start
+fresh after a restart. They complement
+the station's local uptime and streak estimates.
 
 ## Local server (NTRIP for your rover)
 

@@ -9,7 +9,8 @@
  * record; a record without the flags byte reads as no flags).
  *
  * Flags: bit 0 test_onocoy (a test Onocoy slot; only a build with
- * CONFIG_NTRIP_TEST_ONOCOY_SLOT acts on it). Other bits are written 0 and
+ * CONFIG_NTRIP_TEST_ONOCOY_SLOT acts on it); bit 1 onocoy_stats (explicit
+ * opt-in to the public statistics API). Other bits are written 0 and
  * ignored.
  *
  * Layouts (the meaning of an Onocoy slot's fields):
@@ -42,6 +43,7 @@ extern "C" {
 #define NTRIP_CFG_BLOB_VERSION 1u
 #define NTRIP_CFG_LAYOUT       2u     /* the layout byte every record is written with */
 #define NTRIP_CFG_FLAG_TEST_ONOCOY 0x01u   /* flags byte, bit 0 */
+#define NTRIP_CFG_FLAG_ONOCOY_STATS 0x02u
 #define NTRIP_CFG_BLOB_MAX     320u   /* largest record: 309 bytes */
 
 /** The protocol, trust mode and backoff profile are values the firmware knows. */
@@ -56,6 +58,9 @@ size_t ntrip_cfg_encode(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap);
  * version, a damaged record or enumerations out of range.
  */
 bool ntrip_cfg_decode(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out);
+
+/** Only the statistics opt-in changed: save it without reconnecting the stream. */
+bool ntrip_cfg_stats_only_change(const ntrip_caster_cfg_t *a, const ntrip_caster_cfg_t *b);
 
 #ifdef __cplusplus
 }

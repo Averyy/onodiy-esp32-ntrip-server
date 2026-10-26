@@ -701,6 +701,11 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     } else if (m == M_OK) {
         c.dup_stream_ack = b;
     }
+    if ((m = get_bool(root, "onocoy_stats", &b)) == M_BAD) {
+        return invalid(bad, "onocoy_stats");
+    } else if (m == M_OK) {
+        c.onocoy_stats = b;
+    }
     if ((m = get_bool(root, "test_onocoy", &b)) == M_BAD) {
         return invalid(bad, "test_onocoy");
     } else if (m == M_OK) {

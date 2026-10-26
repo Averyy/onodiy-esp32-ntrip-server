@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 #
 # semver.c, update_policy.c, app_trial.c, manifest.c, release_url.c and
-# cert_time.c hold the decisions (no RTOS or driver code; manifest.c uses
+# the shared network certificate check hold the decisions (no RTOS or driver code; manifest.c uses
 # cJSON and PSA Crypto) and are also compiled into the host test app. mbedtls
 # provides psa/crypto.h (hashing, the optional manifest signature), the CA
 # bundle and the X.509 types the certificate date check reads.
@@ -19,7 +19,6 @@ idf_component_register(
         "app_trial.c"
         "semver.c"
         "release_url.c"
-        "cert_time.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES esp_event

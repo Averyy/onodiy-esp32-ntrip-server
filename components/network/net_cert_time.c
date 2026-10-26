@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  */
-#include "cert_time.h"
+#include "network_tls.h"
 
 #include <time.h>
 
@@ -24,7 +24,7 @@ static bool is_bundle_stand_in(const mbedtls_x509_crt *crt)
     return crt->raw.p == NULL && crt->valid_from.year == 0 && crt->valid_to.year == 0;
 }
 
-uint32_t fw_cert_time_flags(const mbedtls_x509_crt *crt, bool clock_trusted, int64_t now_unix)
+uint32_t network_cert_time_flags(const mbedtls_x509_crt *crt, bool clock_trusted, int64_t now_unix)
 {
     if (crt != NULL && is_bundle_stand_in(crt)) {
         return 0;

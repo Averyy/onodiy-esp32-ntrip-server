@@ -1479,8 +1479,17 @@ function eventCard() {
 
 function historyTab(box) {
   const month = h('section', { class: 'card wide' }, h('h2', null, 'Last 30 days'), h('p', { class: 'loading' }, 'Loading…'));
-  mount(box, h('div', { class: 'grid' }, month, eventCard().el));
-  return { stop: pollInto(month, 60000, '/api/availability', av => monthCard(month, av)) };
+  const report = h('section', { class: 'card wide', hidden: true });
+  mount(box, h('div', { class: 'grid' }, month, report, eventCard().el));
+  const stopMonth = pollInto(month, 60000, '/api/availability', av => monthCard(month, av));
+  const updateReport = () => { if (!onocoyReportEnabled(S.status)) report.hidden = true; };
+  const stopReport = poller(60000, async () => {
+    updateReport();
+    if (!onocoyReportEnabled(S.status)) return;
+    const r = await api('GET', '/api/onocoy/report');
+    if (onocoyReportEnabled(S.status)) onocoyReportHistory(report, r);
+  });
+  return { update: updateReport, stop() { stopMonth(); stopReport(); } };
 }
 
 const LOGS_PAGES = { '': overviewTab, history: historyTab, console: consoleTab };

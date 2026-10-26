@@ -32,7 +32,8 @@ size_t ntrip_cfg_encode(const ntrip_caster_cfg_t *c, uint8_t *buf, size_t cap)
     blob_put_bool(&w, c->v2_raw_body);
     blob_put_bool(&w, c->dup_stream_ack);
     blob_put_u8(&w, NTRIP_CFG_LAYOUT);   /* appended later: older records end before it */
-    blob_put_u8(&w, c->test_onocoy ? NTRIP_CFG_FLAG_TEST_ONOCOY : 0u);   /* appended later still */
+    blob_put_u8(&w, (c->test_onocoy ? NTRIP_CFG_FLAG_TEST_ONOCOY : 0u) |
+                   (c->onocoy_stats ? NTRIP_CFG_FLAG_ONOCOY_STATS : 0u));
     return blob_writer_ok(&w) ? w.len : 0;
 }
 
@@ -40,6 +41,22 @@ bool ntrip_cfg_enums_valid(const ntrip_caster_cfg_t *c)
 {
     return (c->proto == NTRIP_PROTO_V1 || c->proto == NTRIP_PROTO_V2) && c->trust_mode <= NTRIP_TRUST_INSECURE &&
            c->backoff_profile <= NTRIP_BACKOFF_POLITE;
+}
+
+bool ntrip_cfg_stats_only_change(const ntrip_caster_cfg_t *a, const ntrip_caster_cfg_t *b)
+{
+    if (a->onocoy_stats == b->onocoy_stats) return false;
+    uint8_t x[NTRIP_CFG_BLOB_MAX], y[NTRIP_CFG_BLOB_MAX];
+    size_t nx = ntrip_cfg_encode(a, x, sizeof(x)), ny = ntrip_cfg_encode(b, y, sizeof(y));
+    bool same = false;
+    if (nx != 0 && nx == ny) {
+        x[nx-1] &= (uint8_t)~NTRIP_CFG_FLAG_ONOCOY_STATS;
+        y[ny-1] &= (uint8_t)~NTRIP_CFG_FLAG_ONOCOY_STATS;
+        same = memcmp(x, y, nx) == 0;
+    }
+    ntrip_secure_zero(x, sizeof(x));
+    ntrip_secure_zero(y, sizeof(y));
+    return same;
 }
 
 bool ntrip_cfg_decode(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
@@ -75,6 +92,7 @@ bool ntrip_cfg_decode(const uint8_t *buf, size_t len, ntrip_caster_cfg_t *out)
         flags = blob_get_u8(&r);   /* a record from before the flags byte reads as no flags */
     }
     c.test_onocoy = (flags & NTRIP_CFG_FLAG_TEST_ONOCOY) != 0;
+    c.onocoy_stats = (flags & NTRIP_CFG_FLAG_ONOCOY_STATS) != 0;
     if (!blob_reader_ok(&r) || !ntrip_cfg_enums_valid(&c)) {
         ntrip_secure_zero(&c, sizeof(c));
         return false;

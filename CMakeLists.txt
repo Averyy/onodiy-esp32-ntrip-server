@@ -132,9 +132,14 @@ set(_layer_0 board settings diag gnss_framing gnss_types)
 set(_layer_1 gnss_link rtcm_hub pkg_store lifecycle ledger gnss_obs leds)
 set(_layer_2 um98x_ctl um98x_flash ntrip_server local_caster network)
 set(_layer_3 station)
-set(_layer_4 fw_update health monitor bench)
+set(_layer_4 fw_update health monitor bench onocoy_report)
 set(_layer_5 web)
 set(_layer_6 main)
+
+# HTTP client's debug header dump includes Authorization. Authenticated API
+# requests must remain private even when runtime diagnostics enable debug logs.
+idf_component_get_property(_http_client esp_http_client COMPONENT_LIB)
+target_compile_definitions(${_http_client} PRIVATE LOG_LOCAL_LEVEL=ESP_LOG_INFO)
 
 set(_our_components "")
 foreach(_layer RANGE 0 6)

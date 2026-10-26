@@ -60,6 +60,7 @@
 #include "lifecycle.h"
 #include "local_caster.h"
 #include "monitor.h"
+#include "onocoy_report.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -173,6 +174,7 @@ static const boot_step_t s_start_steps[] = {
     { "fw_update",    fw_update_start,    false },
     { "health",       health_start,       false },
     { "monitor",      monitor_start,      true  }, /* the Status page's ping, signal, CPU and memory figures */
+    { "onocoy_report", onocoy_report_start, true }, /* daily public API data, only with explicit opt-in */
 };
 
 /*

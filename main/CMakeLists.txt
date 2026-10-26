@@ -19,6 +19,7 @@ idf_component_register(
         leds
         health
         monitor
+        onocoy_report
         gnss_link
         gnss_obs
         rtcm_hub

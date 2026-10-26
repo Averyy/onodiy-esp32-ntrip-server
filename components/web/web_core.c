@@ -92,6 +92,8 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_PACKAGE_NEEDED] = { "package_needed", 409,
                                  "Upload the same receiver package again: the station kept it only until the restart" },
     [WEB_ERR_QUERY_RUNNING] = { "query_running", 409, "A receiver query runs: wait for its answer" },
+    [WEB_ERR_REPORT_NOT_FAILED] = { "report_not_failed", 409,
+                                     "Refresh is available after a failed Onocoy report check" },
 };
 
 const char *web_err_code(web_err_t e)

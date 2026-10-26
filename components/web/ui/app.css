@@ -363,6 +363,7 @@ body { --top-pad: max(0.5rem, env(safe-area-inset-top)); --top-h: calc(var(--top
 .card-head { flex-wrap: wrap; justify-content: flex-end; row-gap: 0.35rem; }
 .card-head > :first-child { flex-basis: 8rem; }
 .card .foot { margin-top: 0.75rem; font-size: 0.9rem; }
+.report-meta { overflow: hidden; text-overflow: ellipsis; }
 .section-title { margin: 1.5rem 0 0.5rem; color: var(--muted); font-size: 0.85rem; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
 
 .row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }

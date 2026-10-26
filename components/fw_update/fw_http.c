@@ -7,7 +7,7 @@
  * path (open_follow):
  *  - the server certificate is checked against the CA bundle (and its name
  *    against the host), never skipped, and so are the dates of every
- *    certificate in the chain, against the station's clock (cert_time.h;
+ *    certificate in the chain, against the station's clock (network_tls.h;
  *    Mbed TLS itself ignores them in this build): no transfer starts before
  *    the clock is trusted;
  *  - before every connection, the first and each redirect, the URL the
@@ -36,7 +36,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
-#include "cert_time.h"
+#include "network_tls.h"
 #include "fw_internal.h"
 #include "pkg_store.h"
 #include "psa/crypto.h"
@@ -83,43 +83,12 @@ static esp_err_t on_http_event(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-/*
- * The CA bundle's verify callback, saved when it is attached to a
- * connection: it is the same function every time, and only the update worker
- * opens these connections.
- */
-static int (*s_bundle_verify)(void *, mbedtls_x509_crt *, int, uint32_t *);
-static void *s_bundle_verify_ctx;
+/* The update worker owns one HTTPS connection at a time. */
+static network_tls_verify_t s_verify;
 
-/* Every certificate of the chain, from the top: its dates, then the bundle. */
-static int verify_cert(void *ctx, mbedtls_x509_crt *crt, int depth, uint32_t *flags)
-{
-    (void)ctx;
-    int64_t now = 0;
-    bool clock_ok = fw_clock(&now);
-    uint32_t bad = fw_cert_time_flags(crt, clock_ok, now);
-    if (bad != 0) {
-        ESP_LOGE(TAG, "server certificate %d of the chain refused: %s", depth,
-                 (bad & MBEDTLS_X509_BADCERT_OTHER)     ? "no trusted clock to check its dates"
-                 : (bad & MBEDTLS_X509_BADCERT_EXPIRED) ? "expired"
-                                                        : "not valid yet");
-        *flags |= bad;   /* the bundle leaves a flagged certificate failed */
-    }
-    return s_bundle_verify != NULL ? s_bundle_verify(s_bundle_verify_ctx, crt, depth, flags) : 0;
-}
-
-/* esp_crt_bundle_attach, with the date check in front of its verify callback. */
 static esp_err_t attach_bundle(void *conf)
 {
-    esp_err_t err = esp_crt_bundle_attach(conf);
-    if (err != ESP_OK || conf == NULL) {
-        return err;
-    }
-    mbedtls_ssl_config *ssl_conf = (mbedtls_ssl_config *)conf;
-    s_bundle_verify = ssl_conf->MBEDTLS_PRIVATE(f_vrfy);
-    s_bundle_verify_ctx = ssl_conf->MBEDTLS_PRIVATE(p_vrfy);
-    mbedtls_ssl_conf_verify(ssl_conf, verify_cert, NULL);
-    return ESP_OK;
+    return network_tls_bundle_attach(conf, &s_verify);
 }
 
 static void client_config(esp_http_client_config_t *cfg, const char *url, hdr_ctx_t *ctx)

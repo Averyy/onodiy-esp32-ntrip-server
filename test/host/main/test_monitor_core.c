@@ -17,6 +17,8 @@ static monitor_sample_t sample(uint16_t router_ms, uint16_t server_ms, int8_t rs
     memset(&s, 0, sizeof(s));
     s.router = MONITOR_PING_OK;
     s.router_ms = router_ms;
+    s.internet = MONITOR_PING_OK;
+    s.internet_ms = 20;
     s.server = MONITOR_PING_OK;
     s.server_ms = server_ms;
     s.rssi_known = true;
@@ -67,9 +69,11 @@ TEST_CASE("monitor: pings without a target are no sample, unanswered ones are lo
     monitor_sample_t s = sample(4, 120, -60, 5, 90000);
     mon_add(&m, &s);
     s.router_ms = 8;
+    s.internet_ms = 30;            /* the internet still answers while the server does not */
     s.server = MONITOR_PING_LOST;
     mon_add(&m, &s);
     s.router = MONITOR_PING_NONE;   /* offline: neither sent nor lost */
+    s.internet = MONITOR_PING_NONE;
     s.server = MONITOR_PING_NONE;
     mon_add(&m, &s);
     monitor_status_t st;
@@ -78,6 +82,10 @@ TEST_CASE("monitor: pings without a target are no sample, unanswered ones are lo
     TEST_ASSERT_EQUAL_UINT32(0, st.router.lost);
     TEST_ASSERT_EQUAL_UINT32(6, st.router.avg_ms);
     TEST_ASSERT_EQUAL_UINT32(8, st.router.max_ms);
+    TEST_ASSERT_EQUAL_UINT32(2, st.internet.sent);
+    TEST_ASSERT_EQUAL_UINT32(0, st.internet.lost);
+    TEST_ASSERT_EQUAL_UINT32(25, st.internet.avg_ms);
+    TEST_ASSERT_EQUAL_UINT32(30, st.internet.max_ms);
     TEST_ASSERT_EQUAL_UINT32(2, st.server.sent);
     TEST_ASSERT_EQUAL_UINT32(1, st.server.lost);
     TEST_ASSERT_EQUAL_UINT32(120, st.server.avg_ms);
@@ -85,9 +93,14 @@ TEST_CASE("monitor: pings without a target are no sample, unanswered ones are lo
 
     /* Every one lost: no average, no maximum. */
     mon_init(&m, s_ring, MONITOR_BUCKETS);
+    s.internet = MONITOR_PING_LOST;
     s.server = MONITOR_PING_LOST;
     mon_add(&m, &s);
     mon_summary(&m, &st);
+    TEST_ASSERT_EQUAL_UINT32(1, st.internet.sent);
+    TEST_ASSERT_EQUAL_UINT32(1, st.internet.lost);
+    TEST_ASSERT_EQUAL_UINT32(0, st.internet.avg_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, st.internet.max_ms);
     TEST_ASSERT_EQUAL_UINT32(1, st.server.sent);
     TEST_ASSERT_EQUAL_UINT32(1, st.server.lost);
     TEST_ASSERT_EQUAL_UINT32(0, st.server.avg_ms);
@@ -127,6 +140,7 @@ TEST_CASE("monitor: past 24 h the oldest bucket gives way", "[monitor]")
     uint32_t total = MONITOR_BUCKETS * MONITOR_BUCKET_SAMPLES + 25;
     for (uint32_t i = 0; i < total; i++) {
         monitor_sample_t s = sample((uint16_t)(i / MONITOR_BUCKET_SAMPLES + 1), 100, -70, 10, 100000);
+        s.internet_ms = (uint16_t)(s.router_ms + 10);
         mon_add(&m, &s);
     }
     size_t n = mon_series(&m, s_out, MONITOR_BUCKETS);
@@ -135,6 +149,8 @@ TEST_CASE("monitor: past 24 h the oldest bucket gives way", "[monitor]")
     TEST_ASSERT_EQUAL_UINT16(4, s_out[0].router.max_ms);
     TEST_ASSERT_EQUAL_UINT16(MONITOR_BUCKET_SAMPLES, s_out[0].samples);
     TEST_ASSERT_EQUAL_UINT16(291, s_out[n - 1].router.max_ms);
+    TEST_ASSERT_EQUAL_UINT16(14, s_out[0].internet.max_ms);
+    TEST_ASSERT_EQUAL_UINT16(301, s_out[n - 1].internet.max_ms);
     TEST_ASSERT_EQUAL_UINT16(5, s_out[n - 1].samples);
     for (size_t i = 1; i < n; i++) {
         TEST_ASSERT_EQUAL_UINT16(s_out[i - 1].router.max_ms + 1, s_out[i].router.max_ms);
@@ -144,6 +160,8 @@ TEST_CASE("monitor: past 24 h the oldest bucket gives way", "[monitor]")
     /* 287 full buckets and the current one's 5 samples: just under 24 h. */
     uint32_t kept = (MONITOR_BUCKETS - 1) * MONITOR_BUCKET_SAMPLES + 5;
     TEST_ASSERT_EQUAL_UINT32(kept, st.router.sent);
+    TEST_ASSERT_EQUAL_UINT32(kept, st.internet.sent);
+    TEST_ASSERT_EQUAL_UINT32(301, st.internet.max_ms);
     TEST_ASSERT_EQUAL_UINT32(kept * MONITOR_SAMPLE_S, st.span_s);
 }
 
@@ -163,8 +181,11 @@ TEST_CASE("monitor: another server's figures replace the one's before, the rest 
     TEST_ASSERT_EQUAL_UINT32(40, st.server.avg_ms);
     TEST_ASSERT_EQUAL_UINT32(40, st.server.max_ms);
     TEST_ASSERT_EQUAL_UINT32(13, st.router.sent);              /* the router's stay */
+    TEST_ASSERT_EQUAL_UINT32(13, st.internet.sent);            /* the independent internet history stays too */
+    TEST_ASSERT_EQUAL_UINT32(20, st.internet.avg_ms);
     TEST_ASSERT_EQUAL_UINT32(13 * MONITOR_SAMPLE_S, st.span_s);
     size_t n = mon_series(&m, s_out, MONITOR_BUCKETS);
     TEST_ASSERT_EQUAL_UINT16(0, s_out[0].server.sent);
+    TEST_ASSERT_EQUAL_UINT16(10, s_out[0].internet.sent);
     TEST_ASSERT_EQUAL_UINT16(1, s_out[n - 1].server.sent);
 }

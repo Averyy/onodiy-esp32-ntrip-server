@@ -241,6 +241,7 @@ typedef struct {
                                         (its NTRIP 2.0 mountpoint, "onodiy" when empty) */
     bool v2_raw_body;              /**< NTRIP 2.0 quirk: send the body unchunked */
     bool dup_stream_ack;           /**< user acknowledged streaming the same data to Onocoy and an open caster */
+    bool onocoy_stats;             /**< explicit opt-in to downloading daily statistics with this credential */
     bool test_onocoy;              /**< bench and QEMU builds only: the slot counts as Onocoy whatever its host
                                         (ignored without CONFIG_NTRIP_TEST_ONOCOY_SLOT) */
 } ntrip_caster_cfg_t;

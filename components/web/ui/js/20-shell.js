@@ -358,6 +358,7 @@ bus.on('status', st => {
 setInterval(() => {
   renderLive();
   tickTrialLeft();
+  tickOnocoyReportRetry();
 }, 1000);
 
 /*

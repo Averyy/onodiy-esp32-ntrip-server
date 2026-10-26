@@ -8,8 +8,8 @@
  * under one mutex (the series copy is too long for a spinlock).
  *
  * The server figures are one server's: when another is pinged (Onocoy
- * turned off, so the first enabled slot instead, or the internet when no
- * slot is on), the ones before go.
+ * turned off, so the first enabled slot instead), the ones before go.
+ * The fixed internet target has its own history, independent of the slots.
  *
  * Pings go out on one raw ICMP socket, open for the task's life: what it
  * was handed between samples (late replies, other ICMP) is read off before
@@ -129,9 +129,8 @@ static monitor_ping_t ping(uint32_t addr, uint16_t *ms)
 
 /*
  * The server to ping: the Onocoy slot's address while it is on and its own
- * lookup found one, else the first enabled slot's (IPv4 only), else the
- * network's fallback DNS server (an address, so no lookup is needed): with no
- * NTRIP server on there is still a ping to the internet.
+ * lookup found one, else the first enabled slot's (IPv4 only). No enabled
+ * slot with an address means no server target; the internet probe still runs.
  */
 static bool server_target(uint32_t *addr, char *name, size_t size)
 {
@@ -152,14 +151,6 @@ static bool server_target(uint32_t *addr, char *name, size_t size)
         strlcpy(name, cfg.name, size);
         found = true;
         found_protected = cfg.protected_slot;
-    }
-    if (!found) {
-        struct in_addr a;
-        if (inet_pton(AF_INET, CONFIG_NETWORK_FALLBACK_DNS1, &a) == 1) {
-            *addr = a.s_addr;
-            strlcpy(name, "Internet", size);
-            found = true;
-        }
     }
     return found;
 }
@@ -211,6 +202,9 @@ static void monitor_task(void *arg)
         if (network_get_gateway(&addr)) {
             s.router = ping(addr, &s.router_ms);
         }
+        if (network_is_online()) {   /* a fixed target, independent of the caster's lookup and connection */
+            s.internet = ping(inet_addr(MONITOR_INTERNET_IP), &s.internet_ms);
+        }
         char name[sizeof(s_summary.server_name)] = "";
         if (network_is_online() && server_target(&addr, name, sizeof(name))) {   /* offline: no sample, not a loss */
             s.server = ping(addr, &s.server_ms);
@@ -258,7 +252,7 @@ esp_err_t monitor_start(void)
         return ESP_ERR_NO_MEM;
     }
     s_running = true;
-    ESP_LOGI(TAG, "a sample every %us: router and server ping, Wi-Fi signal, CPU, memory", (unsigned)MONITOR_SAMPLE_S);
+    ESP_LOGI(TAG, "a sample every %us: router, internet and server ping, Wi-Fi signal, CPU, memory", (unsigned)MONITOR_SAMPLE_S);
     return ESP_OK;
 }
 

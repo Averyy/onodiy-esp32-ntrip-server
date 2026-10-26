@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: MIT
  *
  * Status page: a summary that is always whole. The top card (title, one
- * line, its buttons, "Also:" lines), then six cards in the same places
- * whatever the state: Sky across the page, Receiver and Station, then
- * Onocoy and NTRIP, then Performance across the page. Each
+ * line, its buttons, "Also:" lines), Sky across the page, Receiver and
+ * Station, Onocoy and its optional report, NTRIP (beside Onocoy without
+ * the report, across the page otherwise), then Performance. Each
  * card says its few facts once and has one link out, in its head, to the
  * page that manages them; nothing is edited here. All of it from
  * stationState() (15-state.js), so no card contradicts another.
@@ -44,6 +44,16 @@ Views.dashboard = {
       render();
     };
     const stopMon = isAdmin() ? poller(300000, loadMon) : null;
+    let report = null, reportKey = '';
+    const loadReport = async () => {
+      if (!onocoyReportEnabled(S.status)) return;
+      const key = reportKey;
+      const r = await api('GET', '/api/onocoy/report');
+      if (key === reportKey) report = stampOnocoyReport(r);
+      render();
+    };
+    /* Reads the station's cache; only the firmware's daily worker contacts Onocoy. */
+    const stopReport = isAdmin() ? poller(15000, loadReport) : null;
     /* Open servers that stream while Onocoy does (GET /api/casters warnings): fetched when the turned-on servers change; the
      * top card says it in an "Also:" line. */
     let openSlots = [], openKey = '';
@@ -68,6 +78,13 @@ Views.dashboard = {
       const admin = isAdmin() && !s.public;
       const st = stationState(s, admin);
       if (admin) {
+        const reportSlot = (s.casters || []).find(c => c.protected && c.enabled && c.onocoy_ready && c.onocoy_stats);
+        const nextReportKey = reportSlot ? String(reportSlot.slot) : '';
+        if (nextReportKey !== reportKey) {
+          reportKey = nextReportKey;
+          report = null;
+          if (reportKey) loadReport().catch(() => {});
+        }
         const on = enabledCasters(s);
         const key = on.some(c => c.protected) && on.length > 1 ? on.map(c => c.slot + ':' + c.host).join('|') : '';
         if (key !== openKey) {
@@ -80,12 +97,25 @@ Views.dashboard = {
         monAgain = true;
         loadMon().catch(() => {});
       }
-      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live, mon) : publicDashboard(s, st, sig));
+      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live, mon, report) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
     dismissPowerClicks(el, render);
     endMaintClicks(el, render);
     leaveSafeClicks(el, render);
+    el.addEventListener('click', async e => {
+      const b = e.target?.closest?.('[data-act="refresh-onocoy"]');
+      if (!b || b.disabled) return;
+      b.disabled = true;
+      try {
+        report = stampOnocoyReport(await api('POST', '/api/onocoy/report/refresh', {}));
+        render();
+        setTimeout(() => loadReport().catch(() => {}), 1500);
+      } catch (err) {
+        toast(err.message || 'Could not refresh the Onocoy report.', 'warn');
+        loadReport().catch(() => {});
+      }
+    });
     render();
     return {
       update: render,
@@ -94,6 +124,7 @@ Views.dashboard = {
         if (stopSig) stopSig();
         if (stopLive) stopLive();
         if (stopMon) stopMon();
+        if (stopReport) stopReport();
       },
     };
   },
@@ -378,7 +409,7 @@ function roverRow(lc) {
  * lists, no link (no tabs there); no card when it lists none (safe mode, none
  * set up: the top card says it).
  */
-function castersCard(s, st, admin) {
+function castersCard(s, st, admin, wide) {
   const ono = admin ? onocoySlot(s) : null;
   const counting = admin && st.ono ? st.ono.slot : -1;
   const list = (s.casters || []).filter(c => !emptySlot(c) && (c !== ono || c.slot === counting))
@@ -390,7 +421,7 @@ function castersCard(s, st, admin) {
   const lines = list.length && !safe ? list.map(c => casterRow(c, admin, st)) : [];
   const rover = admin && !safe && s.local_caster && s.local_caster.enabled ? roverRow(s.local_caster) : null;
   const body = [lines.length ? null : mutedLine(none), lines.length || rover ? h('div', { class: 'clines' }, lines, rover) : null];
-  return h('section', { class: admin ? 'card' : 'card wide' },
+  return h('section', { class: admin && !wide ? 'card' : 'card wide' },
     admin ? cardHead('NTRIP', headLink(st, add, { label: 'Manage', name: 'Manage NTRIP servers', href: '#/ntrip' })) : h('h2', null, 'NTRIP'),
     body);
 }
@@ -440,7 +471,7 @@ function stationCard(s, st) {
 }
 
 /*
- * Performance: the router's and the server's ping times, the Wi-Fi signal,
+ * Performance: the router's, internet's and server's ping times, the Wi-Fi signal,
  * CPU and free memory, each its latest reading (status `monitor`, a new one
  * every 30 s), its last 24 h in words, and a line over the same time (GET
  * /api/monitor, 5-min buckets, read by the page every 5 min while it is
@@ -511,7 +542,7 @@ function perfCard(s, st, mon) {
   if (!m || !m.running || !span) return wrap(mutedLine('Waiting for the first reading (every 30s).'));
   /* All lines share one time axis; buckets before the first reading of any figure are empty and left out. */
   const series = k => (mon && mon[k]) || [];
-  const starts = ['router_avg', 'server_avg', 'rssi_avg', 'cpu_max', 'mem_min']
+  const starts = ['router_avg', 'server_avg', 'internet_avg', 'rssi_avg', 'cpu_max', 'mem_min']
     .map(k => series(k).findIndex(v => v !== null && v !== undefined)).filter(i => i >= 0);
   const first = starts.length ? Math.min(...starts) : 0;
   const col = k => series(k).slice(first);
@@ -522,6 +553,9 @@ function perfCard(s, st, mon) {
       sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('router_lost') })),
     perfRow(server, pingNow(m.server), pingDay(m.server),
       sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, unit: 'ms', lost: col('server_lost') })),
+    perfRow(h('span', { title: 'Cloudflare (' + (m.internet?.name || '1.1.1.1') + ')' }, 'Cloudflare ping'),
+      pingNow(m.internet), pingDay(m.internet),
+      sparkline(col('internet_avg'), 'Cloudflare ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('internet_lost') })),
     perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now, true) : DASH,
       r.avg !== null ? dotted(['avg ' + dbmText(r.avg), 'weakest ' + dbmText(r.min)]) : 'No readings yet',
       sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10, unit: NB + 'dBm', fmtv: v => String(Math.round(v)).replace('-', '\u2212') })),
@@ -575,12 +609,14 @@ function skyCard(s, st, live) {
       skyGrid(t)));
 }
 
-/* The top card, then six cards in reading order: the sky across the page, the receiver and the station, Onocoy and the
- * NTRIP servers, the station's performance across the page. */
-function adminDashboard(s, st, openSlots, live, mon) {
-  const cards = [skyCard(s, st, live), receiverCard(s, st, live), stationCard(s, st), onocoyCard(s, st), castersCard(s, st, true),
+/* Sky, Receiver and Station, Onocoy and its optional report, NTRIP, then Performance.
+ * NTRIP fills a row when Onocoy already has the report beside it. */
+function adminDashboard(s, st, openSlots, live, mon, report) {
+  const hasReport = onocoyReportEnabled(s);
+  const cards = [skyCard(s, st, live), receiverCard(s, st, live), stationCard(s, st), onocoyCard(s, st),
+    hasReport ? onocoyReportCard(report) : null, castersCard(s, st, true, hasReport),
     perfCard(s, st, mon)];
-  const links = cards.map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
+  const links = cards.filter(Boolean).map(c => c.querySelector('.head-link')).filter(Boolean).map(a => a.getAttribute('href'));
   return [heroCard(s, st, heroAlso(s, st, openSlots), links), h('div', { class: 'grid' }, cards)];
 }
 

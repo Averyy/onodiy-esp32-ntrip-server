@@ -38,6 +38,7 @@ TEST_CASE("caster record: round trip with the current layout", "[ntrip]")
     c.trust_mode = NTRIP_TRUST_CUSTOM_CA;
     c.v2_raw_body = true;
     c.dup_stream_ack = true;
+    c.onocoy_stats = true;
     uint8_t buf[NTRIP_CFG_BLOB_MAX];
     size_t len = ntrip_cfg_encode(&c, buf, sizeof(buf));
     TEST_ASSERT_TRUE(len > 0);
@@ -58,6 +59,7 @@ TEST_CASE("caster record: round trip with the current layout", "[ntrip]")
     TEST_ASSERT_EQUAL(NTRIP_BACKOFF_FAST, d.backoff_profile);
     TEST_ASSERT_TRUE(d.v2_raw_body);
     TEST_ASSERT_TRUE(d.dup_stream_ack);
+    TEST_ASSERT_TRUE(d.onocoy_stats);
     TEST_ASSERT_TRUE(ntrip_server_onocoy_ready(&d));
 
     /* The largest record fits. */
@@ -109,6 +111,23 @@ TEST_CASE("caster record: an Onocoy slot without the layout byte is the older la
     TEST_ASSERT_TRUE(ntrip_cfg_decode(buf, len, &d));
     TEST_ASSERT_EQUAL_STRING("console-user", d.username);
     TEST_ASSERT_TRUE(ntrip_server_onocoy_ready(&d));
+}
+
+TEST_CASE("caster statistics opt-in: old records default off, only its change avoids a reconnect", "[ntrip]")
+{
+    ntrip_caster_cfg_t a = onocoy_slot(), b = a, out;
+    uint8_t blob[NTRIP_CFG_BLOB_MAX];
+    size_t n = ntrip_cfg_encode(&a, blob, sizeof(blob));
+    TEST_ASSERT_TRUE(ntrip_cfg_decode(blob, n - 1, &out));
+    TEST_ASSERT_FALSE(out.onocoy_stats);
+    TEST_ASSERT_TRUE(ntrip_cfg_decode(blob, n - 2, &out));
+    TEST_ASSERT_FALSE(out.onocoy_stats);
+    b.onocoy_stats = true;
+    TEST_ASSERT_TRUE(ntrip_cfg_stats_only_change(&a, &b));
+    strcpy(b.password, "changed-password");
+    TEST_ASSERT_FALSE(ntrip_cfg_stats_only_change(&a, &b));
+    b = a;
+    TEST_ASSERT_FALSE(ntrip_cfg_stats_only_change(&a, &b));
 }
 
 TEST_CASE("caster record: the older layout keeps the username of other casters", "[ntrip]")

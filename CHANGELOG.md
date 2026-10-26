@@ -4,6 +4,24 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## v0.1.10
+
+- Onocoy: add an unchecked “Show Onocoy statistics” option with a note about
+  using the station credentials for the public API. An optional report card
+  shows completed-day uptime, data latency and rewards, with daily downloads,
+  manual refresh and 30 days of reports under Logs → History. Changing only
+  this option keeps the NTRIP stream connected.
+- Onocoy reports: link directly to Settings → API access with instructions
+  to turn on the separate account switch. Show a live retry countdown only
+  after failures; successful reports refresh daily without a Refresh row.
+  Rejected API requests wait 24 h before another automatic attempt.
+  Name the card “Onocoy API report” and combine its source, report date and
+  daily update note on one short line without wrapping.
+  Show Latest rewards and Previous rewards from the two most recent reports.
+- Status: NTRIP spans the full width when it has no card beside it.
+- Status: add an independent Cloudflare ping (1.1.1.1) below the NTRIP server
+  ping, with 24 h latency and packet loss.
+
 ## v0.1.9
 
 - Position: compact card with reference coordinates; live GNSS estimates, uncertainty,

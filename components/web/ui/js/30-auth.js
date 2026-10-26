@@ -759,6 +759,7 @@ async function startWizard(claim) {
     const ono = isOnocoySlot(cfg);
     /* A slot stored in the older layout (no username) holds the old credential in `mountpoint`: start empty. */
     const current = ono && cfg.username;
+    const stats = onocoyStatsOption(cfg.onocoy_stats);
     /* In the console's words: the server (fixed, a line of text), mountpoint, username, password. The console makes
      * the username and the user picks the password there; the mountpoint is any name (Onocoy shows it only in its
      * dashboard), the station's name unless one is stored. A test Onocoy slot (bench and QEMU builds) keeps its own
@@ -803,6 +804,7 @@ async function startWizard(claim) {
           { enabled: true, name: 'Onocoy', host: preset.host, port: preset.port, ntrip_version: preset.ntrip_version || 1,
             tls: false, trust: 'bundle', mountpoint: v.mountpoint, username: v.username, backoff_profile: 'fast' };
         if (v.password) body.password = v.password;
+        body.onocoy_stats = stats.input.checked;
         const doSave = async (ack, button) => {
           if (ack) body.dup_stream_ack = true;
           err.hidden = true;
@@ -825,7 +827,7 @@ async function startWizard(claim) {
         };
         await doSave(false, submit);
       } }, serverLine(null, ono ? cfg.host : preset.host, ono ? cfg.port : preset.port),
-      F.mountpoint.el, F.username.el, F.password.el, pwNote,
+      F.mountpoint.el, F.username.el, F.password.el, pwNote, stats.el,
       h('p', { class: 'small t-warn' }, 'Never use a credential another device is streaming with.'),
       dupBox, err, h('div', { class: 'form-actions' }, btn('Skip for now', () => next('onocoy')), submit)),
       skipAll());

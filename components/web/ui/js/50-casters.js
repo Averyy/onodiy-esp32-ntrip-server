@@ -193,6 +193,15 @@ function onocoyReady(cfg) {
   return !!(cfg && isOnocoySlot(cfg) && cfg.mountpoint && cfg.username && cfg.password_set);
 }
 
+function onocoyStatsOption(enabled) {
+  const c = checkbox('Show Onocoy statistics', enabled === true);
+  return { input: c.input, el: h('div', { class: 'field' }, c.el,
+    h('p', { class: 'hint' }, 'Uses these Onocoy station credentials to download daily uptime, data latency and rewards from the Onocoy API. ' +
+      'Refreshes daily while Onocoy is enabled. Go to ',
+      extLink('Onocoy Settings → API access', ONOCOY_API_ACCESS_URL),
+      ' and turn on API access first. The station must have passed validation within the last 7 days.')) };
+}
+
 /**
  * The Onocoy fields' rules: {mountpoint, username, password} -> error text
  * per field (missing ones only when `on`; a stored password may stay).
@@ -295,6 +304,8 @@ function casterEditor(entry, opts) {
   /* Not set up yet: Onocoy's NTRIP version from the station (2.0 sends the mountpoint the owner chose). */
   const version = selectInput([[1, 'NTRIP 1.0'], [2, 'NTRIP 2.0']], noCreds ? preset.ntrip_version : cfg.ntrip_version);
   const tls = checkbox('Encrypted', cfg.tls);
+  const stats = onocoyStatsOption(cfg.onocoy_stats);
+  const statsBox = stats.el;
   const trust = selectInput([['bundle', L.trust.bundle], ['custom_ca', L.trust.custom_ca], ['insecure', L.trust.insecure]], cfg.trust);
   /* An Onocoy slot stored in the older layout (no username) holds the old credential in `mountpoint`, not a name of
    * the owner's: it starts with the proposed name, as an empty one does. */
@@ -414,10 +425,11 @@ function casterEditor(entry, opts) {
   mount(form, h('div', { class: 'card-head' }, title), h('div', { class: 'cols c2' }, field('NTRIP server', presetSel).el), help,
     elsewhereNote, testNote,
     h('div', { class: 'cols c2' }, F.host.el, fixedField, F.mountpoint.el, F.username.el, F.password.el, F.backoff_profile.el), pwNote,
-    own, caBox, ackNote, dupBox, err, actions);
+    statsBox, own, caBox, ackNote, dupBox, err, actions);
 
   function sync() {
     const ono = onocoy(), custom = kind === 'custom';
+    statsBox.hidden = !ono;
     presetHelp(kind, help);
     F.host.el.hidden = !custom;
     fixedField.hidden = custom;
@@ -546,6 +558,7 @@ function casterEditor(entry, opts) {
     };
     if (tls.input.checked) body.trust = custom ? trust.value : cfg.trust;
     if (ono || v) body.username = userVal;
+    if (ono) body.onocoy_stats = stats.input.checked;
     if (pwVal) body.password = pwVal;
     if (testSlot) body.test_onocoy = ono;   /* switched to another server: no longer a test Onocoy slot */
     return body;

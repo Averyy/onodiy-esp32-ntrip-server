@@ -2983,6 +2983,7 @@ TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is k
     TEST_ASSERT_EQUAL_STRING(
         "\"monitor\":{\"running\":false,\"sample_s\":30,\"span_s\":0,"
         "\"router\":{\"state\":\"none\",\"ms\":null,\"avg_ms\":null,\"max_ms\":null,\"sent\":0,\"lost\":0},"
+        "\"internet\":{\"name\":\"1.1.1.1\",\"state\":\"none\",\"ms\":null,\"avg_ms\":null,\"max_ms\":null,\"sent\":0,\"lost\":0},"
         "\"server\":{\"name\":\"\",\"state\":\"none\",\"ms\":null,\"avg_ms\":null,\"max_ms\":null,\"sent\":0,\"lost\":0},"
         "\"rssi\":{\"now\":null,\"avg\":null,\"min\":null},\"cpu\":{\"now\":null,\"avg\":null,\"max\":null},"
         "\"memory\":{\"free\":null,\"min\":null}}",
@@ -2994,6 +2995,8 @@ TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is k
     m->span_s = 7200;
     m->last.router = MONITOR_PING_OK;
     m->last.router_ms = 3;
+    m->last.internet = MONITOR_PING_OK;
+    m->last.internet_ms = 15;
     m->last.server = MONITOR_PING_LOST;
     m->last.rssi_known = true;
     m->last.rssi = -79;
@@ -3002,6 +3005,7 @@ TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is k
     m->last.mem_free = 120000;
     strcpy(m->server_name, "Onocoy");
     m->router = (monitor_ping_sum_t){ .sent = 240, .lost = 0, .avg_ms = 4, .max_ms = 80 };
+    m->internet = (monitor_ping_sum_t){ .sent = 240, .lost = 1, .avg_ms = 20, .max_ms = 45 };
     m->server = (monitor_ping_sum_t){ .sent = 240, .lost = 2, .avg_ms = 117, .max_ms = 410 };
     m->rssi_known = true;
     m->rssi_avg = -78;
@@ -3016,11 +3020,12 @@ TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is k
     TEST_ASSERT_EQUAL_STRING(
         "\"monitor\":{\"running\":true,\"sample_s\":30,\"span_s\":7200,"
         "\"router\":{\"state\":\"ok\",\"ms\":3,\"avg_ms\":4,\"max_ms\":80,\"sent\":240,\"lost\":0},"
+        "\"internet\":{\"name\":\"1.1.1.1\",\"state\":\"ok\",\"ms\":15,\"avg_ms\":20,\"max_ms\":45,\"sent\":240,\"lost\":1},"
         "\"server\":{\"name\":\"Onocoy\",\"state\":\"lost\",\"ms\":null,\"avg_ms\":117,\"max_ms\":410,\"sent\":240,\"lost\":2},"
         "\"rssi\":{\"now\":-79,\"avg\":-78,\"min\":-84},\"cpu\":{\"now\":12,\"avg\":10,\"max\":40},"
         "\"memory\":{\"free\":120000,\"min\":98000}}",
         wj_text(&w));
-    TEST_ASSERT_TRUE(strlen(wj_text(&w)) < 640);   /* well inside a status section's room (web_ws.c SEC_TEXT_MAX) */
+    TEST_ASSERT_TRUE(strlen(wj_text(&w)) < 800);   /* well inside a status section's room (web_ws.c SEC_TEXT_MAX) */
 
     /* Admin only. */
     wj_init_members(&w, frag, sizeof(frag));
@@ -3034,6 +3039,7 @@ TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none"
     memset(b, 0, sizeof(b));
     b[0].samples = 10;
     b[0].router = (monitor_ping_acc_t){ .sent = 10, .ok = 9, .sum_ms = 40, .max_ms = 9 };
+    b[0].internet = (monitor_ping_acc_t){ .sent = 10, .ok = 8, .sum_ms = 161, .max_ms = 45 };
     b[0].rssi_n = 2;
     b[0].rssi_sum = -157;   /* -78.5: -79 */
     b[0].rssi_min = -80;
@@ -3049,9 +3055,37 @@ TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none"
     TEST_ASSERT_EQUAL_STRING(
         "{\"sample_s\":30,\"bucket_s\":300,\"buckets\":2,\"samples\":[10,1],"
         "\"router_avg\":[4,null],\"router_max\":[9,null],\"router_lost\":[1,null],"
+        "\"internet_avg\":[20,null],\"internet_max\":[45,null],\"internet_lost\":[2,null],"
         "\"server_avg\":[null,null],\"server_max\":[null,null],\"server_lost\":[null,null],"
         "\"rssi_avg\":[-79,null],\"cpu_avg\":[11,null],\"cpu_max\":[30,null],\"mem_min\":[97000,null]}",
         wj_text(&w));
+}
+
+TEST_CASE("Onocoy report: zero vs unknown, completed day fields and disabled cache hidden", "[web_build]")
+{
+    onocoy_report_status_t r = {.enabled = true, .state = ONOCOY_REPORT_OK, .count = 1};
+    strcpy(r.days[0].date, "2026-10-25");
+    r.days[0].known = ONOCOY_REPORT_UPTIME | ONOCOY_REPORT_REWARDS;
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_onocoy_report(&w, &r);
+    TEST_ASSERT_TRUE(wj_finish(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *day = cJSON_GetArrayItem(at(root, "days"), 0);
+    TEST_ASSERT_EQUAL_STRING("2026-10-25", at(day, "date")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsNumber(at(day, "uptime_s")));
+    TEST_ASSERT_EQUAL(0, at(day, "uptime_s")->valueint);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(day, "latency_avg")));
+    TEST_ASSERT_TRUE(cJSON_IsNumber(at(day, "rewards")));
+    cJSON_Delete(root);
+    r.enabled = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_onocoy_report(&w, &r);
+    TEST_ASSERT_TRUE(wj_finish(&w));
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(root, "days")));
+    cJSON_Delete(root);
 }
 
 /* ---- receiver queries ------------------------------------------------------------------------- */

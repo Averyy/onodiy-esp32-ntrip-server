@@ -191,6 +191,7 @@ const ctx = {
 vm.createContext(ctx);
 const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nreturn { casterEditor, openCasterWarning, casterEvidence, casterSummary, turnCaster, onOffSwitch, stationState, adminDashboard, heroAlso,\n' +
+  '  stampOnocoyReport, onocoyReportCard, tickOnocoyReportRetry, reportClock: fn => { const old = Date.now; Date.now = fn; return old; },\n' +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive, roverSummary, roverEditor, noticeItems,\n' +
   '  settingsPage: (el, arg) => Views.settings.create(el, arg), ntripPage: (el, arg) => Views.ntrip.create(el, arg),\n' +
@@ -245,6 +246,7 @@ function controls(root) {
     mountpoint: all.find(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47'),
     username: all.filter(e => e.tagName === 'INPUT' && e.attrs.maxlength === '47')[1],
     password: all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'password'),
+    stats: all.find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox' && e.parent.textContent.includes('Show Onocoy statistics')),
     title: all.find(e => e.tagName === 'H2'),
     errors: () => all.filter(e => e.tagName === 'SMALL' && e.className === 'err' && !e.hidden).map(e => e.textContent),
   };
@@ -285,7 +287,8 @@ async function wizardDup() {
   page().find(e => e.tagName === 'FORM').fire('submit');
   await settle();
   const r = { asked: shows('Duplicate-stream risk') };
-  const box = page().find(e => e.tagName === 'INPUT' && e.attrs.type === 'checkbox');
+  const box = page().find(e => e.tagName === 'LABEL' && e.textContent.includes('I understand the risk'))
+    .kids.find(e => e.tagName === 'INPUT');
   box.checked = true;
   box.fire('input', true);
   box.fire('change', true);
@@ -936,6 +939,28 @@ for (const c of JSON.parse(casesJson)) {
     out.push(ui.noticeItems(c.status, c.page).map(i => [i.key, i.title, i.text, [].concat(i.action || i.actions || []).map(b => b && b.textContent)]));
     continue;
   }
+  if (c.fn === 'report_countdown') {
+    let now = 1000000;
+    const clock = ui.reportClock(() => now);
+    const select = ctx.document.querySelectorAll;
+    const before = sent.length;
+    try {
+      const card = ui.onocoyReportCard(ui.stampOnocoyReport(c.report));
+      const button = [...card.walk()].find(e => e.tagName === 'BUTTON');
+      ctx.document.querySelectorAll = () => [...card.walk()].filter(e => e.hasAttribute('data-onocoy-retry-until'));
+      const states = [];
+      for (const elapsed of c.elapsed) {
+        now = 1000000 + elapsed * 1000;
+        ui.tickOnocoyReportRetry();
+        states.push([button.textContent, button.disabled]);
+      }
+      out.push({ states, requests: sent.length - before });
+    } finally {
+      ui.reportClock(clock);
+      ctx.document.querySelectorAll = select;
+    }
+    continue;
+  }
   if (c.fn === 'dashboard') {
     /* The Status page as built from a status: the top card's title, line and short line, its "Also:" lines ([id, title,
      * text, tone]), its facts; the grid's class and its cards in order; per card (by title) the label/value rows, the
@@ -944,7 +969,7 @@ for (const c of JSON.parse(casesJson)) {
      * whether it is wide. The top card's buttons as shown [text, href], the caster slots its line names, and every class
      * on the page that gives a colour (a tone, a tone's text, a C/N0 class). */
     const st = ui.stationState(c.status, c.admin);
-    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || [], c.live || null, c.mon || null) :
+    const kids = (c.admin ? ui.adminDashboard(c.status, st, c.open || [], c.live || null, c.mon || null, c.report || null) :
       ui.publicDashboard(c.status, st, null)).filter(Boolean);
     const all = kids.flatMap(k => [...visible(k)]);
     /* A list's label/value pairs (the top card's facts: each pair in a div of its own). */
@@ -1118,10 +1143,17 @@ for (const c of JSON.parse(casesJson)) {
   }
   sent.length = 0;
   const ed = ui.casterEditor({ slot: c.slot, config: c.config }, Object.assign({ preset: {} }, c.opts || {}));
+  if (c.fn === 'stats_option') {
+    const f = controls(ed.el);
+    out.push({ checked: f.stats.checked, shown: [...visible(ed.el)].includes(f.stats),
+      notes: [...visible(ed.el)].filter(e => e.tagName === 'P' && e.className === 'hint').map(e => e.textContent) });
+    continue;
+  }
   /* Found again at each step: a change of server places the fields that server has. */
   for (const [what, v] of c.steps) {
     const f = controls(ed.el);
-    f[what].value = v;
+    if (what === 'stats') f[what].checked = v;
+    else f[what].value = v;
     f[what].fire(what === 'caster' || what === 'pace' ? 'change' : 'input');
   }
   const f = controls(ed.el);
@@ -1288,7 +1320,7 @@ def test_onocoy_asks_for_its_username_and_password_and_a_name():
     edit, new, switched, tls, test = out
     assert edit["title"] == "Edit Onocoy" and new["title"] == switched["title"] == "New server"
     for o in out:
-        assert o["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Username", "Password"], o
+        assert o["fields"] == ["NTRIP server", "Host and port", "Mountpoint", "Username", "Password", "Show Onocoy statistics"], o
         assert o["pace"] is False and o["details"] == 0 and o["waits"] == [], o
         assert o["hints"] == ["Any name; shows only in your Onocoy dashboard.", "Reference station credential."], o
         assert o["help"] == "The Onocoy console gives the username and password, under NTRIP Credentials. Onocoy's guide ↗", o
@@ -3241,11 +3273,13 @@ def test_status_ntrip_card_says_your_rover_in_one_line():
 
 MON = {"running": True, "sample_s": 30, "span_s": 7200,
        "router": {"state": "ok", "ms": 3, "avg_ms": 4, "max_ms": 80, "sent": 240, "lost": 0},
+       "internet": {"name": "1.1.1.1", "state": "ok", "ms": 15, "avg_ms": 20, "max_ms": 45, "sent": 240, "lost": 1},
        "server": {"name": "Onocoy", "state": "lost", "ms": None, "avg_ms": 117, "max_ms": 410, "sent": 240, "lost": 2},
        "rssi": {"now": -79, "avg": -78, "min": -84}, "cpu": {"now": 12, "avg": 10, "max": 40},
        "memory": {"free": 120000, "min": 98000}}
 MON_SERIES = {"sample_s": 30, "bucket_s": 300, "buckets": 5, "samples": [10, 10, 10, 10, 3],
               "router_avg": [None, 4, 5, None, 2], "router_max": [None, 9, 8, None, 2], "router_lost": [None, 0, 1, None, 0],
+              "internet_avg": [20, 21, None, 19, 20], "internet_max": [45, 30, None, 25, 22], "internet_lost": [0, 0, 1, 0, 0],
               "server_avg": [118, 117, 120, 119, 117], "server_max": [140, 130, 150, 125, 120], "server_lost": [0, 1, 0, 0, 0],
               "rssi_avg": [-79, -78, -80, -79, -78], "cpu_avg": [8, 9, 10, 9, 8], "cpu_max": [10, 20, 30, 40, 50],
               "mem_min": [98000, 98500, 99000, 99000, 98800]}
@@ -3270,22 +3304,25 @@ def test_status_performance_card():
     assert card["perf"] == [
         ["Router ping", "3ms", "avg 4ms · worst 80ms · none lost"],
         ["Onocoy ping", "No reply", f"avg 117ms · worst 410ms · 2 lost (0.8%)"],
+        ["Cloudflare ping", "15ms", "avg 20ms · worst 45ms · 1 lost (0.4%)"],
         ["Wi-Fi signal", " Weak", f"avg −78{nb}dBm · weakest −84{nb}dBm"],
         ["CPU", "12%", "avg 10% · peak 40%"],
         ["Free memory", f"117{nb}KB", f"lowest 96{nb}KB"],
     ]
     assert ["warn", "No reply"] in card["tones"]
     sparks = card["sparks"]
-    assert [s["label"] for s in sparks] == ["Router ping over the same time", "Onocoy ping over the same time",
+    assert [s["label"] for s in sparks] == ["Router ping over the same time", "Onocoy ping over the same time", "Cloudflare ping over the same time",
                                             "Wi-Fi signal over the same time", "CPU peaks over the same time",
                                             "Free memory over the same time"]
     assert all(s["viewBox"] == "0 0 4 32" for s in sparks)
     # Each line says its own scale (bottom to top) under it.
-    assert card["scales"] == ["0 to 10ms", "0 to 120ms", f"−80 to −70{nb}dBm", "0 to 100%", f"0{nb}B to 97{nb}KB"]
+    assert card["scales"] == ["0 to 10ms", "0 to 120ms", "0 to 21ms", f"−80 to −70{nb}dBm", "0 to 100%", f"0{nb}B to 97{nb}KB"]
     # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost a ping; 0..10 ms (its 5 ms would fill it).
     assert sparks[0]["paths"] == [["spark-loss", "M2 0V32"], ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
+    # Cloudflare: independent latency and loss (bucket 2 has no replies).
+    assert sparks[2]["paths"] == [["spark-loss", "M2 0V32"], ["spark-line", "M0 4.2L1 3.0M3 5.5L4 4.2"]]
     # CPU on 0..100 %.
-    assert sparks[3]["paths"][-1] == ["spark-line", "M0 26.4L1 23.8L2 21.2L3 18.6L4 16.0"]
+    assert sparks[4]["paths"][-1] == ["spark-line", "M0 26.4L1 23.8L2 21.2L3 18.6L4 16.0"]
     assert unnamed["cards"]["Performance"]["perf"][1][0] == "Server ping"
     for x in (waiting, none):
         c = x["cards"]["Performance"]
@@ -3296,6 +3333,11 @@ def test_status_performance_card():
     (one,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "buckets": 1, "router_avg": [4], "router_lost": [0]})
     assert one["cards"]["Performance"]["sparks"][0]["viewBox"] == "0 0 1 32"
     assert one["cards"]["Performance"]["sparks"][0]["paths"][-1] == ["spark-line", "M0 18.6H1"]
+    # Without an enabled NTRIP target, the independent internet reading is still available.
+    no_target = {"name": "", "state": "none", "ms": None, "avg_ms": None, "max_ms": None, "sent": 0, "lost": 0}
+    (no_server,) = dashboards(over(MATRIX["nocasters"], monitor={**MON, "server": no_target}), mon=MON_SERIES)
+    assert no_server["cards"]["Performance"]["perf"][2] == card["perf"][2]
+    assert no_server["cards"]["Performance"]["perf"][1] == ["Server ping", "–", "No readings yet"]
 
 
 def test_update_banner_shows_on_the_status_page_too():
@@ -3439,3 +3481,74 @@ def test_last_receiver_update_message_can_be_dismissed():
     said = [t for _, t in shown["msgs"]]
     assert "Updated: the receiver runs R4.10Build11833.×" in said
     assert not any(t.startswith("Updated:") for _, t in shown["after"]["msgs"])
+
+
+def test_onocoy_statistics_are_an_explicit_opt_in():
+    bodies = run_editor([
+        case(0, ONOCOY_SET_UP, []),
+        case(0, ONOCOY_SET_UP, [("stats", True)]),
+        case(0, {**ONOCOY_SET_UP, "onocoy_stats": True}, []),
+        case(0, {**ONOCOY_SET_UP, "onocoy_stats": True}, [("stats", False)]),
+    ])
+    assert [b["onocoy_stats"] for b in bodies] == [False, True, True, False]
+    opts = run_editor([
+        {**case(0, ONOCOY_SET_UP, []), "fn": "stats_option"},
+        {**case(0, {**ONOCOY_SET_UP, "onocoy_stats": True}, []), "fn": "stats_option"},
+        {**case(1, stored("rtk2go.com", "polite"), []), "fn": "stats_option"},
+    ])
+    assert opts[0]["checked"] is False and opts[0]["shown"] is True
+    assert opts[1]["checked"] is True
+    assert opts[2]["shown"] is False
+    assert "Uses these Onocoy station credentials to download" in opts[0]["notes"][0]
+    assert "Refreshes daily" in opts[0]["notes"][0]
+
+
+def test_onocoy_report_is_optional_and_dated_separately_from_local_estimates():
+    status = over(BASE, casters=[{**BASE["casters"][0], "onocoy_stats": True}, *BASE["casters"][1:]])
+    report = {"enabled": True, "busy": False, "state": "ok", "checked_unix": 1793016000, "manual_in_s": 0,
+              "days": [{"date": "2026-10-25", "uptime_s": 86400, "latency_avg": 0.12, "latency_max": 0.4, "rewards": 1.25},
+                       {"date": "2026-10-23", "rewards": 0.75}, {"date": "2026-10-22", "rewards": 2}]}
+    out = run_editor([{"fn": "dashboard", "admin": True, "status": status, "report": report},
+                      {"fn": "dashboard", "admin": True, "status": BASE, "report": report},
+                      {"fn": "dashboard", "admin": True, "status": over(status, casters=[{**status["casters"][0], "enabled": False}]), "report": report},
+                      {"fn": "dashboard", "admin": True, "status": status, "report": {**report, "days": report["days"][:1]}},
+                      {"fn": "dashboard", "admin": True, "status": status, "report": {**report, "days": [
+                          {**report["days"][0], "rewards": None}, {**report["days"][1], "rewards": 0}]}}])
+    c = out[0]["cards"]["Onocoy API report"]
+    assert out[0]["order"].index("Onocoy API report") == out[0]["order"].index("Onocoy") + 1
+    assert [r[0] for r in c["rows"]] == ["Online time", "Data latency", "Latest rewards", "Previous rewards"]
+    assert c["rows"][1][1] == "avg 0.12s · worst 0.4s"
+    assert c["rows"][2:] == [["Latest rewards", "1.25 ONO"], ["Previous rewards", "0.75 ONO"]]
+    assert out[3]["cards"]["Onocoy API report"]["rows"][3] == ["Previous rewards", "–"]
+    assert out[4]["cards"]["Onocoy API report"]["rows"][2:] == [["Latest rewards", "–"], ["Previous rewards", "0 ONO"]]
+    assert len(c["notes"]) == 1
+    meta = c["notes"][0][0]
+    assert "Onocoy" in meta and "2026" in meta and "updates daily" in meta
+    assert len(meta.split()) <= 10 and meta in c["nowrap"]
+    assert c["buttons"] == 0
+    assert "Last checked" not in c["text"] and "Refresh in" not in c["text"]
+    assert out[0]["cards"]["NTRIP"]["wide"] is True
+    assert out[1]["cards"]["NTRIP"]["wide"] is False
+    assert "Onocoy API report" not in out[1]["cards"] and "Onocoy API report" not in out[2]["cards"]
+
+
+def test_onocoy_report_refusal_explains_account_access_and_retry_wait():
+    status = over(BASE, casters=[{**BASE["casters"][0], "onocoy_stats": True}, *BASE["casters"][1:]])
+    refused = {"enabled": True, "busy": False, "state": "auth", "http_status": 403,
+               "checked_unix": None, "manual_in_s": 300, "days": []}
+    out = run_editor([{"fn": "dashboard", "admin": True, "status": status, "report": r}
+                      for r in (refused, {**refused, "manual_in_s": 0})])
+    card = out[0]["cards"]["Onocoy API report"]
+    assert "Onocoy Settings → API access" in card["text"]
+    assert "turn on API access so these station credentials can download reports" in card["text"]
+    assert "Refresh in 5min" in card["text"]
+    assert any(link[1] == "https://console.onocoy.com/settings/api-access" for link in card["links"])
+    assert "Refresh in" not in out[1]["cards"]["Onocoy API report"]["text"]
+
+
+def test_onocoy_retry_counts_down_without_fetching_or_rebuilding():
+    (r,) = run_editor([{"fn": "report_countdown", "report": {"state": "auth", "busy": False,
+                       "manual_in_s": 35, "days": []}, "elapsed": [0, 1, 34, 35, 40]}])
+    assert r["states"] == [["Refresh in 35s", True], ["Refresh in 34s", True], ["Refresh in 1s", True],
+                           ["Refresh", False], ["Refresh", False]]
+    assert r["requests"] == 0

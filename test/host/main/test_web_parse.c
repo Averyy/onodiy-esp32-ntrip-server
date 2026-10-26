@@ -21,6 +21,30 @@ static cJSON *body(const char *json)
     return root;
 }
 
+TEST_CASE("caster statistics: boolean opt-in retained, other hosts clear it", "[web_parse]")
+{
+    ntrip_caster_cfg_t stored, out;
+    ntrip_server_onocoy_defaults(&stored);
+    web_bad_t bad = {0};
+    cJSON *j = body("{\"onocoy_stats\":true}");
+    TEST_ASSERT_TRUE(web_parse_caster_put(j, &stored, &out, &bad));
+    TEST_ASSERT_TRUE(out.onocoy_stats);
+    cJSON_Delete(j);
+    stored = out;
+    j = body("{}");
+    TEST_ASSERT_TRUE(web_parse_caster_put(j, &stored, &out, &bad));
+    TEST_ASSERT_TRUE(out.onocoy_stats);
+    cJSON_Delete(j);
+    j = body("{\"host\":\"caster.example\"}");
+    TEST_ASSERT_TRUE(web_parse_caster_put(j, &stored, &out, &bad));
+    TEST_ASSERT_FALSE(out.onocoy_stats);
+    cJSON_Delete(j);
+    j = body("{\"onocoy_stats\":1}");
+    TEST_ASSERT_FALSE(web_parse_caster_put(j, &stored, &out, &bad));
+    TEST_ASSERT_EQUAL_STRING("onocoy_stats", bad.field);
+    cJSON_Delete(j);
+}
+
 TEST_CASE("bodies: JSON objects only, empty means {}", "[web_parse]")
 {
     web_bad_t b = { 0 };

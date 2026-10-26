@@ -31,6 +31,7 @@
 #include "lifecycle.h"
 #include "local_caster.h"
 #include "monitor.h"
+#include "onocoy_report.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -1359,6 +1360,7 @@ static esp_err_t caster_put(web_req_t *r, size_t slot)
     switch (err) {
     case ESP_OK:
         ESP_LOGI(TAG, "caster slot %u saved", (unsigned)slot);
+        onocoy_report_config_changed();
         return send_slot(r->req, slot);
     case ESP_ERR_INVALID_ARG:
         return web_send_err(r->req, WEB_ERR_INVALID_FIELD);
@@ -1433,6 +1435,7 @@ static esp_err_t caster_delete(web_req_t *r, size_t slot)
         return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
     }
     esp_err_t err = ntrip_server_remove_slot(slot);
+    if (err == ESP_OK) onocoy_report_config_changed();
     switch (err) {
     case ESP_OK:
         ESP_LOGI(TAG, "caster slot %u removed", (unsigned)slot);
@@ -2403,6 +2406,26 @@ static esp_err_t h_monitor(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+EXT_RAM_BSS_ATTR static onocoy_report_status_t s_onocoy_report;
+
+static esp_err_t h_onocoy_report(web_req_t *r)
+{
+    onocoy_report_get_status(&s_onocoy_report);
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_onocoy_report(&resp.w, &s_onocoy_report);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_onocoy_refresh(web_req_t *r)
+{
+    esp_err_t err = onocoy_report_refresh();
+    if (err == ESP_ERR_NOT_FINISHED) return web_send_err(r->req, WEB_ERR_RATE_LIMITED);
+    if (err == ESP_ERR_NOT_ALLOWED) return web_send_err(r->req, WEB_ERR_REPORT_NOT_FAILED);
+    if (err != ESP_OK) return web_send_err(r->req, WEB_ERR_SLOT_DISABLED);
+    return h_onocoy_report(r);
+}
+
 static esp_err_t h_availability(web_req_t *r)
 {
     bool have_cfg = load_configs();
@@ -2758,6 +2781,8 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/health", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_health),
     ROUTE("/api/availability", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_availability),
     ROUTE("/api/monitor", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_monitor),
+    ROUTE("/api/onocoy/report", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_onocoy_report),
+    ROUTE("/api/onocoy/report/refresh", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_onocoy_refresh),
     ROUTE("/api/diag/tasks", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_tasks),
     ROUTE("/api/diag/flash-capture", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_flash_capture),
     ROUTE("/api/diag/frame-times", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_frame_times),

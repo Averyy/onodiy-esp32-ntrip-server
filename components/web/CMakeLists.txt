@@ -54,6 +54,7 @@ idf_component_register(
         ntrip_server
         local_caster
         monitor
+        onocoy_report
         station
         health
         fw_update

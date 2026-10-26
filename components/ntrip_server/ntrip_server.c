@@ -2277,7 +2277,9 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
     (void)ntrip_server_apply_host_rules(&next, NULL);   /* never refuses without a requested profile */
     char old_host[sizeof(next.host)];
     char old_mount[sizeof(next.mountpoint)];
+    ntrip_caster_cfg_t before;
     taskENTER_CRITICAL(&s_lock);
+    before = s_cfg[slot];
     memcpy(old_host, s_cfg[slot].host, sizeof(old_host));
     memcpy(old_mount, s_cfg[slot].mountpoint, sizeof(old_mount));
     taskEXIT_CRITICAL(&s_lock);
@@ -2295,6 +2297,8 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
         taskEXIT_CRITICAL(&s_lock);
     }
     next.password_set = next.password[0] != '\0';
+    bool stats_only = ntrip_cfg_stats_only_change(&before, &next);
+    ntrip_secure_zero(&before, sizeof(before));
 
     esp_err_t err = ESP_OK;
     ntrip_fields_t f = fields_of(&next);
@@ -2326,7 +2330,7 @@ esp_err_t ntrip_server_set_config(size_t slot, const ntrip_caster_cfg_t *cfg, nt
         taskENTER_CRITICAL(&s_lock);
         s_cfg[slot] = next;
         taskEXIT_CRITICAL(&s_lock);
-        if (s_slots[slot] != NULL) {
+        if (s_slots[slot] != NULL && !stats_only) {
             __atomic_or_fetch(&s_slots[slot]->cmd, CMD_CONFIG, __ATOMIC_SEQ_CST);
             kick(slot);   /* only this slot reconnects */
         }

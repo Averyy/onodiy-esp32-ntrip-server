@@ -6,18 +6,19 @@
  * latest reading and the running 24 h, for the Status page.
  *
  * Every MONITOR_SAMPLE_S one sample: a ping (ICMP echo, 32 bytes, one try,
- * MONITOR_PING_TIMEOUT_MS) to the router (the station's IPv4 gateway) and
- * one to the server the casters depend on most (the Onocoy slot's address
- * while it is on and connected, else the first enabled slot's: the address
- * that slot's own lookup found, so no name lookup of its own; else the
- * fallback DNS server, so there is a ping with no server on; when another
- * server is pinged, the server figures start over), the Wi-Fi
+ * MONITOR_PING_TIMEOUT_MS) to the router (the station's IPv4 gateway),
+ * Cloudflare (MONITOR_INTERNET_IP, independent of DNS and the casters), and
+ * the server the casters depend on most (the Onocoy slot's address
+ * while it is on and its lookup found one, else the first enabled slot's:
+ * the address that slot's own lookup found, so no name lookup of its own;
+ * no server target without one; when another server is pinged, the server
+ * figures start over), the Wi-Fi
  * signal, the busier core's CPU load over the sample (from the idle tasks'
  * run-time counters: no task list is scanned) and the free internal memory.
  * A ping without a target (offline) is no sample
  * of it; one without an answer counts as lost.
  *
- * Load: two echo requests and their replies per sample, about 4 bytes a
+ * Load: three echo requests and their replies per sample, about 6 bytes a
  * second; one low-priority task asleep between samples, its stack and the
  * 24 h history in PSRAM; nothing goes to a caster's connection.
  *
@@ -45,6 +46,7 @@ extern "C" {
 #define MONITOR_BUCKET_S         (MONITOR_SAMPLE_S * MONITOR_BUCKET_SAMPLES)
 #define MONITOR_BUCKETS          288u                                      /* 24 h */
 #define MONITOR_PING_TIMEOUT_MS  2000u
+#define MONITOR_INTERNET_IP      "1.1.1.1"
 
 /** One ping's outcome. */
 typedef enum {
@@ -57,6 +59,8 @@ typedef enum {
 typedef struct {
     monitor_ping_t router;
     uint16_t router_ms;      /**< with MONITOR_PING_OK */
+    monitor_ping_t internet;
+    uint16_t internet_ms;
     monitor_ping_t server;
     uint16_t server_ms;
     bool rssi_known;         /**< associated with an access point */
@@ -78,6 +82,7 @@ typedef struct {
 typedef struct {
     uint16_t samples;
     monitor_ping_acc_t router;
+    monitor_ping_acc_t internet;
     monitor_ping_acc_t server;
     uint16_t rssi_n;
     int32_t rssi_sum;
@@ -104,6 +109,7 @@ typedef struct {
     uint32_t span_s;         /**< time the 24 h figures cover: samples x MONITOR_SAMPLE_S, at most 24 h */
     char server_name[24];    /**< the server pinged by the last sample with a server target ("" = none yet) */
     monitor_ping_sum_t router;
+    monitor_ping_sum_t internet;
     monitor_ping_sum_t server;
     bool rssi_known;
     int8_t rssi_avg;

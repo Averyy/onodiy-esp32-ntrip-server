@@ -24,6 +24,7 @@
 #include "lifecycle.h"
 #include "local_caster.h"
 #include "monitor.h"
+#include "onocoy_report.h"
 #include "network.h"
 #include "ntrip_server.h"
 #include "pkg_store.h"
@@ -188,6 +189,9 @@ bool web_section_public(web_section_t sec);
  * none).
  */
 void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n);
+
+/** The optional, cached Onocoy daily report; no credentials are serialized. */
+void web_build_onocoy_report(wj_t *w, const onocoy_report_status_t *s);
 
 /** The whole status object (admin or public form). */
 void web_build_status(wj_t *w, const web_status_snap_t *s, bool pub);
