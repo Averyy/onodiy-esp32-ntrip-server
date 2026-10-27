@@ -1919,8 +1919,9 @@ static bool checks_enabled(void)
 
 static esp_err_t h_update_get(web_req_t *r)
 {
-    if (fw_update_get_status(&s_fw) != ESP_OK) {
-        memset(&s_fw, 0, sizeof(s_fw));
+    esp_err_t err = fw_update_get_status(&s_fw);
+    if (err != ESP_OK) {
+        return web_send_internal(r->req, err);
     }
     station_snapshot(&s_st);
     web_last_result_t last;
@@ -2406,6 +2407,51 @@ static esp_err_t h_monitor(web_req_t *r)
     return web_resp_end(&resp);
 }
 
+/* Admin-only, bounded pages in PSRAM. No snapshot lock is held while sending. */
+EXT_RAM_BSS_ATTR static monitor_diag_sample_t s_diag_samples[MONITOR_DIAG_PAGE];
+EXT_RAM_BSS_ATTR static ntrip_tx_diag_t s_diag_tx[WEB_MAX_SLOTS];
+EXT_RAM_BSS_ATTR static ntrip_tx_write_diag_t s_diag_history[WEB_MAX_SLOTS][NTRIP_TX_DIAG_HISTORY];
+
+static esp_err_t send_monitor_diag(web_req_t *r, uint32_t cursor)
+{
+    monitor_diag_status_t status;
+    size_t count = 0, counts[WEB_MAX_SLOTS] = {0};
+    int history_error[WEB_MAX_SLOTS] = {0};
+    monitor_diag_get(cursor, s_diag_samples, MONITOR_DIAG_PAGE, &count, &status);
+    size_t slots = slot_count();
+    if (slots > WEB_MAX_SLOTS) slots = WEB_MAX_SLOTS;
+    for (size_t i = 0; i < slots; i++) {
+        if (ntrip_server_get_tx_diag(i, &s_diag_tx[i]) != ESP_OK) memset(&s_diag_tx[i], 0, sizeof(s_diag_tx[i]));
+        history_error[i] = ntrip_server_get_tx_history(i, s_diag_history[i], NTRIP_TX_DIAG_HISTORY, &counts[i]);
+    }
+    web_resp_t resp;
+    resp_begin(&resp, r->req, 200);
+    web_build_monitor_diag(&resp.w, &status, s_diag_samples, count, s_diag_tx, s_diag_history, counts, history_error, slots);
+    return web_resp_end(&resp);
+}
+
+static esp_err_t h_monitor_diag(web_req_t *r)
+{
+    uint32_t cursor = 0;
+    if (!web_query_u32(r->query, "cursor", &cursor))
+        return web_send_error(r->req, WEB_ERR_INVALID_FIELD, "cursor must be a whole number from 0 to 4294967295", "cursor", UINT32_MAX, NULL, NULL);
+    return send_monitor_diag(r, cursor);
+}
+
+static esp_err_t h_monitor_diag_start(web_req_t *r)
+{
+    esp_err_t err = monitor_diag_start();
+    if (err == ESP_ERR_INVALID_STATE) return web_send_err(r->req, WEB_ERR_BUSY);
+    if (err != ESP_OK) return web_send_internal(r->req, err);
+    return send_monitor_diag(r, 0);
+}
+
+static esp_err_t h_monitor_diag_stop(web_req_t *r)
+{
+    monitor_diag_stop();
+    return send_monitor_diag(r, 0);
+}
+
 EXT_RAM_BSS_ATTR static onocoy_report_status_t s_onocoy_report;
 
 static esp_err_t h_onocoy_report(web_req_t *r)
@@ -2781,6 +2827,9 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/health", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_health),
     ROUTE("/api/availability", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_availability),
     ROUTE("/api/monitor", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_monitor),
+    ROUTE("/api/monitor/diagnostics", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_monitor_diag),
+    ROUTE("/api/monitor/diagnostics", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_monitor_diag_start),
+    ROUTE("/api/monitor/diagnostics", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_monitor_diag_stop),
     ROUTE("/api/onocoy/report", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_onocoy_report),
     ROUTE("/api/onocoy/report/refresh", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_onocoy_refresh),
     ROUTE("/api/diag/tasks", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_tasks),

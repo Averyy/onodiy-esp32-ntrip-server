@@ -2,16 +2,17 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Logs (#/logs, a tab) in three parts: Overview (#/logs: health and
+ * Logs (#/logs, a tab): Overview (#/logs: health and
  * alerts, this start with its core dump, earlier starts, the chip, the
  * Wi-Fi signal and access point, what the Receiver page leaves out of the
  * receiver, the firmware's raw counters folded), History (#/logs/history:
  * the last 30 days, then one event list read from the journal) and Console
  * (#/logs/console: the log of this start and the previous one, the log
- * level).
+ * level), and Network (#/logs/network: temporary network recordings and
+ * passive outgoing-stream diagnostics).
  */
 
-const LOGS_TABS = [['', 'Overview'], ['history', 'History'], ['console', 'Console']];
+const LOGS_TABS = [['', 'Overview'], ['history', 'History'], ['console', 'Console'], ['network', 'Network']];
 
 const KEY_WORDS = {
   rx: 'RX', tx: 'TX', rtcm: 'RTCM', crc: 'CRC', hw: 'hardware', fifo: 'FIFO', dns: 'DNS', mmb: 'multiple-message bit',
@@ -1492,7 +1493,7 @@ function historyTab(box) {
   return { update: updateReport, stop() { stopMonth(); stopReport(); } };
 }
 
-const LOGS_PAGES = { '': overviewTab, history: historyTab, console: consoleTab };
+const LOGS_PAGES = { '': overviewTab, history: historyTab, console: consoleTab, network: networkDiagTab };
 
 Views.logs = {
   title: 'Logs',

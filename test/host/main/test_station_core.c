@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "lifecycle.h"
+#include "reboot_gate.h"
 #include "station_core.h"
 #include "unity.h"
 
@@ -3288,12 +3289,302 @@ TEST_CASE("station core: the live view's output is turned off after an ESP32 res
 
 /* ---- receiver update sessions, bench operations, package checks ----------------------- */
 
+/* The production lockout transaction with the real reboot gate. The update
+ * owner follows lifecycle_update_claim's same-owner/empty-slot contract. */
+typedef struct {
+    reboot_gate_t gate;
+    lifecycle_update_t owner;
+    unsigned claims;
+    unsigned inhibits;
+    unsigned update_releases;
+    unsigned inhibit_releases;
+    unsigned order;
+    unsigned update_released_at;
+    unsigned inhibit_released_at;
+    reboot_gate_result_t release_result;
+    stn_flash_lockout_t *admit_during_release;
+    unsigned release_admission_attempts;
+} lockout_world_t;
+
+static int lockout_claim(void *ctx)
+{
+    lockout_world_t *w = ctx;
+    w->claims++;
+    if (w->owner != LIFECYCLE_UPDATE_NONE && w->owner != LIFECYCLE_UPDATE_RECEIVER) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    w->owner = LIFECYCLE_UPDATE_RECEIVER;
+    return ESP_OK;
+}
+
+static void lockout_unclaim(void *ctx)
+{
+    lockout_world_t *w = ctx;
+    if (w->admit_during_release != NULL) {
+        /* The local claimed bit is already false, but lifecycle still
+         * holds RECEIVER here: a same-owner claim would otherwise succeed
+         * just before this old release clears it. */
+        w->release_admission_attempts++;
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(w->admit_during_release, false));
+    }
+    w->update_releases++;
+    w->update_released_at = ++w->order;
+    TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_RECEIVER, w->owner);
+    w->owner = LIFECYCLE_UPDATE_NONE;
+}
+
+static int lockout_inhibit(void *ctx, int *token)
+{
+    lockout_world_t *w = ctx;
+    w->inhibits++;
+    int taken = reboot_gate_acquire(&w->gate, "receiver flash");
+    if (taken == REBOOT_GATE_TOKEN_REBOOTING) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (taken == REBOOT_GATE_TOKEN_FULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    *token = taken;
+    return ESP_OK;
+}
+
+static void lockout_uninhibit(void *ctx, int token)
+{
+    lockout_world_t *w = ctx;
+    if (w->admit_during_release != NULL) {
+        w->release_admission_attempts++;
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(w->admit_during_release, false));
+    }
+    w->inhibit_releases++;
+    w->inhibit_released_at = ++w->order;
+    uint32_t apply;
+    w->release_result = reboot_gate_release(&w->gate, token, &apply);
+}
+
+static stn_flash_lockout_ops_t lockout_ops(lockout_world_t *w)
+{
+    memset(w, 0, sizeof(*w));
+    reboot_gate_init(&w->gate, 1);
+    return (stn_flash_lockout_ops_t){
+        .ctx = w,
+        .claim_update = lockout_claim,
+        .release_update = lockout_unclaim,
+        .acquire_inhibit = lockout_inhibit,
+        .release_inhibit = lockout_uninhibit,
+    };
+}
+
+TEST_CASE("station lockout: a refused update claim neither acquires nor releases an inhibit", "[station]")
+{
+    lockout_world_t w;
+    stn_flash_lockout_ops_t ops = lockout_ops(&w);
+    w.owner = LIFECYCLE_UPDATE_APP;
+    stn_flash_lockout_t held = {
+        .inhibit_held = true,
+        .inhibit = reboot_gate_acquire(&w.gate, "earlier receiver session"),
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, stn_flash_lockout_take(&held, &ops));
+    TEST_ASSERT_FALSE(held.update_claimed);
+    TEST_ASSERT_TRUE(held.inhibit_held);
+    TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_APP, w.owner);
+    TEST_ASSERT_EQUAL_UINT(1, w.claims);
+    TEST_ASSERT_EQUAL_UINT(0, w.inhibits);
+    TEST_ASSERT_EQUAL_UINT(0, w.update_releases);
+    TEST_ASSERT_EQUAL_UINT(0, w.inhibit_releases);
+    TEST_ASSERT_EQUAL_STRING("earlier receiver session", reboot_gate_holder(&w.gate));
+}
+
+TEST_CASE("station lockout: reboot and exhausted inhibits fail closed and unwind only a new claim", "[station]")
+{
+    for (unsigned rebooting = 0; rebooting < 2; rebooting++) {
+        for (unsigned claimed_before = 0; claimed_before < 2; claimed_before++) {
+            lockout_world_t w;
+            stn_flash_lockout_ops_t ops = lockout_ops(&w);
+            stn_flash_lockout_t held = { .update_claimed = claimed_before != 0 };
+            if (claimed_before) {
+                w.owner = LIFECYCLE_UPDATE_RECEIVER;
+            }
+            if (rebooting) {
+                uint32_t apply;
+                TEST_ASSERT_EQUAL(REBOOT_GATE_COMMIT, reboot_gate_request(&w.gate, 1, 0, &apply));
+            } else {
+                TEST_ASSERT_GREATER_THAN_INT(0, reboot_gate_acquire(&w.gate, "another operation"));
+            }
+            TEST_ASSERT_EQUAL(rebooting ? ESP_ERR_INVALID_STATE : ESP_ERR_NO_MEM,
+                              stn_flash_lockout_take(&held, &ops));
+            TEST_ASSERT_FALSE(held.inhibit_held);
+            TEST_ASSERT_EQUAL(claimed_before != 0, held.update_claimed);
+            TEST_ASSERT_EQUAL(claimed_before ? LIFECYCLE_UPDATE_RECEIVER : LIFECYCLE_UPDATE_NONE, w.owner);
+            TEST_ASSERT_EQUAL_UINT(claimed_before ? 0 : 1, w.claims);
+            TEST_ASSERT_EQUAL_UINT(claimed_before ? 0 : 1, w.update_releases);
+            TEST_ASSERT_EQUAL_UINT(1, w.inhibits);
+            TEST_ASSERT_EQUAL_UINT(0, w.inhibit_releases);
+            /* Abandoning the whole attempt releases its earlier claim too,
+             * without touching another operation's inhibit or the journal. */
+            stn_flash_lockout_release(&held, &ops);
+            TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_NONE, w.owner);
+            TEST_ASSERT_EQUAL_UINT(1, w.update_releases);
+            TEST_ASSERT_EQUAL_UINT(0, w.inhibit_releases);
+            if (!rebooting) {
+                TEST_ASSERT_EQUAL_STRING("another operation", reboot_gate_holder(&w.gate));
+            }
+        }
+    }
+}
+
+TEST_CASE("station lockout: full ownership is idempotent and releases the update slot before a queued reboot", "[station]")
+{
+    lockout_world_t w;
+    stn_flash_lockout_ops_t ops = lockout_ops(&w);
+    stn_flash_lockout_t held = { 0 };
+    TEST_ASSERT_EQUAL(ESP_OK, stn_flash_lockout_take(&held, &ops));
+    int token = held.inhibit;
+    TEST_ASSERT_TRUE(held.update_claimed);
+    TEST_ASSERT_TRUE(held.inhibit_held);
+    TEST_ASSERT_EQUAL(ESP_OK, stn_flash_lockout_take(&held, &ops));
+    TEST_ASSERT_EQUAL_INT(token, held.inhibit);
+    TEST_ASSERT_EQUAL_UINT(1, w.claims);
+    TEST_ASSERT_EQUAL_UINT(1, w.inhibits);
+    uint32_t apply;
+    TEST_ASSERT_EQUAL(REBOOT_GATE_QUEUED, reboot_gate_request(&w.gate, 1, 0, &apply));
+    TEST_ASSERT_FALSE(w.gate.rebooting);
+    stn_flash_lockout_release(&held, &ops);
+    TEST_ASSERT_FALSE(held.update_claimed);
+    TEST_ASSERT_FALSE(held.inhibit_held);
+    TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_NONE, w.owner);
+    TEST_ASSERT_EQUAL(REBOOT_GATE_COMMIT, w.release_result);
+    TEST_ASSERT_TRUE(w.gate.rebooting);
+    TEST_ASSERT_LESS_THAN_UINT(w.inhibit_released_at, w.update_released_at);
+    stn_flash_lockout_release(&held, &ops);
+    TEST_ASSERT_EQUAL_UINT(1, w.update_releases);
+    TEST_ASSERT_EQUAL_UINT(1, w.inhibit_releases);
+}
+
 static stn_result_t flash_end(stn_flash_end_t end, bool supported)
 {
     stn_result_t r = res(STN_OK);
     r.flash_end = (uint8_t)end;
     r.supported = supported;
     return r;
+}
+
+TEST_CASE("station lockout: completion reserves admission through both releases and its last event", "[station]")
+{
+    const uint8_t kinds[] = { STN_FLASH_NEW, STN_FLASH_RETRY, STN_FLASH_RESTART };
+    for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        sim_t s;
+        sim_init(&s, kinds[i] != STN_FLASH_NEW);
+        if (kinds[i] == STN_FLASH_NEW) {
+            boot_applied(&s);
+        } else {
+            sim_start(&s);
+        }
+        TEST_ASSERT_FALSE(stn_flash_pending(&s.s));
+        lockout_world_t w;
+        stn_flash_lockout_ops_t ops = lockout_ops(&w);
+        stn_flash_lockout_t held = { 0 };
+        TEST_ASSERT_EQUAL(ESP_OK, stn_flash_lockout_take(&held, &ops));
+
+        /* Runtime reserves under the station lock before publishing the
+         * parked (boot) or absent (flash_close) journal. No pending job
+         * protects either transition, so the reservation alone must do it. */
+        held.request_reserved = true;
+        w.admit_during_release = &held;
+        stn_flash_lockout_release(&held, &ops);
+        TEST_ASSERT_EQUAL_UINT(2, w.release_admission_attempts);
+        TEST_ASSERT_EQUAL_UINT(1, w.claims);
+        TEST_ASSERT_EQUAL_UINT(1, w.update_releases);
+        TEST_ASSERT_EQUAL_UINT(1, w.inhibit_releases);
+        TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_NONE, w.owner);
+        TEST_ASSERT_FALSE(held.update_claimed);
+        TEST_ASSERT_FALSE(held.inhibit_held);
+        /* flash_close still owes its old completion event. Releasing the
+         * lifecycle resources must not let a new admission overtake it. */
+        TEST_ASSERT_TRUE(held.request_reserved);
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+
+        /* Once that notification is posted, the next job claims fresh
+         * ownership; no previous release remains to clear its claim. */
+        held.request_reserved = false;
+        TEST_ASSERT_TRUE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+        TEST_ASSERT_EQUAL(ESP_OK, ops.claim_update(ops.ctx));
+        held.update_claimed = true;
+        TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&s.s, kinds[i]));
+        held.request_reserved = false;
+        TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&s).kind);
+        TEST_ASSERT_EQUAL(ESP_OK, stn_flash_lockout_take(&held, &ops));
+        TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_RECEIVER, w.owner);
+        TEST_ASSERT_EQUAL_UINT(2, w.claims);
+        TEST_ASSERT_EQUAL_UINT(1, w.update_releases);
+        TEST_ASSERT_TRUE(held.inhibit_held);
+    }
+}
+
+TEST_CASE("station lockout: losing flash admissions cannot release the accepted update owner", "[station]")
+{
+    const uint8_t kinds[] = { STN_FLASH_NEW, STN_FLASH_RETRY, STN_FLASH_RESTART };
+    for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        sim_t s;
+        sim_init(&s, kinds[i] != STN_FLASH_NEW);
+        if (kinds[i] == STN_FLASH_NEW) {
+            boot_applied(&s);
+        } else {
+            sim_start(&s);
+        }
+        lockout_world_t w;
+        stn_flash_lockout_ops_t ops = lockout_ops(&w);
+        stn_flash_lockout_t held = { 0 };
+        /* Request A reserves admission, then calls lifecycle outside the
+         * station lock. B cannot claim/release while A is between them. */
+        TEST_ASSERT_TRUE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+        TEST_ASSERT_EQUAL(ESP_OK, ops.claim_update(ops.ctx));
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+        TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_RECEIVER, w.owner);
+        TEST_ASSERT_EQUAL_UINT(0, w.update_releases);
+        /* The station lock publishes the claim, job and reservation release
+         * together. A later request is rejected by queued/running work. */
+        TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&s.s, kinds[i]));
+        held.update_claimed = true;
+        held.request_reserved = false;
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+        TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(&s).kind);
+        TEST_ASSERT_FALSE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+        TEST_ASSERT_EQUAL(ESP_OK, stn_flash_lockout_take(&held, &ops));
+        TEST_ASSERT_EQUAL_UINT(1, w.claims);   /* the task uses A's claim */
+        TEST_ASSERT_EQUAL_UINT(0, w.update_releases);
+        TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_RECEIVER, w.owner);
+        /* Only the accepted attempt's end gives ownership back. */
+        stn_flash_lockout_release(&held, &ops);
+        stn_result_t r = flash_end(STN_FLASH_END_NOTHING, false);
+        sim_done(&s, &r);
+        TEST_ASSERT_EQUAL_UINT(1, w.update_releases);
+        TEST_ASSERT_EQUAL(LIFECYCLE_UPDATE_NONE, w.owner);
+        TEST_ASSERT_TRUE(stn_flash_lockout_reserve(&held, stn_flash_pending(&s.s)));
+    }
+}
+
+TEST_CASE("station core: refused flash work preserves every existing journal and does not retry itself", "[station]")
+{
+    const uint8_t kinds[] = { STN_FLASH_RETRY, STN_FLASH_RESTART, STN_FLASH_RECOVER };
+    for (unsigned i = 0; i < sizeof(kinds) / sizeof(kinds[0]); i++) {
+        sim_t w;
+        sim_init(&w, true);
+        sim_start(&w);
+        TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, kinds[i]));
+        stn_job_t j = sim_next(&w);
+        TEST_ASSERT_EQUAL(STN_JOB_FLASH, j.kind);
+        TEST_ASSERT_EQUAL_UINT8(kinds[i], j.flash_kind);
+        /* job_flash refuses the safety lockout before any receiver work:
+         * the original journal is still open and the job changed nothing. */
+        stn_result_t r = flash_end(STN_FLASH_END_NOTHING, false);
+        sim_done(&w, &r);
+        TEST_ASSERT_EQUAL(STN_FLASH_RECOVERY, w.s.state);
+        TEST_ASSERT_TRUE(w.s.paused);
+        TEST_ASSERT_FALSE(stn_flash_pending(&w.s));
+        TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job(&w, 600).kind);
+        TEST_ASSERT_FALSE(has_note(&w, STN_NOTE_FLASH_CLOSE, NULL));
+        TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w.s, kinds[i]));   /* only a new request retries it */
+    }
 }
 
 TEST_CASE("station core: an update runs as FLASHING, then re-applies whatever autocfg says and closes after its check", "[station]")

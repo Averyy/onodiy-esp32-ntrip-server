@@ -82,7 +82,7 @@ function renderTopActions() {
   const themeBtn = h('button', { type: 'button', class: 'icon-btn', title: 'Light or dark', 'aria-label': 'Switch between light and dark',
     onclick: toggleTheme }, '◐');
   if (isAdmin()) {
-    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small ghost', onclick: logout }, 'Logout'));
+    mount(box, themeBtn, h('button', { type: 'button', class: 'btn small ghost', onclick: logout, disabled: logoutBusy }, 'Logout'));
   } else if (S.publicView) {
     mount(box, themeBtn, h('button', { type: 'button', class: 'btn small', onclick: () => showLogin() }, 'Login'));
   } else {
@@ -807,14 +807,30 @@ bus.on('rebooting', () => {
 
 /* ---- Login / logout ---------------------------------------------------- */
 
+let logoutBusy = false;
+
 async function logout() {
+  if (logoutBusy) return;
+  logoutBusy = true;
+  live.stop();
+  forgetSecrets();
+  bare(h('div', { class: 'narrow' }, pageCard('Logging out', h('p', null, 'Waiting for the station…'))));
+  let failed = null;
   try {
     await api('DELETE', '/api/session', undefined, { quiet401: true });
   } catch (e) {
-    /* the session is gone either way */
+    /* A lost response may follow a successful logout. An explicit retry
+     * then answers 401; every other failure leaves the cookie uncertain. */
+    if (!(e instanceof ApiError && e.status === 401)) failed = e;
+  } finally {
+    logoutBusy = false;
   }
-  live.stop();
-  forgetSecrets();
+  if (failed) {
+    bare(h('div', { class: 'narrow' }, pageCard('Logout not confirmed',
+      h('p', null, 'The station may still recognize this browser. Retry logout when it is reachable.'),
+      msg('warn', errText(failed)), h('div', { class: 'form-actions' }, btn('Retry logout', logout, 'primary')))));
+    return;
+  }
   S.session = Object.assign({}, S.session, { authenticated: false });
   showLogin();
 }

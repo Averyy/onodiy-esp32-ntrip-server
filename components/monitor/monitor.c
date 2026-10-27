@@ -37,6 +37,7 @@
 #include "lwip/prot/icmp.h"
 #include "lwip/sockets.h"
 #include "monitor_core.h"
+#include "monitor_targets.h"
 #include "network.h"
 #include "ntrip_server.h"
 
@@ -132,7 +133,7 @@ static monitor_ping_t ping(uint32_t addr, uint16_t *ms)
  * lookup found one, else the first enabled slot's (IPv4 only). No enabled
  * slot with an address means no server target; the internet probe still runs.
  */
-static bool server_target(uint32_t *addr, char *name, size_t size)
+bool monitor_server_target(uint32_t *addr, char *name, size_t size)
 {
     ntrip_caster_cfg_t cfg;
     ntrip_caster_status_t st;
@@ -206,7 +207,7 @@ static void monitor_task(void *arg)
             s.internet = ping(inet_addr(MONITOR_INTERNET_IP), &s.internet_ms);
         }
         char name[sizeof(s_summary.server_name)] = "";
-        if (network_is_online() && server_target(&addr, name, sizeof(name))) {   /* offline: no sample, not a loss */
+        if (network_is_online() && monitor_server_target(&addr, name, sizeof(name))) {   /* offline: no sample, not a loss */
             s.server = ping(addr, &s.server_ms);
         }
         network_status_t ns;

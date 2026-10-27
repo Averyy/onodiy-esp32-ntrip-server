@@ -6,9 +6,9 @@
 # record) are pure logic on the public config type; all three are also
 # compiled into the host test app.
 idf_component_register(
-    SRCS "ntrip_server.c" "ntrip_proto.c" "ntrip_host_rules.c" "ntrip_cfg_blob.c"
+    SRCS "ntrip_server.c" "ntrip_proto.c" "ntrip_host_rules.c" "ntrip_cfg_blob.c" "ntrip_tx_diag_core.c" "ntrip_io.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
-    REQUIRES esp_event
-    PRIV_REQUIRES rtcm_hub settings lifecycle ledger diag esp-tls mbedtls esp_netif esp_wifi lwip esp_timer
+    REQUIRES esp_event rtcm_hub tcp_diag
+    PRIV_REQUIRES settings lifecycle ledger diag esp-tls mbedtls esp_netif esp_wifi lwip esp_timer
                   esp_app_format)

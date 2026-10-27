@@ -258,7 +258,7 @@ static void rate_tick(void *arg)
 }
 
 /* Bits per second the hub took in over the last minute (up to now). The ring
- * is read in place: a copy would put its 728 bytes on the caller's stack. */
+ * is read in place rather than copying lcast_rate_t onto the caller's stack. */
 static uint32_t bitrate_now(void)
 {
     rtcm_hub_stats_t hs;

@@ -179,7 +179,7 @@ const ctx = {
   fetch: async (p, init) => {
     const body = init.body ? JSON.parse(init.body) : null;
     sent.push({ path: p, method: init.method, body: body });
-    const r = routes ? routes(init.method, p, body) : [200, { slot: 0, config: {} }];
+    const r = routes ? await routes(init.method, p, body) : [200, { slot: 0, config: {} }];
     if (r === 'abort') {   /* no answer before the page's timeout */
       const e = new Error('aborted');
       e.name = 'AbortError';
@@ -195,6 +195,7 @@ const ui = vm.runInContext('"use strict";\n(function () {\n' + src +
   '  publicDashboard, noReceiverPanel, startWizard, manageCtl, eventCard, healthCard, chipCard, signalsHead, bandTable, kv,\n' +
   '  startLines, foldRows, diagReceiverCard, receiverPage, renderLive, roverSummary, roverEditor, noticeItems,\n' +
   '  settingsPage: (el, arg) => Views.settings.create(el, arg), ntripPage: (el, arg) => Views.ntrip.create(el, arg),\n' +
+  '  dashboardPage: el => Views.dashboard.create(el), logout, isAdmin, shell, live, shownSecrets, secretValue, updatesPart, bus,\n' +
   '  setStatus: s => { S.status = s; }, setSession: s => { S.session = s; },\n' +
   '  setLive: (age, started, page) => { S.statusAt = age === null ? 0 : Date.now() - age * 1000; shell.started = started;\n' +
   '    shell.current = page === null ? null : { name: page, arg: \'\', view: {} }; } };\n})()',
@@ -806,6 +807,146 @@ async function ntripRover(c) {
 const out = [];
 (async () => {
 for (const c of JSON.parse(casesJson)) {
+  if (c.fn === 'updates_flow') {
+    const settle = async () => { for (let i = 0; i < 40; i++) await new Promise(r => setImmediate(r)); };
+    const oldTimeout = ctx.setTimeout, oldClearTimeout = ctx.clearTimeout;
+    let timerId = 0;
+    const pendingTimers = new Map();
+    ctx.setTimeout = (fn, ms) => { pendingTimers.set(++timerId, { fn, ms }); return timerId; };
+    ctx.clearTimeout = id => pendingTimers.delete(id);
+    let current = c.initial, hold = '', pending = null, postReply = c.post || [202, { accepted: true }], postPending = null;
+    const start = sent.length;
+    routes = async (m, p) => {
+      if (m === 'POST') {
+        if (c.holdPost) await new Promise(r => { postPending = r; });
+        return postReply;
+      }
+      const answer = JSON.parse(JSON.stringify(p === '/api/update' ? current.update :
+        p === '/api/gnss/flash' ? current.flash : { staged: null }));
+      const error = p === '/api/update' ? current.updateError : p === '/api/gnss/flash' ? current.flashError : null;
+      if (p === hold) {
+        hold = '';
+        await new Promise(r => { pending = r; });
+      }
+      return error ? [error, { error: { code: 'internal' } }] : [200, answer];
+    };
+    ui.setStatus(c.status);
+    ui.setSession({ authenticated: true });
+    const part = ui.updatesPart.create('');
+    const root = new El('div');
+    root.append(part.cards.updates, part.cards.session);
+    await part.ready;
+    const snapshot = () => Object.assign(pageParts(root), { actions: [...visible(root)].filter(e => e.tagName === 'BUTTON')
+      .map(e => [e.textContent, !!e.disabled]) });
+    const states = [snapshot()], requests = () => sent.slice(start).map(x => [x.method, x.path]);
+    const counts = [requests()];
+    for (const step of c.steps) {
+      if (step.snapshot) current = step.snapshot;
+      if (step.interact !== undefined) ctx.document.activeElement = step.interact ? part.cards.session : null;
+      if (step.hold) hold = step.hold;
+      if (step.reload) for (let i = 0; i < step.reload; i++) part.reload();
+      if (step.poll) {
+        const [id, timer] = [...pendingTimers].find(([, t]) => t.ms === 10000);
+        pendingTimers.delete(id);
+        timer.fn();
+      }
+      if (step.event) ui.bus.emit('progress', step.event);
+      if (step.press || step.open) {
+        ids.modal = new El('div');
+        [...visible(root)].find(e => e.tagName === 'BUTTON' && e.textContent === (step.press || step.open)).fire('click');
+        await settle();
+        if (step.press) [...visible(ids.modal)].find(e => e.tagName === 'FORM').fire('submit');
+      }
+      if (step.confirm) [...visible(ids.modal)].find(e => e.tagName === 'FORM').fire('submit');
+      if (step.releasePost) { postPending(); postPending = null; }
+      if (step.release) { pending(); pending = null; }
+      if (step.destroy) part.destroy();
+      await settle();
+      states.push(snapshot());
+      counts.push(requests());
+    }
+    part.destroy();
+    out.push({ states, requests: counts });
+    routes = null;
+    ctx.setTimeout = oldTimeout;
+    ctx.clearTimeout = oldClearTimeout;
+    ctx.document.activeElement = null;
+    ui.setStatus(null);
+    continue;
+  }
+  if (c.fn === 'logout') {
+    /* Exercise the real logout/API/DOM path. The first request waits so
+     * duplicate clicks and clearing the old view are checked in flight. */
+    const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setImmediate(r)); };
+    for (const id of Object.keys(ids)) delete ids[id];
+    ui.setStatus(null);
+    ui.setSession({ authenticated: true, admin_set: true, public_status: false });
+    ui.shownSecrets.test = 'shown test password';
+    ids['view-body'] = new El('div');
+    ids['view-body'].append('shown test password');
+    let destroyed = 0, attempts = 0, serverSession = true, release, releaseSecret;
+    const pending = new Promise(r => { release = r; });
+    const secretPending = new Promise(r => { releaseSecret = r; });
+    ui.shell.started = true;
+    ui.shell.current = { name: 'ntrip', view: { destroy() { destroyed++; } } };
+    ui.live.running = true;
+    const start = sent.length;
+    routes = async (m, p) => {
+      if (c.secret && m === 'GET' && p === '/api/local-caster/password') {
+        await secretPending;
+        return c.secret === 'error' ? [503, { error: { code: 'internal' } }] : [200, { password: 'late test password' }];
+      }
+      if (m !== 'DELETE' || p !== '/api/session') throw new Error('unexpected logout request');
+      attempts++;
+      if (attempts === 1) {
+        await pending;
+        if (c.first === 'lost_response') serverSession = false;
+        if (c.first === 'lost_request' || c.first === 'lost_response') throw new TypeError('connection lost');
+        if (c.first === 'timeout') return 'abort';
+        if (c.first === 'http_error') return [503, { error: { code: 'internal' } }];
+        if (c.first === 'unauthorized') serverSession = false;
+      }
+      if (!serverSession) return [401, { error: { code: 'unauthorized' } }];
+      serverSession = false;
+      return [200, { authenticated: false }];
+    };
+    if (c.secret) {
+      const parts = ui.secretValue('late', '/api/local-caster/password');
+      ids['view-body'].append(...parts);
+      parts[1].fire('click');
+      await settle();
+    }
+    const snapshot = () => ({ text: ids['view-body'].textContent, admin: ui.isAdmin(), serverSession,
+      attempts, secrets: Object.keys(ui.shownSecrets), stopped: !ui.live.running && !ui.shell.started, destroyed,
+      header: [...visible(ids['top-actions'])].filter(e => e.tagName === 'BUTTON').map(e => [e.textContent, e.disabled]) });
+    const first = ui.logout();
+    await settle();
+    const before = snapshot();
+    const duplicate = [...visible(ids['top-actions'])].find(e => e.tagName === 'BUTTON' && e.textContent === 'Logout');
+    duplicate.fire('click');
+    duplicate.fire('click');
+    await settle();
+    const duplicateAttempts = attempts;
+    release();
+    await first;
+    await settle();
+    releaseSecret();
+    await settle();
+    const after = snapshot();
+    let retried = null;
+    if (c.retry) {
+      [...visible(ids['view-body'])].find(e => e.tagName === 'BUTTON' && e.textContent === 'Retry logout').fire('click');
+      await settle();
+      retried = snapshot();
+    }
+    out.push({ before, duplicateAttempts, after, retried,
+      freshSecret: ui.secretValue('late', '/api/local-caster/password').map(e => e.textContent),
+      toasts: ids.toasts ? ids.toasts.textContent : '',
+      requests: sent.slice(start).map(r => [r.method, r.path]) });
+    routes = null;
+    ui.setSession(null);
+    continue;
+  }
   if (c.fn === 'rover_card') {
     out.push(roverCard(c));
     continue;
@@ -958,6 +1099,77 @@ for (const c of JSON.parse(casesJson)) {
     } finally {
       ui.reportClock(clock);
       ctx.document.querySelectorAll = select;
+    }
+    continue;
+  }
+  if (c.fn === 'dashboard_poll') {
+    /* Run the real Status view and poller with a controlled clock, using the
+     * same DOM/API harness as the page-rendering cases. */
+    const timeout = ctx.setTimeout, clearTimer = ctx.clearTimeout;
+    const addListener = ctx.document.addEventListener, removeListener = ctx.document.removeEventListener;
+    const previousRoutes = routes;
+    let now = 100000, timerId = 0, answer = c.live, fail = false, hold = false, view;
+    const scheduled = new Map(), visibility = new Set(), pending = [];
+    const clock = ui.reportClock(() => now);
+    ctx.setTimeout = (fn, ms) => { const id = ++timerId; scheduled.set(id, { fn, at: now + ms }); return id; };
+    ctx.clearTimeout = id => scheduled.delete(id);
+    ctx.document.addEventListener = (name, fn) => { if (name === 'visibilitychange') visibility.add(fn); };
+    ctx.document.removeEventListener = (name, fn) => { if (name === 'visibilitychange') visibility.delete(fn); };
+    ctx.document.visibilityState = c.hidden ? 'hidden' : 'visible';
+    const settle = async () => { for (let i = 0; i < 30; i++) await new Promise(r => setImmediate(r)); };
+    const satellite = p => p === '/api/gnss/live' || p === '/api/gnss/signals';
+    routes = (method, path) => {
+      if (satellite(path)) {
+        if (hold) return new Promise(resolve => pending.push(resolve));
+        return fail ? [500, { error: { code: 'internal' } }] : [200, answer];
+      }
+      return [200, path === '/api/monitor' ? { buckets: 1 } : {}];
+    };
+    const root = new El('div'), states = [];
+    const capture = () => states.push({
+      requests: sent.filter(x => satellite(x.path)).map(x => x.path),
+      sky: root.querySelector('.sky-total')?.textContent || null,
+      warning: root.textContent.includes('Satellite details could not refresh'),
+      text: root.textContent,
+      listeners: visibility.size,
+    });
+    try {
+      sent.length = 0;
+      ui.setSession({ authenticated: c.admin });
+      ui.setStatus(c.status);
+      view = ui.dashboardPage(root);
+      await settle();
+      capture();
+      for (const action of c.actions) {
+        if (action.kind === 'reply') answer = action.value;
+        else if (action.kind === 'clock') now = action.value;
+        else if (action.kind === 'fail') fail = action.value;
+        else if (action.kind === 'hold') hold = action.value;
+        else if (action.kind === 'resolve') pending.shift()([200, answer]);
+        else if (action.kind === 'visible') {
+          ctx.document.visibilityState = action.value ? 'visible' : 'hidden';
+          for (const fn of [...visibility]) fn();
+        } else if (action.kind === 'tick') {
+          now += action.ms;
+          for (const [id, t] of [...scheduled]) {
+            if (t.at <= now) { scheduled.delete(id); t.fn(); }
+          }
+        } else if (action.kind === 'destroy') view.destroy();
+        await settle();
+        capture();
+      }
+      out.push(states);
+    } finally {
+      if (view) view.destroy();
+      for (const resolve of pending) resolve([200, answer]);
+      await settle();
+      ui.reportClock(clock);
+      ctx.setTimeout = timeout;
+      ctx.clearTimeout = clearTimer;
+      ctx.document.addEventListener = addListener;
+      ctx.document.removeEventListener = removeListener;
+      ctx.document.visibilityState = 'visible';
+      routes = previousRoutes;
     }
     continue;
   }
@@ -1726,6 +1938,64 @@ SKY_LIVE = {
     "satellites": [{"sys": "gps", "prn": 12, "in_msm": True, "cnr_dbhz": {"l1": 44}, "el_deg": 45, "az_deg": 210,
                     "sky_cnr_dbhz": 44},
                    {"sys": "galileo", "prn": 5, "in_msm": True, "cnr_dbhz": {"l1": 40}, "el_deg": None, "az_deg": None}]}
+
+
+def test_status_satellites_refresh_visible_only_without_duplicate_requests():
+    changed = {**SKY_LIVE, "totals": {**SKY_LIVE["totals"], "tracked": 32}}
+    (states,) = run_editor([{"fn": "dashboard_poll", "status": BASE, "admin": True, "live": SKY_LIVE,
+                            "actions": [
+                                {"kind": "reply", "value": changed},
+                                {"kind": "tick", "ms": 5000},
+                                {"kind": "visible", "value": False},
+                                {"kind": "tick", "ms": 20000},
+                                {"kind": "visible", "value": True},
+                                {"kind": "visible", "value": True},
+                                {"kind": "tick", "ms": 4999},
+                                {"kind": "tick", "ms": 1},
+                                {"kind": "clock", "value": 50000},
+                                {"kind": "visible", "value": False},
+                                {"kind": "visible", "value": True},
+                            ]}])
+    assert states[0]["sky"] == "31satellites"
+    assert states[2]["sky"] == "32satellites"
+    assert [len(s["requests"]) for s in states] == [1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5]
+    assert all(p == "/api/gnss/live" for p in states[-1]["requests"])
+
+
+@pytest.mark.parametrize("admin", [True, False])
+def test_status_satellites_start_hidden_and_resume_the_correct_read_only_endpoint(admin):
+    (states,) = run_editor([{"fn": "dashboard_poll", "status": BASE, "admin": admin, "hidden": True,
+                            "live": SKY_LIVE if admin else {"systems": []}, "actions": [
+                                {"kind": "tick", "ms": 20000},
+                                {"kind": "visible", "value": True},
+                            ]}])
+    assert states[0]["requests"] == states[1]["requests"] == []
+    assert states[2]["requests"] == ["/api/gnss/live" if admin else "/api/gnss/signals"]
+
+
+def test_status_satellites_recover_from_errors_and_ignore_late_answers_after_leaving():
+    changed = {**SKY_LIVE, "totals": {**SKY_LIVE["totals"], "tracked": 32}}
+    late = {**SKY_LIVE, "totals": {**SKY_LIVE["totals"], "tracked": 33}}
+    actions = [
+        {"kind": "hold", "value": True}, {"kind": "tick", "ms": 5000},
+        {"kind": "visible", "value": False}, {"kind": "visible", "value": True},
+        {"kind": "tick", "ms": 5000}, {"kind": "reply", "value": changed},
+        {"kind": "hold", "value": False}, {"kind": "resolve"},
+        {"kind": "fail", "value": True}, {"kind": "tick", "ms": 5000},
+        {"kind": "fail", "value": False}, {"kind": "tick", "ms": 5000},
+        {"kind": "hold", "value": True}, {"kind": "tick", "ms": 5000},
+        {"kind": "destroy"}, {"kind": "reply", "value": late},
+        {"kind": "resolve"}, {"kind": "tick", "ms": 20000},
+    ]
+    (states,) = run_editor([{"fn": "dashboard_poll", "status": BASE, "admin": True,
+                            "live": SKY_LIVE, "actions": actions}])
+    assert all(len(states[i]["requests"]) == 2 for i in range(2, 9))
+    assert states[8]["sky"] == "32satellites"
+    assert states[10]["warning"]
+    assert not states[12]["warning"]
+    assert states[15]["listeners"] == 0
+    assert states[18]["text"] == states[15]["text"]
+    assert len(states[18]["requests"]) == len(states[15]["requests"]) == 5
 
 
 def test_sky_card():
@@ -3552,3 +3822,272 @@ def test_onocoy_retry_counts_down_without_fetching_or_rebuilding():
     assert r["states"] == [["Refresh in 35s", True], ["Refresh in 34s", True], ["Refresh in 1s", True],
                            ["Refresh", False], ["Refresh", False]]
     assert r["requests"] == 0
+
+
+@pytest.mark.parametrize("first", ["success", "unauthorized"])
+def test_logout_clears_the_page_immediately_and_waits_for_confirmation(first):
+    (r,) = run_editor([{"fn": "logout", "first": first}])
+    assert r["before"]["text"] == "Logging outWaiting for the station…"
+    assert r["before"]["secrets"] == [] and r["before"]["stopped"]
+    assert r["before"]["destroyed"] == 1
+    assert ["Logout", True] in r["before"]["header"]
+    assert r["before"]["admin"] and r["before"]["serverSession"]
+    assert r["duplicateAttempts"] == 1
+    assert not r["after"]["admin"] and not r["after"]["serverSession"]
+    assert "Admin password" in r["after"]["text"]
+    assert "Retry logout" not in r["after"]["text"]
+    assert r["requests"] == [["DELETE", "/api/session"]]
+
+
+@pytest.mark.parametrize("first", ["lost_request", "timeout", "http_error"])
+def test_logout_failure_is_explicit_and_only_the_retry_sends_another_delete(first):
+    (r,) = run_editor([{"fn": "logout", "first": first, "retry": True}])
+    assert r["before"]["secrets"] == [] and r["before"]["stopped"]
+    assert r["duplicateAttempts"] == 1
+    failed = r["after"]
+    assert failed["admin"] and failed["serverSession"] and failed["attempts"] == 1
+    assert "Logout not confirmed" in failed["text"]
+    assert "The station may still recognize this browser." in failed["text"]
+    assert "Retry logout" in failed["text"] and "Admin password" not in failed["text"]
+    assert failed["secrets"] == [] and failed["stopped"] and failed["destroyed"] == 1
+    assert not r["retried"]["admin"] and not r["retried"]["serverSession"]
+    assert "Admin password" in r["retried"]["text"]
+    assert r["requests"] == [["DELETE", "/api/session"]] * 2
+
+
+def test_logout_with_a_lost_response_is_confirmed_by_the_explicit_retry_401():
+    (r,) = run_editor([{"fn": "logout", "first": "lost_response", "retry": True}])
+    assert not r["after"]["serverSession"] and r["after"]["admin"]
+    assert "Logout not confirmed" in r["after"]["text"]
+    assert r["after"]["attempts"] == 1 and r["after"]["secrets"] == []
+    assert not r["retried"]["admin"] and "Admin password" in r["retried"]["text"]
+    assert r["requests"] == [["DELETE", "/api/session"]] * 2
+
+
+@pytest.mark.parametrize("first", ["success", "lost_request"])
+@pytest.mark.parametrize("secret", ["success", "error"])
+def test_logout_discards_a_password_or_error_returned_by_an_earlier_show_request(first, secret):
+    (r,) = run_editor([{"fn": "logout", "first": first, "secret": secret}])
+    assert r["after"]["secrets"] == []
+    assert "test password" not in r["after"]["text"]
+    assert r["freshSecret"] == ["", "Show"]
+    assert r["toasts"] == ""
+    assert r["requests"] == [["GET", "/api/local-caster/password"], ["DELETE", "/api/session"]]
+
+
+def update_snapshot(*, worker=False, session=False, check=False, journal="none", last=None, result=None, pct=0):
+    return {"update": {**SET_UPDATE, "gnss_job_active": worker,
+                       "state": "downloading_gnss" if worker else "idle", "progress_pct": pct, "last_result": result,
+                       "gnss": {**SET_UPDATE["gnss"], "available": True, "flash_available": True, "latest_build": 25735,
+                                "blocked": "journal_open" if journal != "none" else "none"}},
+            "flash": {"journal": journal, "session_running": session, "check_running": check, "last": last,
+                      "flash_available": True, "actions": {}, "progress": {"phase": "transferring", "pct": pct}}}
+
+
+UPDATE_LAST = {"outcome": "success", "firmware": "R4.10Build25735", "build": 25735, "reapply_ok": True,
+               "ended_unix": 1792678804, "ended_age_s": 0}
+
+
+def update_flow(initial, steps, **kwargs):
+    return {"fn": "updates_flow", "status": st_status(), "initial": initial, "steps": steps, **kwargs}
+
+
+def update_messages(state):
+    return " ".join(text for _, text in state["msgs"])
+
+
+def test_update_poll_reconciles_download_flash_and_completion_without_websocket_events():
+    (r,) = run_editor([update_flow(update_snapshot(worker=True, pct=10), [
+        {"snapshot": update_snapshot(worker=True, pct=60), "reload": 1},
+        {"snapshot": update_snapshot(session=True, journal="running", pct=70), "reload": 1},
+        {"snapshot": update_snapshot(last=UPDATE_LAST), "reload": 1},
+    ])])
+    assert "Downloading 60%" in r["states"][1]["progress"][0][0]
+    assert [x[0] for x in r["states"][2]["progress"]] == ["Receiver update: Transferring 70%"]
+    assert r["states"][3]["progress"] == []
+    assert "Updated: the receiver runs R4.10Build25735." in update_messages(r["states"][3])
+
+
+def test_queued_update_and_queued_flash_remain_active_before_phase_and_journal():
+    queued = update_snapshot(worker=True)
+    queued["update"]["state"] = "idle"
+    handoff = update_snapshot(session=True, pct=99)
+    (r,) = run_editor([update_flow(queued, [{"snapshot": handoff, "reload": 1}])])
+    assert r["states"][0]["progress"][0][0] == "Receiver package download: Downloading"
+    assert r["states"][1]["progress"][0][0] == "Receiver update: Checking"
+    assert "final result is unavailable" not in update_messages(r["states"][1])
+
+
+def test_update_poll_finishes_package_checks_and_waiting_sessions():
+    checked = {**UPDATE_LAST, "outcome": "checked", "check_only": True}
+    waiting = {**UPDATE_LAST, "outcome": "needs_user", "reason": "receiver needs a decision"}
+    cases = [update_flow(update_snapshot(check=True), [{"snapshot": update_snapshot(last=checked), "reload": 1}]),
+             update_flow(update_snapshot(session=True, journal="running"),
+                         [{"snapshot": update_snapshot(journal="waiting", last=waiting), "reload": 1}])]
+    good, stopped = run_editor(cases)
+    assert "The package passes every rule." in update_messages(good["states"][1])
+    assert "Stopped and waiting for your decision" in update_messages(stopped["states"][1])
+    assert good["states"][1]["progress"] == stopped["states"][1]["progress"] == []
+
+
+def test_new_external_download_does_not_inherit_an_older_flash_success():
+    failed = {"job": "gnss_update", "result": "download_failed", "message": "ESP_FAIL"}
+    (r,) = run_editor([update_flow(update_snapshot(session=True, journal="running"), [
+        {"snapshot": update_snapshot(last=UPDATE_LAST), "reload": 1},
+        {"snapshot": update_snapshot(worker=True, last=UPDATE_LAST), "reload": 1},
+        {"snapshot": update_snapshot(last=UPDATE_LAST, result=failed), "reload": 1},
+        {"event": {"job": "gnss_update", "phase": "downloading", "done": False}},
+        {"snapshot": update_snapshot(last=UPDATE_LAST, result=failed), "reload": 1},
+    ])])
+    assert "Receiver package:" in update_messages(r["states"][3])
+    assert "Updated:" not in update_messages(r["states"][3])
+    # An identical historical download failure cannot be assigned to another attempt.
+    assert "final result is unavailable" in update_messages(r["states"][5])
+    assert r["states"][5]["progress"] == []
+
+
+def test_update_without_a_fresh_result_reports_unknown_and_clears_active_progress():
+    historical = {**UPDATE_LAST, "ended_unix": None, "ended_age_s": 10}
+    older = {**historical, "ended_age_s": 20}
+    (r,) = run_editor([update_flow(update_snapshot(worker=True, last=historical), [
+        {"snapshot": update_snapshot(last=older), "reload": 1},
+    ])])
+    assert "final result is unavailable" in update_messages(r["states"][1])
+    assert "Updated:" not in update_messages(r["states"][1])
+    assert r["states"][1]["progress"] == []
+
+
+def test_fast_untimed_websocket_completion_survives_polling_and_late_handoff_event():
+    historical = {**UPDATE_LAST, "ended_unix": None}
+    done = {"job": "gnss_flash", "done": True, "result": "ok", **historical}
+    (r,) = run_editor([update_flow(update_snapshot(last=historical), [
+        {"event": done},
+        {"event": {"job": "gnss_update", "done": True, "result": "ok"}},
+        {"reload": 1},
+    ])])
+    for state in r["states"][1:]:
+        assert "Updated: the receiver runs R4.10Build25735." in update_messages(state)
+        assert "final result is unavailable" not in update_messages(state)
+        assert state["progress"] == []
+
+
+def test_update_reads_are_ordered_coalesced_and_stopped_on_destroy():
+    ordered, destroyed = run_editor([
+        update_flow(update_snapshot(), [{"hold": "/api/update", "reload": 1}, {"reload": 5}, {"release": True}]),
+        update_flow(update_snapshot(), [{"hold": "/api/update", "reload": 1}, {"reload": 5, "destroy": True}, {"release": True}]),
+    ])
+    initial = ordered["requests"][0]
+    assert initial == [["GET", "/api/update"], ["GET", "/api/gnss/flash"], ["GET", "/api/upload/gnss"]]
+    assert ordered["requests"][1] == ordered["requests"][2] == initial + [["GET", "/api/update"]]
+    assert ordered["requests"][3] == initial * 3  # held read plus one coalesced follow-up
+    assert destroyed["requests"][3] == initial + [["GET", "/api/update"]]
+
+
+def test_old_poll_cannot_end_a_newer_websocket_flow():
+    (r,) = run_editor([update_flow(update_snapshot(), [
+        {"hold": "/api/gnss/flash", "reload": 1},
+        {"hold": "/api/update", "reload": 1, "event": {"job": "gnss_update", "phase": "downloading", "done": False}},
+        {"release": True},
+        {"release": True},
+    ])])
+    assert "Downloading" in r["states"][3]["progress"][0][0]
+    assert "final result is unavailable" not in update_messages(r["states"][3])
+
+
+def test_late_post_ack_does_not_reopen_a_websocket_completed_receiver_update():
+    done = {"job": "gnss_flash", "done": True, "result": "ok", **UPDATE_LAST}
+    (r,) = run_editor([update_flow(update_snapshot(), [
+        {"press": "Update receiver"}, {"event": done},
+        {"snapshot": update_snapshot(last=UPDATE_LAST), "hold": "/api/update", "releasePost": True},
+        {"release": True},
+    ], holdPost=True)])
+    assert "Updated:" in update_messages(r["states"][3])
+    assert all("Downloading" not in label for label, _ in r["states"][3]["progress"])
+    assert r["states"][4]["progress"] == []
+
+
+def test_refused_receiver_request_keeps_history_and_clear_does_not_invent_an_update():
+    clear = update_snapshot(journal="waiting")
+    clear["flash"]["actions"] = {"clear": {"allowed": True}}
+    denied, cleared = run_editor([
+        update_flow(update_snapshot(last=UPDATE_LAST), [{"press": "Update receiver"}],
+                    post=[409, {"error": {"code": "busy"}}]),
+        update_flow(clear, [{"press": "Clear the session"},
+                            {"snapshot": update_snapshot(), "releasePost": True}], holdPost=True),
+    ])
+    assert "Updated:" in update_messages(denied["states"][1])
+    assert "final result is unavailable" not in update_messages(denied["states"][1])
+    assert "final result is unavailable" not in update_messages(cleared["states"][2])
+
+
+def waiting_update_snapshot():
+    snap = update_snapshot(journal="waiting")
+    snap["flash"] = {**SET_FLASH, "session_running": False, "check_running": False}
+    return snap
+
+
+def test_failed_session_refresh_keeps_last_session_but_disables_recovery_and_keeps_update_data():
+    waiting = waiting_update_snapshot()
+    failed = {**waiting, "flashError": 503,
+              "update": {**waiting["update"], "app": {**waiting["update"]["app"], "running": "v0.4.0"}}}
+    (r,) = run_editor([update_flow(waiting, [{"snapshot": failed, "reload": 1}, {"snapshot": waiting, "reload": 1}])])
+    stale = r["states"][1]
+    assert "Receiver update session" in stale["cards"]
+    assert ["Expected firmware", "R4.10Build19152"] in stale["rows"]
+    assert "The displayed session is the last known state." in update_messages(stale)
+    for action in ("Flash again", "Restart the receiver", "Clear the session"):
+        assert [action, True] in stale["actions"]
+        assert [action, False] in r["states"][2]["actions"]
+    assert any(title == "App v0.4.0" for title, _ in stale["settings"])
+    assert "could not refresh" not in update_messages(r["states"][2])
+
+
+def test_first_session_refresh_failure_shows_unknown_until_a_successful_read():
+    waiting = waiting_update_snapshot()
+    (r,) = run_editor([update_flow({**waiting, "flashError": 503}, [{"snapshot": waiting, "reload": 1}])])
+    assert "Receiver update session" in r["states"][0]["cards"]
+    assert "The current session state is unknown." in update_messages(r["states"][0])
+    assert "Flash again" not in r["states"][0]["buttons"]
+    assert ["Flash again", False] in r["states"][1]["actions"]
+    assert "could not refresh" not in update_messages(r["states"][1])
+
+
+def test_periodic_session_refresh_safety_changes_render_while_keyboard_focus_holds_other_updates():
+    waiting = waiting_update_snapshot()
+    (r,) = run_editor([update_flow(waiting, [
+        {"snapshot": {**waiting, "flashError": 503}, "interact": True, "poll": True},
+        {"snapshot": waiting, "poll": True},
+    ])])
+    assert "could not refresh" in update_messages(r["states"][1])
+    assert ["Clear the session", True] in r["states"][1]["actions"]
+    assert "could not refresh" not in update_messages(r["states"][2])
+    assert ["Clear the session", False] in r["states"][2]["actions"]
+
+
+@pytest.mark.parametrize("change", ["failed", "disallowed", "different_session"])
+def test_recovery_confirmation_rechecks_freshness_admission_and_session_before_sending(change):
+    waiting = waiting_update_snapshot()
+    if change == "failed":
+        updated = {**waiting, "flashError": 503}
+    elif change == "disallowed":
+        updated = {**waiting, "flash": {**waiting["flash"], "actions": {"clear": {"allowed": False, "why": "busy"}}}}
+    else:
+        updated = {**waiting, "flash": {**waiting["flash"], "record": {**waiting["flash"]["record"], "sha256": "changed"}}}
+    (r,) = run_editor([update_flow(waiting, [
+        {"open": "Clear the session"}, {"snapshot": updated, "reload": 1}, {"confirm": True},
+    ])])
+    assert not any(method == "POST" for method, _ in r["requests"][-1])
+
+
+def test_same_phase_progress_counters_do_not_starve_slow_reads_or_move_progress_backwards():
+    next_snap = update_snapshot(worker=True, pct=20)
+    next_snap["update"]["app"] = {**next_snap["update"]["app"], "running": "v0.4.0"}
+    (r,) = run_editor([update_flow(update_snapshot(worker=True, pct=10), [
+        {"event": {"job": "gnss_update", "phase": "downloading", "done": False, "pct": 10}},
+        {"snapshot": next_snap, "hold": "/api/gnss/flash", "reload": 1},
+        {"event": {"job": "gnss_update", "phase": "downloading", "done": False, "pct": 90}},
+        {"release": True},
+    ])])
+    last = r["states"][-1]
+    assert any(title == "App v0.4.0" for title, _ in last["settings"])
+    assert last["progress"][0][0] == "Receiver package download: Downloading 90%"

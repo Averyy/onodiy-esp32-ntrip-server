@@ -24,6 +24,7 @@
 #include "lifecycle.h"
 #include "local_caster.h"
 #include "monitor.h"
+#include "monitor_diag.h"
 #include "onocoy_report.h"
 #include "network.h"
 #include "ntrip_server.h"
@@ -44,6 +45,14 @@ extern "C" {
 
 /** Upper bound of caster slots (CONFIG_NTRIP_MAX_CASTERS range). */
 #define WEB_MAX_SLOTS 8u
+
+/* Admin-only diagnostic response. Snapshots are captured independently: their
+ * monotonic timestamps, not request time, establish the sampling interval. */
+void web_build_monitor_diag(wj_t *w, const monitor_diag_status_t *status,
+                           const monitor_diag_sample_t *samples, size_t count,
+                           const ntrip_tx_diag_t *tx,
+                           const ntrip_tx_write_diag_t history[][NTRIP_TX_DIAG_HISTORY],
+                           const size_t *history_count, const int *history_error, size_t slots);
 
 /* ---- session ------------------------------------------------------------------------ */
 

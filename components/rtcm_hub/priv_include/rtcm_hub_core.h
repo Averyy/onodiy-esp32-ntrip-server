@@ -9,8 +9,9 @@
  *
  * Ring: records {u16 len, u16 msg_type, u32 seq, u32 rx_ms, u32 epoch} +
  * frame bytes, padded to 4. msg_type holds the 12-bit message number
- * (RTCM_CORE_REC_TYPE_MASK) and RTCM_CORE_REC_UNSURE when the record belongs
- * to an unsure epoch (rtcm_epoch.h); readers mask the number with
+ * (RTCM_CORE_REC_TYPE_MASK), RTCM_CORE_REC_UNSURE when the record belongs
+ * to an unsure epoch (rtcm_epoch.h), and RTCM_CORE_REC_EXACT for a UART
+ * interrupt arrival stamp; readers mask the number with
  * RTCM_CORE_REC_TYPE_MASK. A record never wraps: when it does not fit at the
  * end, a wrap marker (len 0xFFFF) fills the rest and the record starts at
  * offset 0. Offsets are monotonic 64-bit byte counts; ring position = offset
@@ -61,6 +62,7 @@
 
 #include "gnss_framing.h"
 #include "rtcm_epoch.h"
+#include "rtcm_hub_meta.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,6 +77,7 @@ extern "C" {
 #define RTCM_CORE_WRAP_MARKER     0xFFFFu
 #define RTCM_CORE_REC_TYPE_MASK   0x0FFFu  /**< message number bits of a record's msg_type */
 #define RTCM_CORE_REC_UNSURE      0x8000u  /**< record flag: its epoch is unsure (rtcm_epoch.h) */
+#define RTCM_CORE_REC_EXACT       0x4000u  /**< record flag: UART arrival stamp, not reader time */
 #define RTCM_CORE_STICKY_SLOTS    3u       /**< 1005/1006, 1033, 1230, replayed in this order */
 #define RTCM_CORE_STICKY_MAX_AGE_MS 30000u /**< an older sticky copy is never replayed */
 #define RTCM_CORE_LAG_MIN_MS      100u
@@ -172,6 +175,7 @@ typedef struct {
     uint8_t buf[2][GNSS_RTCM3_MAX_FRAME];
     uint16_t len[2];
     uint64_t rx_ms[2];
+    bool exact[2];
     uint8_t active;
     bool valid;
     uint32_t gen;
@@ -265,6 +269,10 @@ bool rtcm_core_wake_passed(rtcm_core_t *c, uint32_t gen);
  * @return bytes copied, 0 if nothing is available.
  */
 size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len, uint64_t now_ms);
+
+/** Identical read, plus arrival metadata for delivered bytes; meta may be NULL. */
+size_t rtcm_core_read_with_meta(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len,
+                                uint64_t now_ms, rtcm_hub_read_meta_t *meta);
 
 /** Re-position as on attach; everything unread counts as idle skips; ends finishing (owner task). */
 void rtcm_core_resync(rtcm_core_t *c, rtcm_core_consumer_t *k);

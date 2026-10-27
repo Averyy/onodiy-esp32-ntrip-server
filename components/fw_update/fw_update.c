@@ -793,6 +793,7 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
     }
     fw_lock();
     out->state = g_fw.state;
+    out->gnss_job_active = g_fw.busy && (g_fw.job == FW_JOB_INSTALL_GNSS || g_fw.job == FW_JOB_RESTAGE_GNSS);
     out->last_err = g_fw.last_err;
     out->progress_pct = g_fw.progress_pct;
     out->last_check_unix = g_fw.last_check_unix;

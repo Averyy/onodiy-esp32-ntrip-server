@@ -6,12 +6,110 @@
 #include <string.h>
 
 #include "rtcm_hub_core.h"
+#include "fixture_util.h"
 #include "rtcm_test_frames.h"
 #include "unity.h"
 
 #define RING_MAX   (128u * 1024u)
 #define GOT_MAX    8192u
 #define READ_MAX   16384u
+
+TEST_CASE("hub: arrival metadata preserves recorded bytes and cursors across timestamp wrap", "[rtcm_hub]")
+{
+    size_t input_len = 0;
+    uint8_t *input = fx_stream("centipede_ROBU1_35ep.rtcm3", &input_len);
+    fx_units_t units;
+    fx_frame(input, input_len, 137, &units);
+    rtcm_core_t *core = calloc(1, sizeof(*core));
+    uint8_t *ring = malloc(RING_MAX);
+    TEST_ASSERT_NOT_NULL(core);
+    TEST_ASSERT_NOT_NULL(ring);
+    rtcm_core_cfg_t cfg = { .gap_ms = 250, .default_lag_ms = 3000, .max_consumers = 2, .first_epoch = 1 };
+    TEST_ASSERT_TRUE(rtcm_core_init(core, ring, RING_MAX, &cfg, NULL));
+    rtcm_core_consumer_t *plain = rtcm_core_attach(core, "plain");
+    rtcm_core_consumer_t *diagnostic = rtcm_core_attach(core, "diagnostic");
+    uint8_t a[4096], b[4096];
+    uint64_t stamp = (uint64_t)UINT32_MAX - 1000u;
+    size_t delivered_observations = 0;
+    size_t exact_observations = 0;
+    size_t estimated_observations = 0;
+    for (size_t i = 0; i < units.n; i++) {
+        const fx_unit_t *u = &units.u[i];
+        if (u->kind != GNSS_FRAME_RTCM3) {
+            continue;
+        }
+        void *wake[RTCM_CORE_MAX_CONSUMERS];
+        size_t nw;
+        bool exact = (i & 1u) == 0;
+        TEST_ASSERT_TRUE(rtcm_core_publish(core, u->data, u->len, u->type, stamp, exact, wake, &nw));
+        rtcm_hub_read_meta_t meta;
+        size_t na = rtcm_core_read(core, plain, a, sizeof(a), stamp);
+        size_t nb = rtcm_core_read_with_meta(core, diagnostic, b, sizeof(b), stamp, &meta);
+        TEST_ASSERT_EQUAL_UINT32(na, nb);
+        if (na > 0) {
+            TEST_ASSERT_EQUAL_MEMORY(a, b, na);
+        }
+        TEST_ASSERT_EQUAL_UINT64(plain->rd, diagnostic->rd);
+        TEST_ASSERT_EQUAL_UINT64(plain->cnt.frames_out, diagnostic->cnt.frames_out);
+        TEST_ASSERT_EQUAL_UINT64(plain->cnt.frames_skipped_idle, diagnostic->cnt.frames_skipped_idle);
+        TEST_ASSERT_EQUAL_UINT64(plain->cnt.frames_dropped, diagnostic->cnt.frames_dropped);
+        if (meta.observations.frames > 0) {
+            TEST_ASSERT_EQUAL_UINT32(1, meta.observations.frames);
+            TEST_ASSERT_EQUAL_UINT32(1, meta.observations.timed_frames);
+            TEST_ASSERT_EQUAL_UINT32(exact ? 1 : 0, meta.observations.exact_frames);
+            TEST_ASSERT_EQUAL_UINT64(stamp, meta.observations.oldest_rx_ms);
+            TEST_ASSERT_EQUAL_UINT64(stamp, meta.observations.newest_rx_ms);
+            delivered_observations++;
+            exact_observations += exact ? 1u : 0u;
+            estimated_observations += exact ? 0u : 1u;
+        }
+        stamp += 10;
+    }
+    TEST_ASSERT_TRUE(stamp > UINT32_MAX);
+    TEST_ASSERT_TRUE(delivered_observations > 0);
+    TEST_ASSERT_TRUE(exact_observations > 0);
+    TEST_ASSERT_TRUE(estimated_observations > 0);
+    TEST_ASSERT_EQUAL_UINT64(0, core->corrupt);
+    rtcm_hub_read_meta_t empty;
+    memset(&empty, 0xff, sizeof(empty));
+    TEST_ASSERT_EQUAL_UINT32(0, rtcm_core_read_with_meta(core, diagnostic, b, sizeof(b), stamp, &empty));
+    TEST_ASSERT_EQUAL_UINT32(0, empty.live.frames);
+    TEST_ASSERT_EQUAL_UINT32(0, empty.observations.frames);
+    TEST_ASSERT_EQUAL_UINT32(0, empty.sticky.frames);
+    fx_units_free(&units);
+    free(input);
+    free(core);
+    free(ring);
+}
+
+TEST_CASE("hub: replayed metadata keeps original arrival quality apart from observations", "[rtcm_hub]")
+{
+    size_t len = 0;
+    uint8_t *frame = fx_read("rtcm/go-gnss_1005_frame.bin", &len);
+    rtcm_core_t *core = calloc(1, sizeof(*core));
+    uint8_t *ring = malloc(RTCM_CORE_MIN_RING);
+    TEST_ASSERT_NOT_NULL(core);
+    TEST_ASSERT_NOT_NULL(ring);
+    rtcm_core_cfg_t cfg = { .gap_ms = 250, .default_lag_ms = 3000, .max_consumers = 1, .first_epoch = 1 };
+    TEST_ASSERT_TRUE(rtcm_core_init(core, ring, RTCM_CORE_MIN_RING, &cfg, NULL));
+    void *wake[RTCM_CORE_MAX_CONSUMERS];
+    size_t nw;
+    TEST_ASSERT_TRUE(rtcm_core_publish(core, frame, len, 1005, 0, false, wake, &nw));
+    rtcm_core_consumer_t *k = rtcm_core_attach(core, "metadata");
+    uint8_t out[RTCM_CORE_MAX_REC];
+    rtcm_hub_read_meta_t meta;
+    TEST_ASSERT_EQUAL_UINT32(len, rtcm_core_read_with_meta(core, k, out, sizeof(out), 1000, &meta));
+    TEST_ASSERT_EQUAL_MEMORY(frame, out, len);
+    TEST_ASSERT_EQUAL_UINT32(0, meta.live.frames);
+    TEST_ASSERT_EQUAL_UINT32(0, meta.observations.frames);
+    TEST_ASSERT_EQUAL_UINT32(1, meta.sticky.frames);
+    TEST_ASSERT_EQUAL_UINT32(1, meta.sticky.timed_frames);   /* uptime zero is a valid stamp */
+    TEST_ASSERT_EQUAL_UINT32(0, meta.sticky.exact_frames);
+    TEST_ASSERT_EQUAL_UINT64(0, meta.sticky.oldest_rx_ms);
+    free(frame);
+    free(core);
+    free(ring);
+}
 
 /* ---- fixture ------------------------------------------------------------- */
 
@@ -182,7 +280,7 @@ static got_t *got_new(void)
 }
 
 /* One read; every delivered byte must belong to a whole, intact frame. */
-static size_t fx_read(fx_t *x, rtcm_core_consumer_t *k, size_t max_len, got_t *g)
+static size_t hub_fx_read(fx_t *x, rtcm_core_consumer_t *k, size_t max_len, got_t *g)
 {
     static uint8_t buf[READ_MAX];
     TEST_ASSERT_TRUE(max_len <= sizeof(buf));
@@ -208,7 +306,7 @@ static size_t fx_read(fx_t *x, rtcm_core_consumer_t *k, size_t max_len, got_t *g
 
 static void fx_drain(fx_t *x, rtcm_core_consumer_t *k, size_t max_len, got_t *g)
 {
-    for (int i = 0; i < 100000 && fx_read(x, k, max_len, g) > 0; i++) {
+    for (int i = 0; i < 100000 && hub_fx_read(x, k, max_len, g) > 0; i++) {
     }
 }
 
@@ -445,7 +543,7 @@ TEST_CASE("hub: a new consumer gets the sticky copies first, then the next epoch
     fx_t *y = fx_new(64 * 1024, 4, 3000, 1, 64);
     rtcm_core_consumer_t *e = rtcm_core_attach(&y->core, "early");
     g->n = 0;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(y, e, 4096, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(y, e, 4096, g));
     fx_burst(y, false, false, 100);
     fx_drain(y, e, 4096, g);
     TEST_ASSERT_EQUAL_UINT(0, g->n);
@@ -500,12 +598,12 @@ TEST_CASE("hub: sticky copies: 1006 replaces 1005, 30 s expiry, cleared on reset
     fx_pub(x, 1230, 900, false);
     rtcm_core_consumer_t *c = rtcm_core_attach(&x->core, "c");
     g->n = 0;
-    TEST_ASSERT_TRUE(fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g) > 0);
+    TEST_ASSERT_TRUE(hub_fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g) > 0);
     TEST_ASSERT_EQUAL_UINT(2, g->n);          /* 1006 + the large 1033 */
-    TEST_ASSERT_TRUE(fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g) > 0);
+    TEST_ASSERT_TRUE(hub_fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g) > 0);
     TEST_ASSERT_EQUAL_UINT(3, g->n);
     TEST_ASSERT_EQUAL_UINT16(1230, g->type[2]);
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, c, GNSS_RTCM3_MAX_FRAME, g));
 
     /* Framer reset: copies forgotten, and the next frame starts an epoch even
      * though it would otherwise continue the open one. That epoch is unsure
@@ -610,7 +708,7 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     const size_t one = GNSS_RTCM3_MAX_FRAME;   /* MSMs of 600+ bytes: one frame per read */
 
     fx_burst(x, false, false, 600);           /* epoch of serials 0..3 */
-    fx_read(x, k, one, g);
+    hub_fx_read(x, k, one, g);
     expect_range(g, 0, 1);                    /* partly delivered */
 
     for (int i = 0; i < 5; i++) {
@@ -620,7 +718,7 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     rtcm_core_consumer_stats_t st;
     for (uint32_t s = 1; s <= 3; s++) {
         g->n = 0;
-        fx_read(x, k, one, g);
+        hub_fx_read(x, k, one, g);
         expect_range(g, s, 1);
         if (s == 1) {
             st = cst(x, k);   /* age of the oldest unread frame: serial 2 */
@@ -635,11 +733,11 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     /* ... then the epochs over the limit go, whole, and the fresh one comes. */
     for (uint32_t s = 20; s <= 23; s++) {
         g->n = 0;
-        fx_read(x, k, one, g);
+        hub_fx_read(x, k, one, g);
         expect_range(g, s, 1);
     }
     g->n = 0;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, one, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, k, one, g));
     st = cst(x, k);
     TEST_ASSERT_EQUAL_UINT64(8, st.c.frames_out);
     TEST_ASSERT_EQUAL_UINT64(16, st.c.frames_dropped);
@@ -657,12 +755,12 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     x->now += 5;
     fx_pub(x, 1087, 600, true);
     x->now = start + 205;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, one, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, k, one, g));
     x->now = start + 210;                     /* within the burst gap: same epoch */
     fx_pub(x, 1097, 600, true);
     x->now += 5;
     fx_pub(x, 1127, 600, false);
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, one, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, k, one, g));
     x->bursts++;
     x->tow += 1000;
     x->next_at = start + 1000;
@@ -670,7 +768,7 @@ TEST_CASE("hub: the lag limit drops whole oldest epochs and finishes a partly se
     fx_burst(x, false, false, 600);
     for (uint32_t s = next; s < next + 4; s++) {
         g->n = 0;
-        fx_read(x, k, one, g);
+        hub_fx_read(x, k, one, g);
         expect_range(g, s, 1);
     }
     st = cst(x, k);
@@ -766,7 +864,7 @@ TEST_CASE("hub: a lapped consumer counts the loss and starts over with sticky co
     x->now += 5;
     fx_pub(x, 1033, 60, false);
     x->now = t0 + 205;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, d, 4096, NULL));   /* epoch start 205 ms old: dropped */
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, d, 4096, NULL));   /* epoch start 205 ms old: dropped */
     TEST_ASSERT_EQUAL_UINT64(1, cst(x, d).c.epochs_dropped);
     fx_pub(x, 1230, 12, false);               /* the rest of that epoch, within the burst gap */
     static const uint16_t msm[] = { 1077, 1087, 1097, 1127 };
@@ -817,7 +915,7 @@ TEST_CASE("hub: a frame overwritten while a consumer copies it is never delivere
         x->hook_at = at;
         x->unlocks = 0;
         x->hook_armed = true;
-        fx_read(x, k, 4096, NULL);            /* asserts whole, intact frames */
+        hub_fx_read(x, k, 4096, NULL);            /* asserts whole, intact frames */
         x->hook_armed = false;
         if (!x->hook_fired) {
             fx_free(x);
@@ -855,7 +953,7 @@ static void sim_read(fx_t *x, sim_t *c, got_t *g)
     for (int guard = 0; guard < 1000; guard++) {
         uint32_t laps_before = cst(x, c->k).c.laps;
         g->n = 0;
-        if (fx_read(x, c->k, c->buf, g) == 0) {
+        if (hub_fx_read(x, c->k, c->buf, g) == 0) {
             return;
         }
         bool lapped = cst(x, c->k).c.laps != laps_before;
@@ -1018,9 +1116,9 @@ TEST_CASE("hub: two-day run across the millisecond and epoch number wraps", "[rt
     fx_burst(x, false, false, 30);
     x->now += 50ull * 86400000ull;
     TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, cst(x, fast).lag_ms);
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, fast, 4096, NULL));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, fast, 4096, NULL));
     fx_burst(x, false, false, 30);
-    TEST_ASSERT_TRUE(fx_read(x, fast, 4096, NULL) > 0);
+    TEST_ASSERT_TRUE(hub_fx_read(x, fast, 4096, NULL) > 0);
     fx_free(x);
 }
 
@@ -1039,8 +1137,8 @@ TEST_CASE("hub: waiters are handed back once; detach waits for a running wake pa
 
     /* Sticky replay still pending right after attach: read first. */
     TEST_ASSERT_FALSE(rtcm_core_prepare_wait(h, a, wa));
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, a, 4096, NULL));
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, b, 4096, NULL));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, a, 4096, NULL));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, b, 4096, NULL));
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, a, wa));
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, b, wb));
 
@@ -1059,7 +1157,7 @@ TEST_CASE("hub: waiters are handed back once; detach waits for a running wake pa
     TEST_ASSERT_EQUAL_UINT(0, n);
     /* Data pending: no registration. */
     TEST_ASSERT_FALSE(rtcm_core_prepare_wait(h, a, wa));
-    TEST_ASSERT_TRUE(fx_read(x, a, 4096, NULL) > 0);
+    TEST_ASSERT_TRUE(hub_fx_read(x, a, 4096, NULL) > 0);
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(h, a, wa));
     rtcm_core_cancel_wait(h, a);
     TEST_ASSERT_TRUE(rtcm_core_publish(h, f, len, 1077, x->now, true, wake, &n));
@@ -1186,7 +1284,7 @@ TEST_CASE("hub: a consumer attached at boot, with the receiver mid-epoch, starts
     fx_t *x = fx_new(64 * 1024, 4, 3000, 1, 1024);
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, "boot");
     got_t *g = got_new();
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, 4096, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, k, 4096, g));
 
     /* The first bytes the station sees are an epoch's tail. */
     fx_tail(x, 0);
@@ -1316,8 +1414,8 @@ TEST_CASE("hub: records carry the unsure flag; a waiting consumer after a lap sk
     memcpy(&t0, x->ring + 2, sizeof(t0));
     size_t r1 = RTCM_CORE_REC_HDR + ((50u + 6u + 3u) & ~3u);
     memcpy(&t1, x->ring + r1 + 2, sizeof(t1));
-    TEST_ASSERT_EQUAL_HEX16(1077u | RTCM_CORE_REC_UNSURE, t0);
-    TEST_ASSERT_EQUAL_HEX16(1077u, t1);
+    TEST_ASSERT_EQUAL_HEX16(1077u | RTCM_CORE_REC_UNSURE | RTCM_CORE_REC_EXACT, t0);
+    TEST_ASSERT_EQUAL_HEX16(1077u | RTCM_CORE_REC_EXACT, t1);
     TEST_ASSERT_EQUAL_UINT16(1077, t0 & RTCM_CORE_REC_TYPE_MASK);
 
     /* Waiting with losses counted (as after a lap): unsure frames are losses. */
@@ -1385,7 +1483,7 @@ static rtcm_core_consumer_t *fx_attach_live(fx_t *x, const char *name)
 {
     rtcm_core_consumer_t *k = rtcm_core_attach(&x->core, name);
     TEST_ASSERT_NOT_NULL(k);
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, k, 4096, NULL));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, k, 4096, NULL));
     return k;
 }
 
@@ -1670,7 +1768,7 @@ TEST_CASE("hub: finishing inside an epoch sends its rest, never on quiet alone, 
     TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, b));
     x->now += 600;                    /* a quiet line does not end it: its rest comes late */
     ga->n = 0;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, a, 4096, ga));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, a, 4096, ga));
     TEST_ASSERT_FALSE(rtcm_core_at_hold(&x->core, a));
     fx_pub(x, 1097, 200, true);       /* 10 */
     x->now += 5;
@@ -1948,7 +2046,7 @@ TEST_CASE("hub: the release starts every consumer over: sticky copies, then the 
     /* A consumer attached during the hold gets nothing either, not even sticky copies. */
     rtcm_core_consumer_t *c = rtcm_core_attach(&x->core, "c");
     g->n = 0;
-    TEST_ASSERT_EQUAL_UINT(0, fx_read(x, c, 4096, g));
+    TEST_ASSERT_EQUAL_UINT(0, hub_fx_read(x, c, 4096, g));
     TEST_ASSERT_TRUE(rtcm_core_prepare_wait(&x->core, c, (void *)(uintptr_t)0xC0));   /* sticky pending, held: idle */
     rtcm_core_cancel_wait(&x->core, c);
     TEST_ASSERT_FALSE(rtcm_core_take_restart(a));

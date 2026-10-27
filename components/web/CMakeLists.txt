@@ -22,6 +22,7 @@ idf_component_register(
         "web_pw.c"
         "web_enums.c"
         "web_build.c"
+        "web_build_diag.c"
         "web_parse.c"
         "web_assets.c"
     INCLUDE_DIRS "include"

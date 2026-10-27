@@ -1760,13 +1760,13 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
         ["streaming", "ok", "Streaming"], ["no_caster", "warn", "No server"], ["no_receiver", "bad", "No receiver"]]
 
 
-def test_logs_three_parts_and_the_old_diagnostics_addresses():
-    """Overview, History and Console (the page is Logs: its live log cannot be "Logs" too); every address of
+def test_logs_parts_and_the_old_diagnostics_addresses():
+    """Overview, History, Console and Network; every address of
     Diagnostics and its parts lands where that content is now, so a bookmark keeps working."""
     out = run_ui([("logsTabs", None)] + [("moved", ["diag", a]) for a in
                                          ("", "history", "logs", "availability", "journal", "tasks", "coredump", "foo",
                                           "history/x")])
-    assert out[0] == ["Overview", "History", "Console"]
+    assert out[0] == ["Overview", "History", "Console", "Network"]
     assert out[1:] == ["logs", "logs/history", "logs/console", "logs/history", "logs/history", "logs", "logs", "logs",
                        "logs/history"]
 
@@ -1774,7 +1774,7 @@ def test_logs_three_parts_and_the_old_diagnostics_addresses():
 def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     """No button, link or notice points at an old address (it would only redirect) or a part a page does not have."""
     pages = {"": None, "ntrip": None, "receiver": {"settings", "live"},
-             "settings": {"updates", "session", "wifi", "restart"}, "logs": {"history", "console"}}
+             "settings": {"updates", "session", "wifi", "restart"}, "logs": {"history", "console", "network"}}
     # The places a part is opened at (#/receiver/settings/manage: the Receiver setup card).
     places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}
     bad = []

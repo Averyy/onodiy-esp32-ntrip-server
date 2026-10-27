@@ -11,6 +11,54 @@
 #include "settings_codec.h"
 #include "um98x_profile.h"
 
+bool stn_flash_lockout_reserve(stn_flash_lockout_t *lockout, bool busy)
+{
+    if (busy || lockout->request_reserved) {
+        return false;
+    }
+    lockout->request_reserved = true;
+    return true;
+}
+
+int stn_flash_lockout_take(stn_flash_lockout_t *lockout, const stn_flash_lockout_ops_t *ops)
+{
+    bool claimed_now = false;
+    if (!lockout->update_claimed) {
+        int err = ops->claim_update(ops->ctx);
+        if (err != 0) {
+            return err;
+        }
+        lockout->update_claimed = true;
+        claimed_now = true;
+    }
+    if (!lockout->inhibit_held) {
+        int token;
+        int err = ops->acquire_inhibit(ops->ctx, &token);
+        if (err != 0) {
+            if (claimed_now) {
+                lockout->update_claimed = false;
+                ops->release_update(ops->ctx);
+            }
+            return err;
+        }
+        lockout->inhibit = token;
+        lockout->inhibit_held = true;
+    }
+    return 0;
+}
+
+void stn_flash_lockout_release(stn_flash_lockout_t *lockout, const stn_flash_lockout_ops_t *ops)
+{
+    if (lockout->update_claimed) {
+        lockout->update_claimed = false;
+        ops->release_update(ops->ctx);
+    }
+    if (lockout->inhibit_held) {
+        lockout->inhibit_held = false;
+        ops->release_inhibit(ops->ctx, lockout->inhibit);
+    }
+}
+
 /* ---- small helpers -------------------------------------------------------- */
 
 static const uint32_t k_short_list[] = { 115200, 460800, 921600, 230400 };

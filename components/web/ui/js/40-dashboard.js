@@ -20,22 +20,49 @@
  * every colour on it goes grey (app.css, body.no-contact).
  */
 
+const DASH_SATELLITES_MS = 5000;
+
 Views.dashboard = {
   title: 'Status',
   create(el) {
     el.classList.add('status-page');
-    /* The public page's signals (GET /api/gnss/signals, open to visitors while public status is on). */
-    let sig = null;
-    const stopSig = isAdmin() ? null : poller(5000, async () => {
-      sig = await api('GET', '/api/gnss/signals');
-      render();
-    });
-    /* The Sky card's satellites (GET /api/gnss/live, admin only), read every 5 s. */
-    let live = null;
-    const stopLive = isAdmin() ? poller(5000, async () => {
-      live = await api('GET', '/api/gnss/live');
-      render();
-    }) : null;
+    let gone = false, sig = null, live = null, satelliteError = '';
+    let satelliteBusy = false, satelliteReadAt = 0;
+    /* Status WebSocket messages contain no satellite detail. One read every
+     * 5 s while visible: admin live data OR public signal totals, never both.
+     * Visibility resumes a due read immediately instead of waiting for a
+     * background-throttled timer. Guard both entry points against overlap. */
+    const loadSatellites = async () => {
+      const elapsed = Date.now() - satelliteReadAt;
+      if (gone || doc.visibilityState === 'hidden' || satelliteBusy ||
+          (satelliteReadAt && elapsed >= 0 && elapsed < DASH_SATELLITES_MS)) return;
+      satelliteBusy = true;
+      satelliteReadAt = Date.now();
+      try {
+        const admin = isAdmin();
+        /* The visible poll retries next time; no second request can start
+         * inside api() after the user has hidden or left this page. */
+        const data = await api('GET', admin ? '/api/gnss/live' : '/api/gnss/signals', undefined, { once: true });
+        if (gone || doc.visibilityState === 'hidden') return;
+        if (!data || typeof data !== 'object') throw new Error('The satellite response was incomplete.');
+        if (admin) live = data;
+        else sig = data;
+        satelliteError = '';
+        render();
+      } catch (e) {
+        if (!gone && doc.visibilityState !== 'hidden') {
+          satelliteError = errText(e);
+          render();
+        }
+      } finally {
+        satelliteBusy = false;
+      }
+    };
+    const stopSatellites = poller(DASH_SATELLITES_MS, loadSatellites);
+    const satellitesVisible = () => {
+      if (doc.visibilityState !== 'hidden') loadSatellites();
+    };
+    doc.addEventListener('visibilitychange', satellitesVisible);
     /* The Performance card's lines (GET /api/monitor, admin only): its buckets close every 5 min, so read every 5 min;
      * once more when the first reading came after an empty answer (the page opened right after a restart). */
     let mon = null, monAgain = false;
@@ -67,7 +94,6 @@ Views.dashboard = {
       render();
     };
     /* el is this visit's own (openView): after the page is left, nothing draws into the next one. */
-    let gone = false;
     const render = () => {
       const s = S.status;
       if (gone) return;
@@ -97,7 +123,8 @@ Views.dashboard = {
         monAgain = true;
         loadMon().catch(() => {});
       }
-      patchDetect(el, admin ? adminDashboard(s, st, openSlots, live, mon, report) : publicDashboard(s, st, sig));
+      patchDetect(el, satelliteError ? msg('warn', 'Satellite details could not refresh; displayed values may be old. ' + satelliteError) : null,
+        admin ? adminDashboard(s, st, openSlots, live, mon, report) : publicDashboard(s, st, sig));
     };
     detectClicks(el, render);
     dismissPowerClicks(el, render);
@@ -121,8 +148,8 @@ Views.dashboard = {
       update: render,
       destroy() {
         gone = true;
-        if (stopSig) stopSig();
-        if (stopLive) stopLive();
+        stopSatellites();
+        doc.removeEventListener('visibilitychange', satellitesVisible);
         if (stopMon) stopMon();
         if (stopReport) stopReport();
       },

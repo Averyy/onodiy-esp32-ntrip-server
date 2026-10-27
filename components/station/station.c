@@ -209,9 +209,7 @@ static bool s_started;
 
 /* Reboot inhibit and update slot held for an open flash session in full
  * lockout (taken again at boot). */
-static bool s_inhibit_held;
-static lifecycle_inhibit_t s_inhibit;
-static bool s_update_claimed;
+static stn_flash_lockout_t s_flash_lockout;
 
 /* RAW lease taken by the early boot step (recovery actions build only). */
 static gnss_link_lease_t s_boot_lease;
@@ -427,37 +425,73 @@ static bool journal_unknown(esp_err_t err)
     return err == ESP_ERR_INVALID_STATE;
 }
 
-/* Full lockout: reboot inhibit and the update slot, together. */
-static void lockout_take(void)
+static int lockout_claim_update(void *ctx)
 {
-    if (!s_update_claimed) {
-        esp_err_t err = lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER);
-        if (err == ESP_OK) {
-            s_update_claimed = true;
-        } else {
-            ESP_LOGE(TAG, "update slot for the open receiver flash not taken: %s", esp_err_to_name(err));
-        }
+    (void)ctx;
+    esp_err_t err = lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "update slot for the open receiver flash not taken: %s", esp_err_to_name(err));
     }
-    if (!s_inhibit_held) {
-        esp_err_t err = lifecycle_inhibit_acquire("receiver flash", &s_inhibit);
-        if (err == ESP_OK) {
-            s_inhibit_held = true;
-        } else {
-            ESP_LOGE(TAG, "reboot inhibit for the open receiver flash not taken: %s", esp_err_to_name(err));
-        }
+    return err;
+}
+
+static void lockout_release_update(void *ctx)
+{
+    (void)ctx;
+    lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
+}
+
+static int lockout_acquire_inhibit(void *ctx, int *token)
+{
+    (void)ctx;
+    esp_err_t err = lifecycle_inhibit_acquire("receiver flash", token);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "reboot inhibit for the open receiver flash not taken: %s", esp_err_to_name(err));
     }
+    return err;
+}
+
+static void lockout_release_inhibit(void *ctx, int token)
+{
+    (void)ctx;
+    lifecycle_inhibit_release(token);
+}
+
+static const stn_flash_lockout_ops_t s_lockout_ops = {
+    .claim_update = lockout_claim_update,
+    .release_update = lockout_release_update,
+    .acquire_inhibit = lockout_acquire_inhibit,
+    .release_inhibit = lockout_release_inhibit,
+};
+
+/* Full lockout: reboot inhibit and the update slot, together. */
+static esp_err_t lockout_take(void)
+{
+    return stn_flash_lockout_take(&s_flash_lockout, &s_lockout_ops);
 }
 
 static void lockout_release(void)
 {
-    if (s_update_claimed) {
-        s_update_claimed = false;
-        lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
-    }
-    if (s_inhibit_held) {
-        s_inhibit_held = false;
-        lifecycle_inhibit_release(s_inhibit);   /* a queued reboot may follow at once */
-    }
+    stn_flash_lockout_release(&s_flash_lockout, &s_lockout_ops);
+}
+
+/* Serialize request admission without nesting the lifecycle and station
+ * locks. Accepted/running work also excludes a new request: lifecycle's
+ * same-owner claim is idempotent, so a losing caller must not release it. */
+static bool lockout_reserve_request(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool ok = stn_flash_lockout_reserve(&s_flash_lockout,
+                                       s_flash_running || s_journal_clearing || stn_flash_pending(&s_core));
+    portEXIT_CRITICAL(&s_lock);
+    return ok;
+}
+
+static void lockout_unreserve_request(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_flash_lockout.request_reserved = false;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 /* A factory reset erased the settings (the reboot follows): receiver
@@ -2012,7 +2046,7 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
         flash_forget(true);   /* a failed validation releases the package */
         return;
     }
-    /* Pin, inhibit (the update slot is already ours), then the journal. */
+    /* The job holds the full lockout already. Pin before opening the journal. */
     err = pkg_store_set_pinned(true);
     if (err != ESP_OK) {
         r->flash_end = STN_FLASH_END_NOTHING;
@@ -2020,7 +2054,6 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
         flash_forget(true);
         return;
     }
-    lockout_take();
     um98x_flash_request_t fr;
     memset(&fr, 0, sizeof(fr));
     um98x_flash_journal_t *j = &fr.journal;
@@ -2048,15 +2081,13 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
 
 /* A user action or the boot-time recovery could not run (nothing was sent):
  * the journal waits for the user, in reduced lockout (the update slot the
- * action claimed is given back). A recovery that never ran is parked like a
- * report-only one, so the journal shows as waiting instead of running. */
-static void flash_not_run(uint8_t kind, const char *why)
+ * action claimed is given back). The unchanged record is parked, including
+ * a retry of a report-only recovery whose stored state is not NEEDS_USER. */
+static void flash_not_run(const char *why)
 {
-    if (kind == STN_FLASH_RECOVER) {
-        portENTER_CRITICAL(&s_lock);
-        s_journal_parked = true;
-        portEXIT_CRITICAL(&s_lock);
-    }
+    portENTER_CRITICAL(&s_lock);
+    s_journal_parked = true;
+    portEXIT_CRITICAL(&s_lock);
     lockout_release();
     flash_last_set(STATION_FLASH_OUT_NEEDS_USER, "not run: %s", why);
 }
@@ -2072,7 +2103,6 @@ static void flash_action(gnss_link_lease_t lease, uint8_t kind, stn_result_t *r)
     int plan = s_recover_plan;
     portEXIT_CRITICAL(&s_lock);
     fr.progress_cb = flash_progress_cb;
-    lockout_take();   /* the receiver is worked on again: full lockout until it waits or closes */
     um98x_flash_result_t res;
     esp_err_t err;
     switch (kind) {
@@ -2087,7 +2117,7 @@ static void flash_action(gnss_link_lease_t lease, uint8_t kind, stn_result_t *r)
         break;
     }
     if (err != ESP_OK) {
-        flash_not_run(kind, esp_err_to_name(err));   /* nothing sent: the journal still waits */
+        flash_not_run(esp_err_to_name(err));   /* nothing sent: the journal still waits */
         return;
     }
     if (res.end == UM98X_FLASH_END_NEEDS_USER && kind == STN_FLASH_RECOVER && res.journal.state != UM98X_JOURNAL_NEEDS_USER) {
@@ -2101,10 +2131,25 @@ static void job_flash(const stn_job_t *job, stn_result_t *r)
 {
     r->err = STN_OK;
     r->flash_end = STN_FLASH_END_NOTHING;
-    release_lease(&s_hold_lease, "listen-only");   /* the session's RAW lease replaces it */
     gnss_link_lease_t lease = NULL;
-    esp_err_t err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "receiver update", LEASE_WAIT_MS, &lease);
-    if (err != ESP_OK) {
+    /* Identify may send the loader's restart key too. Take both protections
+     * before any receiver operation, not just before the transfer begins. */
+    esp_err_t err = lockout_take();
+    bool lockout_ok = err == ESP_OK;
+    if (!lockout_ok) {
+        char why[80];
+        snprintf(why, sizeof(why), "the receiver update lockout was not acquired (%s)", esp_err_to_name(err));
+        if (job->flash_kind == STN_FLASH_NEW) {
+            flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "%s", why);
+            flash_forget(true);   /* prepare/pin have not run: release the staged package */
+        } else {
+            flash_not_run(why);   /* preserve the journal and its pinned package */
+        }
+    } else {
+        release_lease(&s_hold_lease, "listen-only");   /* the session's RAW lease replaces it */
+        err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "receiver update", LEASE_WAIT_MS, &lease);
+    }
+    if (lockout_ok && err != ESP_OK) {
         ESP_LOGE(TAG, "no RAW lease for the receiver update: %s", esp_err_to_name(err));
         if (job->flash_kind == STN_FLASH_NEW) {
             flash_last_set(STATION_FLASH_OUT_NOT_STARTED, "the receiver link was busy (%s)", esp_err_to_name(err));
@@ -2112,9 +2157,9 @@ static void job_flash(const stn_job_t *job, stn_result_t *r)
         } else {
             char why[48];
             snprintf(why, sizeof(why), "the receiver link was busy (%s)", esp_err_to_name(err));
-            flash_not_run(job->flash_kind, why);
+            flash_not_run(why);
         }
-    } else {
+    } else if (err == ESP_OK) {
         if (job->flash_kind == STN_FLASH_NEW) {
             flash_new(lease, r);
         } else {
@@ -2140,6 +2185,12 @@ static void job_flash(const stn_job_t *job, stn_result_t *r)
 /* STN_NOTE_FLASH_CLOSE: the re-apply was checked (ok) or gave up. */
 static void flash_close(bool reapply_ok)
 {
+    /* The core has finished the re-apply, but the old journal still keeps
+     * requests out. Reserve before flash_forget makes it absent, through
+     * releasing lifecycle ownership and posting this session's last event. */
+    portENTER_CRITICAL(&s_lock);
+    s_flash_lockout.request_reserved = true;
+    portEXIT_CRITICAL(&s_lock);
     uint8_t outcome;
     if (s_after_aborted) {
         outcome = STATION_FLASH_OUT_NOT_DONE;
@@ -2182,6 +2233,7 @@ static void flash_close(bool reapply_ok)
                    s_after_reason);
     flash_forget(true);   /* releases the lockout last */
     final_progress(outcome == STATION_FLASH_OUT_SUCCESS ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED);
+    lockout_unreserve_request();
 }
 
 /* Check only: rules 1-12 on the RAM copy against this boot's confirmed identity. */
@@ -3474,7 +3526,11 @@ static void flash_recovery_begin(void)
     portENTER_CRITICAL(&s_lock);
     jerr = s_journal_err;
     j = s_journal;
+    bool parked = s_journal_parked;
     portEXIT_CRITICAL(&s_lock);
+    if (parked) {
+        return;   /* an early lockout refusal waits for the user; never retry it automatically */
+    }
     if (jerr == ESP_OK && j.state != UM98X_JOURNAL_NEEDS_USER) {
         const char *text = NULL;
         lifecycle_boot_info_t boot;
@@ -3495,9 +3551,14 @@ static void flash_recovery_begin(void)
                  um98x_flash_journal_state_name(j.state), um98x_flash_journal_state_name(j.phase),
                  (unsigned)j.transfers, power ? "power-on" : "ESP32-only", text);
         portENTER_CRITICAL(&s_lock);
+        /* Publishing a parked journal enables retry/restart and clear.
+         * Keep their admission reserved until the old claim is released:
+         * lifecycle's same-owner claim must not be lost to that release. */
+        s_flash_lockout.request_reserved = true;
         s_journal_parked = true;
         portEXIT_CRITICAL(&s_lock);
         lockout_release();
+        lockout_unreserve_request();
     }
 }
 
@@ -3573,7 +3634,13 @@ esp_err_t station_early_boot(void)
     /* Full lockout for a session that is not waiting for the user: no
      * reboot may cut the recovery run short and no app update may start. */
     if (!journal_waits_for_user(jerr, &s_journal)) {
-        lockout_take();
+        esp_err_t err = lockout_take();
+        if (err != ESP_OK) {
+            char why[80];
+            snprintf(why, sizeof(why), "the receiver recovery lockout was not acquired (%s)", esp_err_to_name(err));
+            flash_not_run(why);
+            return err;   /* no boot race, and the station task leaves the journal parked */
+        }
     }
 
     lifecycle_boot_info_t boot;
@@ -4211,24 +4278,34 @@ esp_err_t station_request_flash(const station_flash_request_t *req)
     if (info.pinned) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* One update at a time across both chips: check and claim in one step. */
-    if (lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+    if (!lockout_reserve_request()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* One update at a time across both chips. Admission is reserved until
+     * the job owns the claim, or this attempt has unwound its own claim. */
+    bool claimed_now = !s_flash_lockout.update_claimed;
+    if (claimed_now && lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+        lockout_unreserve_request();
         return ESP_ERR_INVALID_STATE;
     }
     portENTER_CRITICAL(&s_lock);
     int rc = stn_request_flash(&s_core, STN_FLASH_NEW);
     if (rc == STN_OK) {
+        s_flash_lockout.update_claimed = true;   /* publish ownership with the job, before the task can take it */
         s_flash_req = *req;
         memset(&s_flash_last, 0, sizeof(s_flash_last));
         s_flash_last_us = INT64_MIN;
         s_flash_running = true;
+        s_flash_lockout.request_reserved = false;
     }
     portEXIT_CRITICAL(&s_lock);
     if (rc != STN_OK) {
-        lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
+        if (claimed_now) {
+            lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
+        }
+        lockout_unreserve_request();
         return ESP_ERR_INVALID_STATE;
     }
-    s_update_claimed = true;
     ESP_LOGW(TAG, "receiver update to %s requested by the user", req->expected_fw);
     wake();
     return ESP_OK;
@@ -4420,6 +4497,7 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
          * clear is done. */
         portENTER_CRITICAL(&s_lock);
         bool busy = journal_unknown(s_journal_err) || s_journal_clearing || s_flash_running ||
+                    s_flash_lockout.request_reserved ||
                     (s_inited && (!journal_waits_for_user(s_journal_err, &s_journal) || stn_flash_pending(&s_core)));
         if (!busy) {
             s_journal_clearing = true;
@@ -4469,17 +4547,24 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
         if (!station_flash_available()) {
             return ESP_ERR_NOT_SUPPORTED;   /* this build sends nothing to the receiver's loader */
         }
+        if (!lockout_reserve_request()) {
+            return ESP_ERR_INVALID_STATE;
+        }
         /* The session is the receiver's again: one update at a time (an app update may not start meanwhile). */
         bool claimed_now = false;
-        if (!s_update_claimed) {
+        if (!s_flash_lockout.update_claimed) {
             if (lifecycle_update_claim(LIFECYCLE_UPDATE_RECEIVER) != ESP_OK) {
+                lockout_unreserve_request();
                 return ESP_ERR_INVALID_STATE;
             }
-            s_update_claimed = true;
+            s_flash_lockout.update_claimed = true;
             claimed_now = true;
         }
         portENTER_CRITICAL(&s_lock);
-        int rc = (s_journal_clearing || s_flash_running)
+        /* A clear may have completed between the first eligibility check
+         * and our reservation: never publish work for its old journal. */
+        int rc = (s_journal_clearing || s_flash_running || s_journal_err != ESP_OK ||
+                  !journal_waits_for_user(s_journal_err, &s_journal))
                      ? STN_E_STATE
                      : stn_request_flash(&s_core, action == STATION_FLASH_ACTION_RETRY ? STN_FLASH_RETRY
                                                                                        : STN_FLASH_RESTART);
@@ -4490,13 +4575,15 @@ esp_err_t station_flash_user_action(station_flash_action_t action)
              * and the job's final message tell how the action ends. */
             memset(&s_flash_last, 0, sizeof(s_flash_last));
             s_flash_last_us = INT64_MIN;
+            s_flash_lockout.request_reserved = false;
         }
         portEXIT_CRITICAL(&s_lock);
         if (rc != STN_OK) {
             if (claimed_now) {
-                s_update_claimed = false;
+                s_flash_lockout.update_claimed = false;
                 lifecycle_update_release(LIFECYCLE_UPDATE_RECEIVER);
             }
+            lockout_unreserve_request();
             return ESP_ERR_INVALID_STATE;
         }
         ESP_LOGW(TAG, "receiver update: the user's %s", action == STATION_FLASH_ACTION_RETRY ? "retry (same package)"

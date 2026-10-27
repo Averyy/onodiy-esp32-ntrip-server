@@ -142,6 +142,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "rtcm_hub_meta.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -234,6 +235,12 @@ void rtcm_hub_detach(rtcm_hub_consumer_t consumer);
  */
 esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_len,
                         size_t *out_len, uint32_t timeout_ms);
+
+/** Same read and cursor policy, with metadata only for bytes actually copied.
+ * Arrival timestamps describe UART arrival, never remote receipt or GNSS
+ * observation age. meta may be NULL; it is cleared even on an empty read. */
+esp_err_t rtcm_hub_read_with_meta(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_len,
+                                  size_t *out_len, uint32_t timeout_ms, rtcm_hub_read_meta_t *meta);
 
 /**
  * Re-position a consumer as on attach (sticky metadata, then the next epoch

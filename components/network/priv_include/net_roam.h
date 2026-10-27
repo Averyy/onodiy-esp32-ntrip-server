@@ -26,10 +26,13 @@
  *    cfg.weak_dbm for NET_ROAM_WEAK_HOLD_S. It then scans for its network
  *    (scanning while connected stalls traffic for a second or two, so it is
  *    rare): first NET_ROAM_SETTLE_S after the association at the earliest,
- *    then every NET_ROAM_SCAN_MESH_S once another access point of the
- *    network was seen during this association, else every
- *    NET_ROAM_SCAN_SOLO_S (a plain network with one access point and a weak
- *    signal: four scans a day). When two scans in a row, NET_ROAM_CONFIRM_S
+ *    then after successful searches without a candidate at 10 min, 30 min,
+ *    1 h, 3 h, 6 h, 12 h and at most once per 24 h. A network where no
+ *    other access point was seen starts at the 6 h step. A sustained
+ *    deterioration of the smoothed signal starts the short schedule again;
+ *    crossing the weak threshold or a hold alone never does. The schedule
+ *    lives in RAM and starts over on each association. Two scans in a row,
+ *    NET_ROAM_CONFIRM_S
  *    apart, each find an access point at least cfg.gain_db stronger than
  *    the current one (its scan reading or the average, whichever is
  *    higher), the station reconnects: the connect scan joins the strongest
@@ -39,8 +42,8 @@
  *    that breaks the run (the signal recovers, a hold, the association
  *    ends) starts the count again.
  *
- * A strong signal never scans, and a network with one access point gets at
- * most one scan per NET_ROAM_SCAN_SOLO_S while its signal stays weak.
+ * A strong signal never scans. A steady weak signal on a network with one
+ * access point gets no routine scan sooner than NET_ROAM_SCAN_SOLO_S.
  */
 #pragma once
 
@@ -58,6 +61,14 @@ extern "C" {
 #define NET_ROAM_CONFIRM_S 30u       /**< the second scan after a candidate was found */
 #define NET_ROAM_SCAN_MESH_S 600u    /**< between scans while weak, another access point of the network seen */
 #define NET_ROAM_SCAN_SOLO_S 21600u  /**< between scans while weak, none seen in this association */
+#define NET_ROAM_SCAN_MAX_S 86400u   /**< successful searches with no candidate eventually wait a day */
+#define NET_ROAM_SCAN_STEPS 7u
+/* PROVISIONAL: relative change, not a new absolute weak threshold. The
+ * existing 20 s average must change this much for a full minute. Rebase
+ * after consuming a drop so a permanently poor signal cannot reset every
+ * minute; a sustained improvement re-arms the reference without scanning. */
+#define NET_ROAM_CHANGE_DB 6
+#define NET_ROAM_CHANGE_HOLD_S 60u
 #define NET_ROAM_RETRY_S 60u         /**< a scan that could not run is tried again after this */
 #define NET_ROAM_HITS 2u             /**< scans in a row that must find a clearly stronger access point */
 #define NET_ROAM_BTM_GAP_S 300u      /**< an access point's plain request is dropped this soon after a move */
@@ -91,6 +102,7 @@ typedef struct {
     net_roam_cfg_t cfg;
     bool assoc;                  /**< associated (an access point known) */
     uint32_t assoc_s;
+    uint32_t generation;        /**< increments at association so old driver scan results cannot be reused */
     uint8_t bssid[6];            /**< the access point of this association */
     bool avg_ok;                 /**< avg16 holds a reading of this association */
     int32_t avg16;               /**< smoothed RSSI, 1/16 dBm */
@@ -99,6 +111,11 @@ typedef struct {
     bool scanning;               /**< a scan was asked for, its result not in yet */
     uint32_t scan_ref_s;         /**< the next scan is due scan_wait_s after this */
     uint32_t scan_wait_s;
+    uint8_t negative_step;       /**< next successful no-candidate result's backoff step (saturating) */
+    bool ref_ok;                /**< a smoothed signal reference for a meaningful change */
+    int32_t ref16;
+    int8_t change;              /**< -1 deterioration, +1 recovery, 0 no sustained change */
+    uint32_t change_since_s;
     bool other_seen;             /**< another access point of the network seen in this association */
     uint8_t hits;                /**< scans in a row that found a clearly stronger access point */
     net_roam_bss_t cand;         /**< the strongest one the last of them found (valid while hits > 0) */

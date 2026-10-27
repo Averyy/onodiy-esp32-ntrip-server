@@ -1065,6 +1065,44 @@ class Smoke:
         self.log_level_checks()
         self.wifi_checks()
         self.journal_clear_checks()
+        self.network_diag_checks()
+
+    def network_diag_checks(self) -> None:
+        """Real raw-socket task, bounded API pages, auth, stop and a new generation."""
+        path = "/api/monitor/diagnostics"
+        for method in ("GET", "POST", "DELETE"):
+            status, _, _ = request(self.http_port, method, path, {} if method == "POST" else None, timeout=30)
+            self.check(status == 401, f"network diagnostics {method} requires an admin session (HTTP {status})")
+        status, _, body = request(self.http_port, "GET", path + "?cursor=bad", cookie=self.cookie, timeout=30)
+        self.check(status == 400, "network diagnostics rejects a malformed cursor")
+        status, _, body = request(self.http_port, "POST", path, {}, cookie=self.cookie, timeout=30)
+        first = json.loads(body)
+        self.check(status == 200 and first.get("active") and first.get("generation", 0) > 0,
+                   "network diagnostics starts an explicit bounded recording")
+        status, _, _ = request(self.http_port, "POST", path, {}, cookie=self.cookie, timeout=30)
+        self.check(status == 409, "network diagnostics refuses to extend an active recording")
+        time.sleep(3)
+        status, _, body = request(self.http_port, "DELETE", path, cookie=self.cookie, timeout=30)
+        stopped = json.loads(body)
+        (self.out / "network-diagnostics.json").write_bytes(body)
+        self.check(status == 200 and not stopped.get("active") and stopped.get("last_seq", 0) >= 2 and
+                   stopped.get("generation") == first.get("generation"),
+                   "network diagnostics stops and preserves independently scheduled samples")
+        samples = stopped.get("samples", [])
+        self.check(0 < len(samples) <= 32 and all(len(s.get("ping", [])) == 3 and
+                   all(p.get("result") != "pending" for p in s["ping"]) for s in samples),
+                   "network diagnostics exports bounded finalized target results")
+        self.check(all(not t.get("tcp", {}).get("available") and t.get("tcp", {}).get("state") is None
+                       for t in stopped.get("transmit", [])),
+                   "inactive caster TCP diagnostics are unavailable, not zero backlog")
+        status, _, body = request(self.http_port, "GET", path + "?cursor=" + str(stopped["last_seq"]),
+                                  cookie=self.cookie, timeout=30)
+        self.check(status == 200 and json.loads(body).get("samples") == [], "diagnostic cursor excludes older rows")
+        status, _, body = request(self.http_port, "POST", path, {}, cookie=self.cookie, timeout=30)
+        again = json.loads(body)
+        self.check(status == 200 and again.get("generation") != first.get("generation"),
+                   "a new diagnostic recording replaces the old generation")
+        request(self.http_port, "DELETE", path, cookie=self.cookie, timeout=30)
 
     def hold_checks(self) -> None:
         """After detection gave up (a ladder episode): the restart is held for first setup."""

@@ -80,7 +80,9 @@
 #include "mbedtls/ssl.h"
 #include "mbedtls/x509.h"
 #include "ntrip_cfg_blob.h"
+#include "ntrip_io.h"
 #include "ntrip_proto.h"
+#include "ntrip_tx_diag_core.h"
 #include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "settings.h"
@@ -232,6 +234,8 @@ typedef struct {
     uint32_t net_gen;
     int last_errno;
     bool tls_err;                /* the last failed TLS read or write failed inside TLS, not on the socket */
+    uint32_t diag_generation;    /* task-owned connection attempt identity */
+    uint64_t diag_tcp_sample_us;
 
     ntrip_sm_t sm;
     uint8_t prev_state;
@@ -285,6 +289,12 @@ static bool s_loaded;   /* slot configs read from settings (not in safe mode) */
 
 static slot_t *s_slots[CONFIG_NTRIP_MAX_CASTERS];
 static EXT_RAM_BSS_ATTR ntrip_caster_status_t s_status[CONFIG_NTRIP_MAX_CASTERS];
+/* Fixed RAM only: no flash/text logging, no growing allocation. Each lock
+ * covers numeric updates or one small record, never a socket call or the
+ * whole history export. Kept apart from status publishing, which cannot
+ * run while write_all is waiting. */
+static EXT_RAM_BSS_ATTR ntrip_tx_diag_core_t s_tx_diag[CONFIG_NTRIP_MAX_CASTERS];
+static portMUX_TYPE s_tx_diag_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_status_mutex;
 static SemaphoreHandle_t s_cfg_mutex;
 static SemaphoreHandle_t s_tls_sem;
@@ -597,7 +607,7 @@ static ntrip_cls_t io_error_class(slot_t *s)
     return ntrip_errno_class(sock_error(s));
 }
 
-/* > 0 bytes sent, 0 would block, < 0 error. */
+/* Positive bytes sent, explicit WANT direction, or NTRIP_IO_ERROR. */
 static int sess_send(slot_t *s, const uint8_t *p, size_t n)
 {
     if (s->tls != NULL) {
@@ -605,25 +615,28 @@ static int sess_send(slot_t *s, const uint8_t *p, size_t n)
         if (r > 0) {
             return (int)r;
         }
-        if (r == 0 || r == ESP_TLS_ERR_SSL_WANT_WRITE || r == ESP_TLS_ERR_SSL_WANT_READ) {
-            return 0;
+        if (r == ESP_TLS_ERR_SSL_WANT_READ) {
+            return NTRIP_IO_WANT_READ;
+        }
+        if (r == 0 || r == ESP_TLS_ERR_SSL_WANT_WRITE) {
+            return NTRIP_IO_WANT_WRITE;
         }
         note_tls_error(s, r);
-        return -1;
+        return NTRIP_IO_ERROR;
     }
     ssize_t r = send(s->fd, p, n, MSG_DONTWAIT);
     if (r > 0) {
         return (int)r;
     }
     if (r == 0 || errno == EAGAIN || errno == EWOULDBLOCK) {
-        return 0;
+        return NTRIP_IO_WANT_WRITE;
     }
     s->last_errno = errno;
     s->tls_err = false;
-    return -1;
+    return NTRIP_IO_ERROR;
 }
 
-/* > 0 bytes read, 0 nothing yet, -1 closed by the caster, -2 error. */
+/* Positive bytes read, explicit WANT direction, CLOSED or ERROR. */
 static int sess_recv(slot_t *s, uint8_t *buf, size_t n)
 {
     if (s->tls != NULL) {
@@ -632,33 +645,41 @@ static int sess_recv(slot_t *s, uint8_t *buf, size_t n)
             return (int)r;
         }
         if (r == 0 || r == MBEDTLS_ERR_SSL_CONN_EOF) {
-            return -1;
+            return NTRIP_IO_CLOSED;
         }
-        if (r == ESP_TLS_ERR_SSL_WANT_READ || r == ESP_TLS_ERR_SSL_WANT_WRITE) {
-            return 0;
+        if (r == ESP_TLS_ERR_SSL_WANT_READ) {
+            return NTRIP_IO_WANT_READ;
+        }
+        if (r == ESP_TLS_ERR_SSL_WANT_WRITE) {
+            return NTRIP_IO_WANT_WRITE;
         }
         note_tls_error(s, r);
-        return -2;
+        return NTRIP_IO_ERROR;
     }
     ssize_t r = recv(s->fd, buf, n, MSG_DONTWAIT);
     if (r > 0) {
         return (int)r;
     }
     if (r == 0) {
-        return -1;
+        return NTRIP_IO_CLOSED;
     }
     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        return 0;
+        return NTRIP_IO_WANT_READ;
     }
     s->last_errno = errno;
     s->tls_err = false;
-    return -2;
+    return NTRIP_IO_ERROR;
 }
 
-/* Wait until the socket can be written (or read) or ms pass. */
-static void sess_wait(slot_t *s, bool for_write, uint32_t ms)
+/* Wait for the operation TLS requested, which may differ from the app's.
+ * Buffered plaintext short-circuits application reads only: a pending write
+ * that needs incoming handshake bytes must still wait for raw readability. */
+static void sess_wait(slot_t *s, int result, bool application_read, uint32_t ms)
 {
-    if (!for_write && s->tls != NULL && esp_tls_get_bytes_avail(s->tls) > 0) {
+    bool plaintext = application_read && result == NTRIP_IO_WANT_READ && s->tls != NULL &&
+        esp_tls_get_bytes_avail(s->tls) > 0;
+    ntrip_io_wait_t wait = ntrip_io_wait_for(result, application_read, plaintext);
+    if (wait == NTRIP_IO_WAIT_NONE) {
         return;
     }
     if (s->fd < 0) {
@@ -668,6 +689,7 @@ static void sess_wait(slot_t *s, bool for_write, uint32_t ms)
     fd_set set;
     FD_ZERO(&set);
     FD_SET(s->fd, &set);
+    bool for_write = wait == NTRIP_IO_WAIT_WRITE;
     struct timeval tv = { .tv_sec = (time_t)(ms / 1000u), .tv_usec = (suseconds_t)((ms % 1000u) * 1000u) };
     (void)select(s->fd + 1, for_write ? NULL : &set, for_write ? &set : NULL, NULL, &tv);
 }
@@ -701,20 +723,70 @@ static bool connect_abort(slot_t *s)
 
 typedef enum { WR_DONE = 0, WR_STALL, WR_ERROR, WR_ABORT } write_result_t;
 
+static void tx_diag_connection(slot_t *s, bool new_attempt)
+{
+    if (new_attempt) {
+        s->diag_generation++;
+    }
+    s->diag_tcp_sample_us = 0;
+    taskENTER_CRITICAL(&s_tx_diag_lock);
+    ntrip_tx_diag_connection(&s_tx_diag[s->idx], s->diag_generation);
+    taskEXIT_CRITICAL(&s_tx_diag_lock);
+}
+
+/* The slot owns the fd for this entire call. getsockopt serializes its
+ * constant-time read with TCP/IP; no application lock is held across it.
+ * The handoff itself is synchronous, so sample only between writes and
+ * never start a sample during a known planned close/drain. During a write,
+ * the last sample can grow old; its timestamp remains visible. Failures
+ * are unavailable evidence, never a zero backlog. */
+static void tx_diag_tcp_sample(slot_t *s)
+{
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    if (!s->open || s->fd < 0 || s->draining || close_planned(s) || hard_abort(s) ||
+        (s->diag_tcp_sample_us != 0 && now - s->diag_tcp_sample_us < NTRIP_TX_DIAG_TCP_MS * 1000u)) {
+        return;
+    }
+    s->diag_tcp_sample_us = now;
+    int saved_errno = errno;
+    net_tcp_snapshot_t sample;
+    uint64_t call_started_us = (uint64_t)esp_timer_get_time();
+    int rc = net_tcp_snapshot(s->fd, &sample);
+    now = (uint64_t)esp_timer_get_time();
+    int error = rc == 0 ? 0 : errno;
+    uint64_t duration_us = now >= call_started_us ? now - call_started_us : 0;
+    taskENTER_CRITICAL(&s_tx_diag_lock);
+    ntrip_tx_diag_tcp_sample(&s_tx_diag[s->idx], now, duration_us, rc == 0 ? &sample : NULL, error);
+    taskEXIT_CRITICAL(&s_tx_diag_lock);
+    errno = saved_errno;
+}
+
 /*
  * Write all of p. Every accepted byte is progress; nothing accepted for
  * stall_ms is a write stall. Once part of a chunk (or frame) is out, the
  * rest goes out before anything else, or the session is closed.
  */
-static write_result_t write_all(slot_t *s, const uint8_t *p, size_t n, uint32_t stall_ms, bool count)
+static write_result_t write_all(slot_t *s, const uint8_t *p, size_t n, uint32_t stall_ms, bool count,
+                                 ntrip_tx_phase_t phase, const rtcm_hub_read_meta_t *arrivals)
 {
-    size_t off = 0;
+    ntrip_io_write_span_t pending = { .data = p, .remaining = n };
     uint32_t last = now_ms();
-    while (off < n) {
-        int r = sess_send(s, p + off, n - off);
+    uint64_t started_us = (uint64_t)esp_timer_get_time();
+    int64_t utc_s = diag_utc_now();
+    taskENTER_CRITICAL(&s_tx_diag_lock);
+    ntrip_tx_diag_begin(&s_tx_diag[s->idx], started_us, utc_s, phase, s->tls != NULL, n, arrivals);
+    taskEXIT_CRITICAL(&s_tx_diag_lock);
+    write_result_t result = WR_DONE;
+    while (pending.remaining > 0) {
+        uint64_t call_us = (uint64_t)esp_timer_get_time();
+        int r = sess_send(s, pending.data, pending.remaining);
+        uint64_t returned_us = (uint64_t)esp_timer_get_time();
+        taskENTER_CRITICAL(&s_tx_diag_lock);
+        ntrip_tx_diag_progress(&s_tx_diag[s->idx], call_us, returned_us, r > 0 ? (size_t)r : 0);
+        taskEXIT_CRITICAL(&s_tx_diag_lock);
         if (r > 0) {
-            off += (size_t)r;
-            s->mid_chunk = off < n;
+            ntrip_io_write_advance(&pending, r);
+            s->mid_chunk = pending.remaining > 0;
             last = now_ms();
             s->last_tx_ms = last;
             s->progress_ms = last;
@@ -723,19 +795,31 @@ static write_result_t write_all(slot_t *s, const uint8_t *p, size_t n, uint32_t 
             }
             continue;
         }
-        if (r < 0) {
-            return WR_ERROR;
+        if (!ntrip_io_would_block(r)) {
+            result = WR_ERROR;
+            break;
         }
         if ((uint32_t)(now_ms() - last) >= stall_ms) {
-            return WR_STALL;
+            result = WR_STALL;
+            break;
         }
         if (hard_abort(s)) {
-            return WR_ABORT;
+            result = WR_ABORT;
+            break;
         }
-        sess_wait(s, true, TICK_MS);
+        sess_wait(s, r, false, TICK_MS);
     }
-    s->mid_chunk = false;
-    return WR_DONE;
+    if (result == WR_DONE) {
+        s->mid_chunk = false;
+    }
+    static const ntrip_tx_outcome_t outcomes[] = {
+        NTRIP_TX_OUTCOME_DONE, NTRIP_TX_OUTCOME_STALL, NTRIP_TX_OUTCOME_ERROR, NTRIP_TX_OUTCOME_ABORT,
+    };
+    uint64_t ended_us = (uint64_t)esp_timer_get_time();
+    taskENTER_CRITICAL(&s_tx_diag_lock);
+    ntrip_tx_diag_end(&s_tx_diag[s->idx], ended_us, outcomes[result]);
+    taskEXIT_CRITICAL(&s_tx_diag_lock);
+    return result;
 }
 
 /* Close the socket. Clean: v2 terminator between chunks, TLS close_notify. */
@@ -743,7 +827,8 @@ static void session_close(slot_t *s, bool clean)
 {
     if (clean && s->open && s->chunked && !s->mid_chunk) {
         const char *t = NTRIP_CHUNK_TERMINATOR;
-        (void)write_all(s, (const uint8_t *)t, strlen(t), NTRIP_TERMINATOR_MS, false);
+        (void)write_all(s, (const uint8_t *)t, strlen(t), NTRIP_TERMINATOR_MS, false,
+                        NTRIP_TX_PHASE_TERMINATOR, NULL);
     }
     if (s->tls != NULL) {
         if (clean) {
@@ -760,6 +845,7 @@ static void session_close(slot_t *s, bool clean)
         s->fd = -1;
     }
     s->open = false;
+    tx_diag_connection(s, false);
     s->mid_chunk = false;
     s->paused_seen = false;
     s->draining = false;
@@ -1089,12 +1175,12 @@ static io_result_t read_reply(slot_t *s, ntrip_failure_t *f)
             done = ntrip_reply_feed(&s->reply, s->rx, (size_t)r, &used);
             continue;
         }
-        if (r < 0) {
+        if (!ntrip_io_would_block(r)) {
             ntrip_reply_end(&s->reply, true);
             break;
         }
         uint32_t left = limit - el;
-        sess_wait(s, false, left < TICK_MS ? left : TICK_MS);
+        sess_wait(s, r, true, left < TICK_MS ? left : TICK_MS);
     }
     record_reply(s);
     const ntrip_verdict_t *v = &s->reply.verdict;
@@ -1122,7 +1208,8 @@ static io_result_t send_request(slot_t *s, ntrip_failure_t *f)
         s->st.last_err = ESP_ERR_INVALID_ARG;
         return IO_FAIL;
     }
-    write_result_t wr = write_all(s, (const uint8_t *)s->req, n, NTRIP_REQUEST_WRITE_MS, false);
+    write_result_t wr = write_all(s, (const uint8_t *)s->req, n, NTRIP_REQUEST_WRITE_MS, false,
+                                   NTRIP_TX_PHASE_REQUEST, NULL);
     ntrip_secure_zero(s->req, sizeof(s->req));
     switch (wr) {
     case WR_DONE:
@@ -1742,6 +1829,7 @@ static void connect_once(slot_t *s, uint32_t now)
         s->low_heap_wait = false;
     }
     session_close(s, false);   /* never two sessions for a slot */
+    tx_diag_connection(s, true);
     uint32_t t0 = now_ms();
     if (s->guard) {
         /* The last attempt's verdict hint would show through the whole
@@ -1838,14 +1926,14 @@ static bool poll_incoming(slot_t *s, uint32_t now)
     slot_secrets(s, secrets);
     for (int i = 0; i < 4; i++) {
         int r = sess_recv(s, s->rx, sizeof(s->rx));
-        if (r == 0) {
+        if (ntrip_io_would_block(r)) {
             return true;
         }
         if (r < 0) {
             if (ntrip_sess_text_end(&s->stext, secrets, 3)) {
                 session_text(s);   /* a last line without its newline */
             }
-            session_failed(s, r == -1 ? NTRIP_CLS_REMOTE_CLOSE : io_error_class(s), now);
+            session_failed(s, r == NTRIP_IO_CLOSED ? NTRIP_CLS_REMOTE_CLOSE : io_error_class(s), now);
             return false;
         }
         if (ntrip_sess_text_feed(&s->stext, s->rx, (size_t)r, secrets, 3)) {
@@ -1890,8 +1978,9 @@ static void stream_step(slot_t *s, uint32_t now)
         ntrip_epoch_track_init(&s->epochs);   /* the hub restarts at an epoch start */
     }
     size_t len = 0;
-    esp_err_t err = rtcm_hub_read(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE, NTRIP_CHUNK_MAX_PAYLOAD, &len,
-                                  TICK_MS);
+    rtcm_hub_read_meta_t arrivals;
+    esp_err_t err = rtcm_hub_read_with_meta(s->consumer, s->tx + NTRIP_CHUNK_HEAD_RESERVE,
+                                            NTRIP_CHUNK_MAX_PAYLOAD, &len, TICK_MS, &arrivals);
     if (err == ESP_ERR_INVALID_STATE) {
         if (s->draining) {
             s->drained = true;   /* the epoch being sent is over (or the hub's hold point is reached) */
@@ -1919,7 +2008,7 @@ static void stream_step(slot_t *s, uint32_t now)
         n = ntrip_chunk_wrap(s->tx, len, &start);
         p = s->tx + start;
     }
-    write_result_t wr = write_all(s, p, n, CONFIG_NTRIP_SEND_TIMEOUT_MS, true);
+    write_result_t wr = write_all(s, p, n, CONFIG_NTRIP_SEND_TIMEOUT_MS, true, NTRIP_TX_PHASE_RTCM, &arrivals);
     uint32_t t = now_ms();
     switch (wr) {
     case WR_DONE:
@@ -2054,6 +2143,7 @@ static void slot_task(void *arg)
         if (!drain_step(s, now)) {
             slot_step(s, now);
         }
+        tx_diag_tcp_sample(s);
 
         now = now_ms();
         note_state(s, now);
@@ -2382,6 +2472,59 @@ esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out)
     out->state_age_s = (int32_t)(now - since) > 0 ? (now - since) / 1000u : 0;
     out->progress_age_ms = (int32_t)(now - progress) > 0 ? now - progress : 0;
     return ESP_OK;
+}
+
+esp_err_t ntrip_server_get_tx_diag(size_t slot, ntrip_tx_diag_t *out)
+{
+    if (out == NULL || slot >= ntrip_server_slot_count()) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    uint64_t now = (uint64_t)esp_timer_get_time();
+    int64_t utc_s = diag_utc_now();
+    taskENTER_CRITICAL(&s_tx_diag_lock);
+    ntrip_tx_diag_snapshot(&s_tx_diag[slot], now, utc_s, out);
+    taskEXIT_CRITICAL(&s_tx_diag_lock);
+    return ESP_OK;
+}
+
+esp_err_t ntrip_server_get_tx_history(size_t slot, ntrip_tx_write_diag_t *out, size_t cap, size_t *count)
+{
+    if (count != NULL) {
+        *count = 0;
+    }
+    if (slot >= ntrip_server_slot_count() || count == NULL || (cap > 0 && out == NULL)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    ntrip_tx_diag_core_t *c = &s_tx_diag[slot];
+    /* Copy one numeric record per lock. If completion replaces a record
+     * during export, retry once; the sender never waits on a bulk copy. */
+    for (unsigned attempt = 0; attempt < 2; attempt++) {
+        taskENTER_CRITICAL(&s_tx_diag_lock);
+        uint32_t version = c->history_version;
+        size_t n = c->status.history_count;
+        if (n > cap) {
+            n = cap;
+        }
+        size_t first = (c->history_next + NTRIP_TX_DIAG_HISTORY - n) % NTRIP_TX_DIAG_HISTORY;
+        taskEXIT_CRITICAL(&s_tx_diag_lock);
+        bool same = true;
+        for (size_t i = 0; i < n; i++) {
+            taskENTER_CRITICAL(&s_tx_diag_lock);
+            same = c->history_version == version;
+            if (same) {
+                out[i] = c->history[(first + i) % NTRIP_TX_DIAG_HISTORY];
+            }
+            taskEXIT_CRITICAL(&s_tx_diag_lock);
+            if (!same) {
+                break;
+            }
+        }
+        if (same) {
+            *count = n;
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t ntrip_server_restart_slot(size_t slot)

@@ -709,6 +709,44 @@ TEST_CASE("flash view and progress: counters, the last session, and why flashing
     TEST_ASSERT_EQUAL_STRING("receiver", web_flash_failure_name(UM98X_FLASH_FAIL_RECEIVER));
 }
 
+TEST_CASE("update snapshots expose queued receiver jobs before their visible phase or journal", "[web_build]")
+{
+    fixture();
+    s_snap.fw.state = FW_UPDATE_IDLE;
+    s_snap.fw.gnss_job_active = true;
+    web_update_snap_t u = { .fw = &s_snap.fw, .st = &s_snap.st };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_EQUAL_STRING("idle", at(root, "state")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "gnss_job_active")));
+    cJSON_Delete(root);
+    s_snap.fw.gnss_job_active = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "gnss_job_active")));
+    cJSON_Delete(root);
+
+    station_status_t st = { .flash_session_running = true };
+    web_flash_ctx_t c = { .journal = web_journal_view(&st, false), .station_running = true };
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_EQUAL_STRING("none", at(root, "journal")->valuestring);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "session_running")));
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(root, "record")));
+    cJSON_Delete(root);
+    st.flash_session_running = false;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "session_running")));
+    cJSON_Delete(root);
+}
+
 TEST_CASE("GET /api/update lists every version rolled back here, newest first", "[web_build]")
 {
     fixture();

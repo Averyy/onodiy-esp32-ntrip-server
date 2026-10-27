@@ -1439,7 +1439,7 @@ it is open. `journal` (here and in `/api/status`):
 
 | Value | Meaning | Lockout |
 |---|---|---|
-| `none` | no session | — |
+| `none` | no persisted journal; a newly accepted session may still be preparing it (`session_running` below) | an accepted receiver job still holds its update lockout |
 | `running` | a session or its boot-time recovery runs, or the user's retry or restart was accepted (its record still says `needs_user` until the session writes; it cannot be cleared meanwhile) | full: no app updates, reboots or receiver config changes |
 | `waiting` | stopped, waiting for the user's choice (also while boot-time recovery is report-only) | reduced: app updates and reboots work; the receiver is left alone |
 | `unreadable` | a damaged journal, or one written by a newer firmware; counts as waiting | reduced; only `clear` |
@@ -1450,6 +1450,7 @@ it is open. `journal` (here and in `/api/status`):
 ```json
 {
   "journal": "waiting",
+  "session_running": false,
   "record": {"state": "needs_user", "phase": "transferring", "sha256": "9ac25d1d...", "size": 3027628,
              "expected_fw": "R4.10Build19152", "expected_build": 19152,
              "pre_model": "UM982", "pre_fw": "R4.10Build18975", "pre_build": 18975,
@@ -1480,6 +1481,15 @@ is the station alert for a receiver found at its loader without a session
 (then `restart_receiver` is offered with `journal: "none"`). `receiver_text`
 comes from `station_get_flash_log()` (the last 4 KB the receiver sent during
 the last session, non-printable bytes as `.`; empty until there is any).
+`session_running` reports the station's synchronized flash-job flag:
+it is true as soon as a flash/retry/restart request is accepted, including
+before a new journal exists, and while that job runs. It becomes false during
+the later profile reapply, verification and final journal close; `journal`
+still reports `running` then. An active receiver update is therefore
+`session_running || journal == "running"`. The separate package-check job
+is reported by `check_running`. Old progress counters may still be present
+before a newly accepted job publishes its first progress. These fields only
+report existing job state; they do not change admission or retry behavior.
 `last` is the last session or package check this boot
 (`station_flash_last_t`; `null` when there was none): `outcome`
 (`station_flash_outcome_t`), `failed_rule` for `rejected`, `firmware` and
@@ -2240,7 +2250,7 @@ until a newer version appears; the server keeps no "later" state.
 
 ```json
 {
-  "state": "idle", "progress_pct": 0, "checks_enabled": true,
+  "state": "idle", "gnss_job_active": false, "progress_pct": 0, "checks_enabled": true,
   "release_repo": "Averyy/onodiy-esp32-ntrip-server", "signed_manifests": false, "last_check_unix": 1760080000,
   "last_attempt_unix": 1760080000, "last_check_result": "ok", "last_http_status": 200, "next_check_in_s": 86100,
   "app_max_bytes": 4194304, "pkg_max_bytes": 6287360,
@@ -2262,6 +2272,7 @@ until a newer version appears; the server keeps no "later" state.
 | Field | Notes |
 |---|---|
 | `state` | `fw_update_state_t` |
+| `gnss_job_active` | a receiver-package download or restaging worker job is queued or running; copied with `state` under the updater lock. True before the worker enters `downloading_gnss`, and until after it hands the package to the station or fails. It does not cover the subsequent receiver session or package check; use `session_running` and `check_running` from `/api/gnss/flash` |
 | `checks_enabled` | `false` when the build cannot check: no valid release repository, or it requires signed manifests and none of its keys is usable (manual uploads still work) |
 | `release_repo` | `owner/name` whose GitHub releases the station reads (`CONFIG_FW_UPDATE_GITHUB_REPO`; `null` if unset) |
 | `signed_manifests` | `true` when the build has a manifest key and accepts signed manifests only |
@@ -2272,6 +2283,13 @@ until a newer version appears; the server keeps no "later" state.
 | `next_check_in_s` | until the next automatic check is due (`0` = due, it waits for the network), `null` when this build cannot check |
 | `app_max_bytes`, `pkg_max_bytes` | the largest app image (the update slot) and receiver package (`pkg_store_capacity()`) an upload may be; the UI checks a file against them before sending it. On a board without a receiver package partition the package is staged in PSRAM: `pkg_max_bytes` is `CONFIG_PKG_STORE_RAM_MAX_KB` (3670016), and a package is staged only when PSRAM has a free block that large plus `CONFIG_PKG_STORE_RAM_MARGIN_KB` (else the upload or download fails). `null` only without any package area (`gnss_flash_reason` `no_package_area`): the UI offers no package upload there, and `POST /api/upload/gnss` answers `413 too_large` |
 | `running_elf_sha256` | the running app's ELF SHA-256 (`esp_app_desc_t.app_elf_sha256`): an app image with the same one is the code running now |
+
+To observe the receiver job's handoff, read `/api/update` first, then
+`/api/gnss/flash`: the updater publishes the station job before it clears
+`gnss_job_active`. Parallel reads can straddle that handoff in the opposite
+order. These are observations, not operation IDs: `last_result` and `last`
+describe the last recorded outcomes and must not be assumed to belong to a
+new request just because a job is no longer active.
 | `app.latest` | the latest release's version, `null` before a check found one; the last check's manifest is kept over a restart (`ota/manifest`), so a restart does not forget it |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching`; `left_s` is the stage's time left, `ends_in_s` the whole trial's (to the crash watch's end; both 0 without a trial) |
 | `gnss.latest`, `gnss.latest_build` | the package offered (a higher build for this model), else `null` |
@@ -2726,6 +2744,123 @@ the same sampling cycle. Router replies with losses at both external targets
 suggest an upstream connection problem; losses only at the NTRIP server
 suggest that host or its route. ICMP reachability does not test the NTRIP
 service, and one missed reply alone does not establish an outage.
+
+### `GET /api/monitor/diagnostics?cursor=N` (adm)
+
+Bounded network diagnostics, separate from the normal 30-second monitor. The
+cursor is an unsigned 32-bit sample sequence (absent = 0). Returns up to 32
+samples with `seq > cursor`, oldest first, plus passive sender snapshots. All
+times ending `_us` are microseconds since boot; arrival `_ms` fields are
+milliseconds since boot, not GNSS observation times. UTC is whole seconds and
+is `null` until trusted. No payloads or credentials are included.
+
+| Field | Meaning |
+|---|---|
+| `generation` | Probe recording identity; changes on each start, resets on reboot |
+| `available` | Probe ring allocated; false before the first successful start |
+| `active`, `expires_in_s`, `now_us` | Recording state, remaining lifetime and capture time |
+| `first_seq`, `last_seq` | Retained sequence bounds, both zero before any sample |
+| `skipped_cycles` | Missed one-second opportunities; never replayed as catch-up bursts |
+| `late_replies`, `duplicate_replies` | Matched replies too late or already recorded |
+| `targets` | Fixed array `router`, `internet`, `caster` |
+| `samples` | Up to 600 cycles retained in RAM, paginated below |
+| `transmit` | One snapshot per caster slot, collected independently of the probe recording |
+
+Each sample has `seq`, `started_us`, `time_unix`, `rssi` (dBm or `null`) and
+three `ping` entries in target order. Each ping includes IPv4 `address` or
+`null`, `sent_us` (dispatch time, or `null`), `result`, `rtt_ms` (only `ok`,
+otherwise `null`) and `error` (errno for `local_error`, otherwise zero).
+Results: `no_target`, `pending`, `ok`, `timeout`, `local_error`, `cancelled`.
+Dispatch-to-reply-processing time includes local socket and task scheduling;
+there is no kernel receive timestamp. Dispatched pings time out after two
+seconds. Overlapping cycles continue independently. A local socket failure
+is not counted as a missing network reply. Targets are the current gateway,
+`1.1.1.1` and the same selected cached IPv4 caster address as the normal monitor;
+there is no DNS lookup by the probe task. An IPv6-only caster has no probe target.
+
+Pending rows may change: a live client must re-read overlapping recent rows
+instead of advancing its cursor past them permanently. Natural expiry allows
+pending replies to finish; DELETE finalizes them immediately as cancelled.
+For an immutable export, DELETE first, read from cursor zero, advance to the
+last returned `seq`, and reject a changed `generation` or active recording on
+any page. The UI follows this procedure. Each page has independently captured
+sender snapshots; it is not one atomic view of all components.
+
+Each `transmit` entry includes `slot`, `captured_us`, `time_unix`, `generation`
+(connection attempt), `slow_writes`, `history_overwritten`, `write`, `tcp`, `tcp_sampling` and
+`history` (up to eight completed slow/failed writes, oldest first),
+`history_available` and `history_error` (ESP error code, zero on success).
+If concurrent completion prevents a consistent history copy after its bounded
+retry, the array is empty with `history_available: false`, not proof of no events. History
+persists across connection changes, until overwritten or reboot. A slow write
+means at least 500 ms, including a currently active write. No threshold changes
+send, drop, reconnect or recovery decisions.
+
+`write` is the current or last completed write: `generation`, `sequence`,
+`phase` (`idle`, `request`, `rtcm`, `terminator`), `outcome` (`pending`, `done`,
+`stall`, `error`, `abort`), `active`, `tls`, `slow`, `started_us`, `updated_us`,
+`last_accept_us`, `start_unix`, `total_bytes`, `accepted_bytes`, `remaining_bytes`,
+`duration_ms`, `max_no_progress_ms`, `max_send_call_ms`, `live`, `observations`,
+`sticky` and `tcp_at_end`. Accepted bytes mean local send/TLS acceptance,
+including HTTP framing; they do not establish remote receipt. While active,
+duration and no-progress age are derived at read time, even during a blocked
+send. `updated_us` remains the last actual writer update. `tcp_at_end` retains
+the latest already sampled TCP view at completion, with its own timestamp;
+completion does not force a new TCP read.
+
+The three arrival objects contain `frames`, `timed_frames`, `exact_frames`,
+`oldest_rx_ms` and `newest_rx_ms` (the last two `null` without known timing).
+`observations` is a subset of `live` (MSM and supported legacy observations),
+not an additional frame count. `sticky` describes replayed station metadata
+separately. Exact means the UART supplied the arrival stamp; other known
+times come from read/publication timing. An entire batch is described, not
+only its unsent tail. These ranges are local queue evidence, not correction
+age at a caster or rover, and stale cached station metadata is not stale
+observation data.
+
+`tcp` has `available`, `generation`, `sampled_us`, `sample_duration_us`, `previous_sample_us`,
+`last_ack_progress_us` (zero before observed ACK progress), `error`,
+`delta_valid`, `acked_delta_bytes` (`null` without a valid baseline) and `state`
+(`null` when unavailable). Samples run at most once a second between writes in
+the owning sender task. The getsockopt handoff is synchronous and can delay
+the next write; it never runs while finishing an active write or partial TLS
+record. A blocked writer leaves its previous TCP sample aging: use `sampled_us`,
+not API request time, and do not infer current backlog or ACK progress from a
+stale view. The UI stops showing backlog as current after three seconds.
+Closing/replacing a connection or a failed sample invalidates
+the ACK baseline. No background TCP sampler holds a shared application lock.
+`state` contains `ack_seq`, `outstanding_bytes`, `send_buffer_used_bytes`,
+`send_window_bytes`, `congestion_window_bytes`, `rto_ms`, `queued_pbufs`,
+`retransmit_run`, `unsent`, `unacked`, `rto`. Counts refer to TCP sequence space
+and buffers, including encrypted TLS records. `queued_pbufs` is a buffer count;
+`retransmit_run` resets on ACK progress, so is not a lifetime retry total.
+TCP acknowledgements do not establish remote application processing. Data
+buffered by TLS or beyond the peer's TCP stack is not visible here.
+Only slow/failed writes retain their last TCP sample. There is no continuous
+TCP history: a short backlog that never slows an application write can disappear
+before a later export. Capture the live endpoint during such an incident.
+
+`sample_duration_us` measures the synchronous snapshot call, including its
+TCP/IP handoff wait, on successful and failed attempts. `sampled_us` is the
+return time. It excludes recording/export work and does not bound future calls.
+`tcp_sampling` retains cost counters for this boot across reconnects: `samples`,
+`total_us`, `max_us`, `last_us`, `histogram` and `saturated`. Histogram counts are
+noncumulative with inclusive upper bounds of 100, 500, 1000, 5000, 10000, 50000,
+100000 microseconds, then greater than 100000. Counters saturate instead of
+wrapping; do not derive a mean from `total_us / samples` when `saturated` is true.
+
+### `POST /api/monitor/diagnostics`, `DELETE /api/monitor/diagnostics` (adm)
+
+POST with `{}` starts a new recording, clears prior probe samples and returns
+the GET shape from cursor zero. It allocates a fixed PSRAM-only ring and a
+low-priority task on first use; failure returns an internal error without a
+recording. An active recording returns `409 busy`, never extending its timer.
+The task attempts one cycle per second for at most 600 seconds, up to three
+small ICMP probes per cycle. No recording is persisted or enabled at boot.
+DELETE stops sending, cancels pending probes, preserves history, and returns
+the same shape. It is safe when already stopped. Passive sender diagnostics
+continue independently. These operations change neither RTCM configuration
+nor network recovery policy. A download includes network addresses.
 
 ### `GET /api/onocoy/report` (adm)
 
@@ -3185,7 +3320,7 @@ boot), and a journal in state `unknown` allows no receiver update action.
   page can hold 7: its WebSocket and a browser's 6 connections to one
   host), one kept free by closing an idle connection, never one with a
   request waiting unread in its socket,
-  `max_uri_handlers` 72 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
+  `max_uri_handlers` 84 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
   the API routes, `/ws` and the catch-all within it: 69 routes today, 71
   handlers) with wildcard matching for `/api/casters/*`,
   `max_req_hdr_len` 2048 (cookies and long browser headers), receive
@@ -3417,8 +3552,9 @@ Things this contract needs that the current headers do not provide yet:
    `station_get_flash_log()` returns the last 4 KB the receiver sent during
    the last session.
 7. **Signal-group comparison**: resolved; `station_sg_test_*()` (station.h,
-   `station_sgt.h`) and the four `/api/gnss/signal-test` routes (66 API
-   routes, 68 of the 72 URI handlers with `/ws` and the catch-all).
+   `station_sgt.h`) and the four `/api/gnss/signal-test` routes. The current
+   table has 79 REST routes, with room for `/ws` and the
+   catch-all in the 84 URI handlers.
 8. **GNSS time**: resolved in part. The ledger takes the receiver's GPS
    time of week (`gnss_obs_get_gps_time()`, fed by the health monitor) and
    dates it against its running clock, or after a reset that was not a

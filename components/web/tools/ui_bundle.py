@@ -502,8 +502,8 @@ def build(ui, max_gz):
         out.append((path, ctype, raw, gz))
     total = sum(len(gz) for _, _, _, gz in out)
     own_total = sum(len(gz) for path, _, _, gz in out if not path.startswith('/vendor/'))
-    if own_total > 150 * 1024:
-        raise CheckError(f"Project UI is {own_total} bytes gzipped, over the 150 KiB budget")
+    if own_total > 160 * 1024:
+        raise CheckError(f"Project UI is {own_total} bytes gzipped, over the 160 KiB budget")
     if total > max_gz:
         raise CheckError(f"UI is {total} bytes gzipped, over the {max_gz}-byte budget")
     return out, total

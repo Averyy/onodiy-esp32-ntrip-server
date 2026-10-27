@@ -1342,12 +1342,21 @@ void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in)
     if (r->n > 0) {
         uint32_t last = (r->head + LCAST_RATE_SAMPLES - 1u) % LCAST_RATE_SAMPLES;
         uint32_t since = now_ms - r->at_ms[last];
-        if (since < LCAST_RATE_STEP_MS) {
-            return;
-        }
         if (since > 2u * LCAST_RATE_STEP_MS || bytes_in < r->bytes[last]) {
             lcast_rate_init(r);   /* samples missed, or a counter reset: start over */
+        } else if ((int32_t)(now_ms - r->next_ms) < 0) {
+            return;
         }
+    }
+    if (r->n == 0) {
+        r->next_ms = now_ms + LCAST_RATE_STEP_MS;
+    } else {
+        /* The periodic timer advances its scheduled alarm, not the time its
+         * callback happened to run. A late 1001 ms sample followed by 2000 ms
+         * must count both; measuring the step from 1001 would discard 2000,
+         * then misread 3002 as a gap and clear a healthy stream's history. */
+        uint32_t periods = (now_ms - r->next_ms) / LCAST_RATE_STEP_MS + 1u;
+        r->next_ms += periods * LCAST_RATE_STEP_MS;
     }
     r->bytes[r->head] = bytes_in;
     r->at_ms[r->head] = now_ms;

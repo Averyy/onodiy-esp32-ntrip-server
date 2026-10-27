@@ -1587,6 +1587,83 @@ TEST_CASE("lcast bit rate: from the oldest of 60 samples 1 s apart to now, from 
     TEST_ASSERT_EQUAL_UINT32(13600, lcast_rate_bps(&r, 2990, 1690));
 }
 
+TEST_CASE("lcast bit rate: callback jitter neither drops a nominal sample nor resets continuous input", "[lcast]")
+{
+    lcast_rate_t r;
+    lcast_rate_init(&r);
+    lcast_rate_sample(&r, 0, 0);
+    const uint32_t times[] = { 1001, 2000, 3002, 4001, 5000 };
+    for (unsigned i = 0; i < sizeof(times) / sizeof(times[0]); i++) {
+        /* 1000 bytes/s: actual arrival timestamps, including jitter, must
+         * be used in the denominator. 2000 is only 999 ms after 1001;
+         * discarding it would make 3002 falsely look like a 2001 ms gap. */
+        lcast_rate_sample(&r, times[i], times[i]);
+        TEST_ASSERT_EQUAL_UINT32(i + 2, r.n);
+        TEST_ASSERT_EQUAL_UINT32(8000, lcast_rate_bps(&r, times[i], times[i]));
+    }
+    TEST_ASSERT_EQUAL_UINT32(6000, r.next_ms);
+}
+
+TEST_CASE("lcast bit rate: sustained jitter keeps the bounded minute window across clock wrap", "[lcast]")
+{
+    lcast_rate_t r;
+    lcast_rate_init(&r);
+    uint32_t start = UINT32_MAX - 1500u;
+    lcast_rate_sample(&r, start, 100);
+    const uint32_t late[] = { 1, 0, 2, 0, 200, 0, 999, 0 };
+    uint32_t at = start;
+    uint64_t bytes = 100;
+    for (uint32_t i = 1; i <= 3u * LCAST_RATE_SAMPLES; i++) {
+        uint32_t elapsed = i * LCAST_RATE_STEP_MS + late[(i - 1u) % (sizeof(late) / sizeof(late[0]))];
+        at = start + elapsed;
+        bytes = 100u + (uint64_t)elapsed * 2u;
+        lcast_rate_sample(&r, at, bytes);
+        TEST_ASSERT_EQUAL_UINT32(i + 1u < LCAST_RATE_SAMPLES ? i + 1u : LCAST_RATE_SAMPLES, r.n);
+        TEST_ASSERT_EQUAL_UINT32(16000, lcast_rate_bps(&r, at, bytes));
+        TEST_ASSERT_EQUAL_UINT32(16000, lcast_rate_bps(&r, at + 500u, bytes + 1000u));
+        TEST_ASSERT_EQUAL_UINT32(start + (i + 1u) * LCAST_RATE_STEP_MS, r.next_ms);
+    }
+    /* The timer really stops: a stale history still cannot advertise a rate. */
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, at + 100000u, bytes + 200000u));
+}
+
+TEST_CASE("lcast bit rate: overdue callbacks coalesce while true gaps and early counter resets start over", "[lcast]")
+{
+    lcast_rate_t r;
+    lcast_rate_init(&r);
+    lcast_rate_sample(&r, 100, 0);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 1099, 999));
+    lcast_rate_sample(&r, 1100, 1000);
+    /* At most two periods is still accepted, with one actual sample. */
+    lcast_rate_sample(&r, 3100, 3000);
+    TEST_ASSERT_EQUAL_UINT32(3, r.n);
+    TEST_ASSERT_EQUAL_UINT32(4100, r.next_ms);
+    lcast_rate_sample(&r, 3100, 3000);   /* timer catch-up in the same millisecond */
+    lcast_rate_sample(&r, 3101, 3001);
+    TEST_ASSERT_EQUAL_UINT32(3, r.n);
+    lcast_rate_sample(&r, 4100, 4000);
+    TEST_ASSERT_EQUAL_UINT32(8000, lcast_rate_bps(&r, 4100, 4000));
+
+    lcast_rate_sample(&r, 6201, 6101);   /* a genuine gap over two periods resets the history and phase */
+    TEST_ASSERT_EQUAL_UINT32(1, r.n);
+    TEST_ASSERT_EQUAL_UINT32(7201, r.next_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 6201, 6101));
+    lcast_rate_sample(&r, 7200, 7100);
+    TEST_ASSERT_EQUAL_UINT32(1, r.n);
+    lcast_rate_sample(&r, 7201, 7101);
+    TEST_ASSERT_EQUAL_UINT32(2, r.n);
+    TEST_ASSERT_EQUAL_UINT32(8000, lcast_rate_bps(&r, 7201, 7101));
+
+    /* A reset is meaningful even before the next nominal deadline. */
+    lcast_rate_sample(&r, 7300, 10);
+    TEST_ASSERT_EQUAL_UINT32(1, r.n);
+    TEST_ASSERT_EQUAL_UINT32(8300, r.next_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, lcast_rate_bps(&r, 7300, 10));
+    lcast_rate_sample(&r, 8300, 1010);
+    TEST_ASSERT_EQUAL_UINT32(2, r.n);
+    TEST_ASSERT_EQUAL_UINT32(8000, lcast_rate_bps(&r, 8300, 1010));
+}
+
 TEST_CASE("lcast end reasons: the API's names and the console's words", "[lcast]")
 {
     static const char *const words[] = { "ended", "the rover closed the connection", "the rover took no data for 10 s",

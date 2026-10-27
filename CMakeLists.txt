@@ -128,7 +128,7 @@ endif()
 # idf_component_optional_requires). Relative include paths into another
 # component are rejected by CI (.github/workflows/build.yml). Every directory
 # under components/ must be listed here.
-set(_layer_0 board settings diag gnss_framing gnss_types)
+set(_layer_0 board settings diag gnss_framing gnss_types tcp_diag)
 set(_layer_1 gnss_link rtcm_hub pkg_store lifecycle ledger gnss_obs leds)
 set(_layer_2 um98x_ctl um98x_flash ntrip_server local_caster network)
 set(_layer_3 station)

@@ -12,6 +12,11 @@
  * the average follows a change within about 20 s. */
 #define AVG_SHIFT 2
 
+static const uint32_t scan_wait_s[NET_ROAM_SCAN_STEPS] = {
+    NET_ROAM_SCAN_MESH_S, 1800u, 3600u, 10800u, NET_ROAM_SCAN_SOLO_S, 43200u, NET_ROAM_SCAN_MAX_S,
+};
+#define SOLO_STEP 4u
+
 void net_roam_init(net_roam_t *r, const net_roam_cfg_t *cfg)
 {
     memset(r, 0, sizeof(*r));
@@ -22,6 +27,7 @@ void net_roam_associated(net_roam_t *r, const uint8_t bssid[6], uint32_t now_s)
 {
     r->assoc = true;
     r->assoc_s = now_s;
+    r->generation++;
     memcpy(r->bssid, bssid, sizeof(r->bssid));
     r->avg_ok = false;
     r->avg16 = 0;
@@ -29,6 +35,9 @@ void net_roam_associated(net_roam_t *r, const uint8_t bssid[6], uint32_t now_s)
     r->scanning = false;
     r->scan_ref_s = now_s;
     r->scan_wait_s = 0;   /* NET_ROAM_SETTLE_S and the weak run hold the first scan back */
+    r->negative_step = 0;
+    r->ref_ok = false;
+    r->change = 0;
     r->other_seen = false;
     r->hits = 0;
 }
@@ -72,12 +81,46 @@ void net_roam_moved(net_roam_t *r, uint32_t now_s)
     r->hits = 0;
 }
 
+/* Keep short threshold crossings separate from a real change in conditions.
+ * Nothing here overrides a hold, the settle time, or the post-move interval. */
+static void signal_change(net_roam_t *r, bool weak, uint32_t now_s)
+{
+    if (!r->avg_ok) {
+        return;
+    }
+    if (!r->ref_ok) {
+        r->ref16 = r->avg16;
+        r->ref_ok = true;
+    }
+    int32_t delta = r->avg16 - r->ref16;
+    int8_t change = delta >= NET_ROAM_CHANGE_DB * 16 ? 1
+                    : weak && delta <= -NET_ROAM_CHANGE_DB * 16 ? -1 : 0;
+    if (change != r->change) {
+        r->change = change;
+        r->change_since_s = now_s;
+    }
+    if (change == 0 || r->scanning || (uint32_t)(now_s - r->change_since_s) < NET_ROAM_CHANGE_HOLD_S) {
+        return;
+    }
+    r->ref16 = r->avg16;
+    r->change = 0;
+    if (change < 0) {
+        r->negative_step = 0;
+        /* Shorten the existing deadline; do not keep moving it forward on
+         * every weak tick. A confirmation or failure retry keeps its wait. */
+        if (r->scan_wait_s > NET_ROAM_SCAN_MESH_S) {
+            r->scan_wait_s = NET_ROAM_SCAN_MESH_S;
+        }
+    }
+}
+
 net_roam_act_t net_roam_tick(net_roam_t *r, bool held, uint32_t now_s)
 {
     if (!r->assoc) {
         return NET_ROAM_IDLE;
     }
     bool weak = r->avg_ok && r->avg16 <= (int32_t)r->cfg.weak_dbm * 16;
+    signal_change(r, weak, now_s);
     if (weak && !r->weak) {
         r->weak_since_s = now_s;
     }
@@ -112,6 +155,11 @@ void net_roam_scan_done(net_roam_t *r, const net_roam_bss_t *list, size_t n, uin
         return;
     }
     r->scan_ref_s = now_s;
+    if (r->avg_ok) {
+        r->ref_ok = true;
+        r->ref16 = r->avg16;
+        r->change = 0;
+    }
     bool base_ok = r->avg_ok;
     int32_t base16 = r->avg16;
     const net_roam_bss_t *best = NULL;
@@ -144,12 +192,18 @@ void net_roam_scan_done(net_roam_t *r, const net_roam_bss_t *list, size_t n, uin
         return;
     }
     r->hits = 0;
-    r->scan_wait_s = r->other_seen ? NET_ROAM_SCAN_MESH_S : NET_ROAM_SCAN_SOLO_S;
+    unsigned step = r->negative_step;
+    if (!r->other_seen && step < SOLO_STEP) {
+        step = SOLO_STEP;
+    }
+    r->scan_wait_s = scan_wait_s[step];
+    r->negative_step = step + 1u < NET_ROAM_SCAN_STEPS ? (uint8_t)(step + 1u) : (uint8_t)step;
 }
 
 void net_roam_scan_failed(net_roam_t *r, uint32_t now_s)
 {
     r->scanning = false;
+    r->hits = 0;   /* a failed confirmation cannot preserve an arbitrarily old first hit */
     r->scan_ref_s = now_s;
     r->scan_wait_s = NET_ROAM_RETRY_S;
 }

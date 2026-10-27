@@ -29,6 +29,11 @@ typedef struct {
     uint32_t resets;
     net_rung_t reset_rung;
     uint32_t probes;
+    bool reject_dispatch;
+    bool delay_execution;
+    bool queued;
+    uint32_t queued_generation;
+    uint32_t dispatches;
 } sim_t;
 
 #define T0 (UINT32_MAX - 300u)
@@ -46,6 +51,26 @@ static void sim_init(sim_t *s, net_probe_t world)
     s->in.has_ip = true;
     s->in.min_reboot_interval_s = 6 * 3600;
     s->in.since_reboot_s = UINT32_MAX;
+}
+
+static bool sim_execute(sim_t *s)
+{
+    if (!s->queued) {
+        return false;
+    }
+    s->queued = false;
+    net_ladder_out_t o;
+    if (!net_ladder_begin(&s->l, s->queued_generation, &s->in, s->now, s->now, &o)) {
+        return false;
+    }
+    TEST_ASSERT_TRUE(o.rung >= NET_RUNG_RECONNECT && o.rung <= NET_RUNG_REBOOT);
+    s->acts[o.rung]++;
+    s->act_at[o.rung] = s->now;
+    if (o.rung == NET_RUNG_REBOOT) {
+        s->rebooted = true;   /* the world keeps running: the reboot did not fix it */
+        s->last_reboot_s = s->now;
+    }
+    return true;
 }
 
 static net_ladder_out_t sim_step(sim_t *s)
@@ -66,15 +91,16 @@ static net_ladder_out_t sim_step(sim_t *s)
             s->probe_start_s = s->now;
         }
         break;
-    case NET_LADDER_ACT:
-        TEST_ASSERT_TRUE(o.rung >= NET_RUNG_RECONNECT && o.rung <= NET_RUNG_REBOOT);
-        s->acts[o.rung]++;
-        s->act_at[o.rung] = s->now;
-        if (o.rung == NET_RUNG_REBOOT) {
-            s->rebooted = true;   /* the world keeps running: the reboot did not fix it */
-            s->last_reboot_s = s->now;
+    case NET_LADDER_ACT: {
+        s->dispatches++;
+        bool accepted = !s->reject_dispatch && !s->queued;
+        if (accepted) {
+            s->queued = true;
+            s->queued_generation = o.generation;
         }
+        net_ladder_dispatched(&s->l, o.generation, accepted);
         break;
+    }
     case NET_LADDER_SKIP:
         s->skips++;
         s->last_why = o.why;
@@ -92,6 +118,9 @@ static net_ladder_out_t sim_step(sim_t *s)
     default:
         break;
     }
+    if (!s->delay_execution) {
+        (void)sim_execute(s);
+    }
     s->now++;
     return o;
 }
@@ -106,6 +135,185 @@ static void sim_run(sim_t *s, uint32_t seconds)
 static uint32_t total_acts(const sim_t *s)
 {
     return s->acts[1] + s->acts[2] + s->acts[3] + s->acts[4];
+}
+
+TEST_CASE("network ladder: refused dispatch retains its rung until one execution is admitted", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.reject_dispatch = true;
+    sim_run(&s, 70);
+    uint32_t generation = s.l.generation;
+    TEST_ASSERT_TRUE(s.l.pending);
+    TEST_ASSERT_FALSE(s.l.queued);
+    TEST_ASSERT_EQUAL_UINT8(0, s.l.next);
+    TEST_ASSERT_EQUAL(NET_RUNG_NONE, s.l.last_rung);
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    /* Even after the next rung's time, a full queue cannot consume this
+     * one or report that an action started. */
+    sim_run(&s, 200);
+    TEST_ASSERT_EQUAL_UINT32(generation, s.l.generation);
+    TEST_ASSERT_EQUAL_UINT8(0, s.l.next);
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    s.reject_dispatch = false;
+    s.delay_execution = true;
+    TEST_ASSERT_EQUAL(NET_LADDER_ACT, sim_step(&s).act);
+    TEST_ASSERT_TRUE(s.l.queued);
+    uint32_t dispatches = s.dispatches;
+    sim_run(&s, 3);
+    TEST_ASSERT_EQUAL_UINT32(dispatches, s.dispatches);   /* no duplicate queued command */
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    TEST_ASSERT_TRUE(sim_execute(&s));
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    TEST_ASSERT_EQUAL_UINT8(1, s.l.next);
+    TEST_ASSERT_EQUAL(NET_RUNG_RECONNECT, s.l.last_rung);
+    net_ladder_out_t out;
+    TEST_ASSERT_FALSE(net_ladder_begin(&s.l, generation, &s.in, s.now, s.now, &out));
+    /* The original pass schedule remains: the overdue second rung asks
+     * for its own fresh probe rather than silently having been skipped. */
+    TEST_ASSERT_EQUAL(NET_LADDER_PROBE, sim_step(&s).act);
+}
+
+TEST_CASE("network ladder: queue refusal after a probe timeout does not start another probe wait", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.probe_delay_s = UINT32_MAX;
+    s.reject_dispatch = true;
+    sim_run(&s, 125);
+    TEST_ASSERT_TRUE(s.l.pending);
+    TEST_ASSERT_EQUAL_UINT32(1, s.probes);
+    TEST_ASSERT_GREATER_THAN_UINT32(1, s.dispatches);
+    s.reject_dispatch = false;
+    TEST_ASSERT_EQUAL(NET_LADDER_ACT, sim_step(&s).act);
+    TEST_ASSERT_EQUAL_UINT32(1, s.acts[NET_RUNG_RECONNECT]);
+    TEST_ASSERT_EQUAL_UINT32(1, s.probes);
+}
+
+TEST_CASE("network ladder: recovery cancels queued work and old tokens cannot act in a later episode", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.delay_execution = true;
+    sim_run(&s, 65);
+    uint32_t old = s.queued_generation;
+    TEST_ASSERT_TRUE(s.queued);
+    s.in.caster_down = false;
+    sim_step(&s);   /* cancel immediately, without waiting for the episode's 60 s reset */
+    TEST_ASSERT_FALSE(s.l.pending);
+    TEST_ASSERT_EQUAL_UINT8(0, s.l.next);
+    TEST_ASSERT_EQUAL(NET_LADDER_ACTIVE, s.l.phase);
+    TEST_ASSERT_FALSE(sim_execute(&s));
+    TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    sim_run(&s, NET_LADDER_HEALTHY_S);
+    TEST_ASSERT_EQUAL(NET_LADDER_IDLE, s.l.phase);
+    s.in.caster_down = true;
+    sim_run(&s, 65);
+    TEST_ASSERT_TRUE(s.l.pending);
+    TEST_ASSERT_NOT_EQUAL(old, s.queued_generation);
+    uint32_t current = s.queued_generation;
+    net_ladder_out_t out;
+    TEST_ASSERT_FALSE(net_ladder_begin(&s.l, old, &s.in, s.now, s.now, &out));
+    net_ladder_dispatched(&s.l, old, false);
+    net_ladder_cancel(&s.l, old);
+    TEST_ASSERT_TRUE(s.l.pending);
+    TEST_ASSERT_TRUE(s.l.queued);
+    TEST_ASSERT_EQUAL_UINT32(current, s.l.generation);
+    TEST_ASSERT_TRUE(sim_execute(&s));
+    TEST_ASSERT_EQUAL_UINT32(1, total_acts(&s));
+}
+
+TEST_CASE("network ladder: admission rejects stale health and newly recovered inputs before the next tick", "[net_ladder]")
+{
+    for (unsigned scenario = 0; scenario < 5; scenario++) {
+        sim_t s;
+        sim_init(&s, NET_PROBE_NO_IP);
+        s.delay_execution = true;
+        sim_run(&s, 65);
+        uint32_t observed = s.now;
+        if (scenario == 0) {
+            observed -= NET_LADDER_INPUT_MAX_AGE_S + 1;
+        } else if (scenario == 1) {
+            s.in.caster_down = false;
+        } else if (scenario == 2) {
+            s.in.rtcm_healthy = false;
+        } else if (scenario == 3) {
+            s.in.sta_configured = false;
+        } else {
+            s.in.probe = NET_PROBE_OK;
+            s.in.probe_at_s = s.now;
+        }
+        net_ladder_out_t out;
+        TEST_ASSERT_FALSE(net_ladder_begin(&s.l, s.queued_generation, &s.in, observed, s.now, &out));
+        TEST_ASSERT_FALSE(s.l.pending);
+        TEST_ASSERT_EQUAL_UINT8(0, s.l.next);
+        TEST_ASSERT_EQUAL(NET_RUNG_NONE, s.l.last_rung);
+        TEST_ASSERT_EQUAL_UINT32(0, total_acts(&s));
+    }
+}
+
+TEST_CASE("network ladder: queued restart and reboot recheck their current protections", "[net_ladder]")
+{
+    for (unsigned scenario = 0; scenario < 5; scenario++) {
+        sim_t s;
+        sim_init(&s, NET_PROBE_NO_IP);
+        sim_run(&s, scenario == 0 ? 300 : 500);
+        s.delay_execution = true;
+        sim_run(&s, scenario == 0 ? 70 : 110);
+        TEST_ASSERT_TRUE(s.queued);
+        uint8_t next = s.l.next;
+        uint8_t last = s.l.last_rung;
+        if (scenario == 0) {
+            s.in.ap_clients = 1;
+        } else if (scenario == 1) {
+            s.in.reboot_inhibited = true;
+        } else if (scenario == 2) {
+            s.in.journal_open = true;
+        } else if (scenario == 3) {
+            s.in.caster_down = false;
+            s.in.assoc_no_ip_s = NET_LADDER_ASSOC_NO_IP_S;   /* A alone cannot reboot */
+        } else {
+            s.in.probe = NET_PROBE_NO_UPSTREAM;
+            s.in.probe_at_s = s.now;
+        }
+        TEST_ASSERT_FALSE(sim_execute(&s));
+        TEST_ASSERT_EQUAL_UINT8(next, s.l.next);   /* refused execution does not consume the rung */
+        TEST_ASSERT_EQUAL_UINT8(last, s.l.last_rung);
+        TEST_ASSERT_EQUAL(NET_LADDER_ACTIVE, s.l.phase);   /* no reboot hold before admission */
+        TEST_ASSERT_EQUAL_UINT32(0, s.acts[scenario == 0 ? NET_RUNG_RESTART_WIFI : NET_RUNG_REBOOT]);
+        /* Normal policy then records the current withhold on the next tick. */
+        TEST_ASSERT_EQUAL(NET_LADDER_WITHHELD, sim_step(&s).act);
+    }
+}
+
+TEST_CASE("network ladder: cancellation generations wrap safely and late dispatch acknowledgements do nothing", "[net_ladder]")
+{
+    sim_t s;
+    sim_init(&s, NET_PROBE_NO_IP);
+    s.l.generation = UINT32_MAX;
+    TEST_ASSERT_EQUAL(NET_LADDER_PASS, net_ladder_tick(&s.l, &s.in, s.now).act);
+    s.now += NET_LADDER_RECONNECT_S;
+    s.in.probe_valid = true;
+    s.in.probe = NET_PROBE_NO_IP;
+    s.in.probe_at_s = s.now;
+    net_ladder_out_t offer = net_ladder_tick(&s.l, &s.in, s.now);
+    TEST_ASSERT_EQUAL(NET_LADDER_ACT, offer.act);
+    TEST_ASSERT_EQUAL_UINT32(1, offer.generation);   /* zero is never an automatic token */
+    net_ladder_out_t out;
+    TEST_ASSERT_FALSE(net_ladder_begin(&s.l, 0, &s.in, s.now, s.now, &out));
+    TEST_ASSERT_TRUE(s.l.pending);
+    net_ladder_cancel(&s.l, offer.generation);
+    TEST_ASSERT_EQUAL_UINT8(0, s.l.next);
+    offer = net_ladder_tick(&s.l, &s.in, s.now);
+    TEST_ASSERT_EQUAL_UINT32(2, offer.generation);
+    /* A queue consumer may run before xQueueSend returns to its caller. */
+    TEST_ASSERT_TRUE(net_ladder_begin(&s.l, offer.generation, &s.in,
+                                     s.now - NET_LADDER_INPUT_MAX_AGE_S, s.now, &out));
+    net_ladder_dispatched(&s.l, offer.generation, true);
+    TEST_ASSERT_FALSE(s.l.pending);
+    TEST_ASSERT_FALSE(s.l.queued);
+    TEST_ASSERT_EQUAL_UINT8(1, s.l.next);
+    TEST_ASSERT_FALSE(net_ladder_begin(&s.l, offer.generation, &s.in, s.now, s.now, &out));
 }
 
 TEST_CASE("network ladder stays idle unless the network is the suspect", "[net_ladder]")

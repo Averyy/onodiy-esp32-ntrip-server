@@ -20,12 +20,12 @@
 # the linker take it whatever the order of the two libraries on the link
 # line.
 idf_component_register(
-    SRCS "network.c" "net_core.c" "net_ladder.c" "net_roam.c" "captive_dns.c" "net_tw.c" "net_tls.c" "net_cert_time.c"
+    SRCS "network.c" "net_core.c" "net_ladder.c" "net_roam.c" "net_scan.c" "captive_dns.c" "net_tw.c" "net_tls.c" "net_cert_time.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include" "lwip_hooks"
     LDFRAGMENTS "linker.lf"
     REQUIRES esp_event mbedtls
-    PRIV_REQUIRES settings diag lifecycle ledger esp_wifi wpa_supplicant esp_eth esp_netif lwip esp_timer)
+    PRIV_REQUIRES settings diag lifecycle ledger tcp_diag esp_wifi wpa_supplicant esp_eth esp_netif lwip esp_timer)
 
 idf_component_get_property(_lwip_lib lwip COMPONENT_LIB)
 target_include_directories(${_lwip_lib} PRIVATE "${CMAKE_CURRENT_LIST_DIR}/lwip_hooks")

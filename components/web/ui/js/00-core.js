@@ -564,7 +564,7 @@ class ApiError extends Error {
  * Call the API. POST and PUT always send Content-Type: application/json
  * (the server's CSRF rule, also for an empty body). Resolves with the parsed
  * body; rejects with ApiError. A 401 also emits "unauthorized" unless
- * opts.quiet401. A GET whose connection failed before an answer (a dropped
+ * opts.quiet401. A GET whose connection failed before a complete answer (a dropped
  * Wi-Fi frame, a connection the station closed) is sent once more after
  * 300 ms: reading changes nothing, so a second try is safe.
  */
@@ -591,21 +591,28 @@ async function api(method, path, body, opts) {
     init.signal = ctl.signal;
     timer = setTimeout(() => ctl.abort(), opts.timeout || 15000);
   }
-  let res;
+  let res, data = null;
   try {
-    res = await fetch(path, init);
-  } catch (e) {
-    throw new ApiError(0, { code: e && e.name === 'AbortError' ? 'timeout' : 'network' });
+    try {
+      res = await fetch(path, init);
+    } catch (e) {
+      throw new ApiError(0, { code: e && e.name === 'AbortError' ? 'timeout' : 'network' });
+    }
+    /* fetch resolves at the headers. Keep the deadline until the body has
+     * arrived too, or a stalled JSON body can stop a single-flight poller
+     * forever even while the WebSocket still delivers fresh status. */
+    if ((res.headers.get('Content-Type') || '').indexOf('json') >= 0) {
+      try {
+        data = await res.json();
+      } catch (e) {
+        if (e && (e.name === 'AbortError' || e.name === 'TypeError')) {
+          throw new ApiError(0, { code: e.name === 'AbortError' ? 'timeout' : 'network' });
+        }
+        data = null;   /* malformed JSON: preserve the HTTP error/status handling */
+      }
+    }
   } finally {
     clearTimeout(timer);
-  }
-  let data = null;
-  if ((res.headers.get('Content-Type') || '').indexOf('json') >= 0) {
-    try {
-      data = await res.json();
-    } catch (e) {
-      data = null;
-    }
   }
   if (!res.ok) {
     const err = new ApiError(res.status, data && data.error);

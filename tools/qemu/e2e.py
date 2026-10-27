@@ -1889,15 +1889,26 @@ class E2E:
                     pass
         watcher = threading.Thread(target=watch_slot, name="slot1-watch-lcast", daemon=True)
         watcher.start()
+        status, diag_start = self.api("POST", "/api/monitor/diagnostics", {})
+        self.check(status == 200 and diag_start.get("active"), "temporary probes active during simultaneous rover checks")
         try:
             ok = self.lc_rovers(rovers, consumers0, n_up, wrong)
         finally:
+            _, diag_end = self.api("DELETE", "/api/monitor/diagnostics")
+            self.save("lcast-network-diagnostics.json", diag_end)
             watching.set()
             watcher.join(timeout=5)
         if not ok:
             return
         self.check(bool(states) and states <= {"streaming"},
                    f"slot 1 streaming throughout the rovers (states seen: {sorted(x for x in states if x)})")
+        tx = next((t for t in diag_end.get("transmit", []) if t.get("slot") == 1), {})
+        tcp = tx.get("tcp", {})
+        self.check(tcp.get("available") is True and tcp.get("delta_valid") is True and
+                   tcp.get("generation") == tx.get("generation") and tcp.get("state") is not None,
+                   "real sender socket provides referenced TCP snapshots and a connection-scoped ACK baseline")
+        self.check(diag_end.get("last_seq", 0) > 0 and not diag_end.get("active"),
+                   "temporary probes retained samples while rover and upstream integrity were checked")
         live = [x["n"] for x in self.sources() if x.get("end_mono") is None]
         s1 = self.slot(1)["status"]
         now = {k: s1.get(k) for k in slot_base}

@@ -3,6 +3,9 @@
 Building, the tests, CI's jobs run locally, bench builds and the emulator.
 Back to the [README](../README.md).
 
+Network latency work and validation: [firmware latency TODO](todo-network-latency.md).
+Shipped-feature findings and follow-ups: [review TODO](todo-shipped-feature-review.md).
+
 ## Building
 
 Requires ESP-IDF v6.1. From the repository root:

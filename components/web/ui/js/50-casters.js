@@ -818,9 +818,11 @@ const copyable = v => h('code', { class: 'copy' }, breakable(String(v)));
 
 /* Passwords the user asked to see, by place: kept across the page's rebuilds until Hide (or a change of that password). */
 const shownSecrets = {};
+let shownSecretsGeneration = 0;
 
 /* Forget every shown password (logout, a session that ended). */
 function forgetSecrets() {
+  shownSecretsGeneration++;
   for (const k of Object.keys(shownSecrets)) delete shownSecrets[k];
 }
 
@@ -839,9 +841,13 @@ function secretValue(key, path) {
       delete shownSecrets[key];
     } else {
       toggle.disabled = true;
+      const generation = shownSecretsGeneration;
       try {
-        shownSecrets[key] = (await api('GET', path)).password;
+        const r = await api('GET', path);
+        if (generation !== shownSecretsGeneration) return;
+        shownSecrets[key] = r.password;
       } catch (e) {
+        if (generation !== shownSecretsGeneration) return;
         toast(errText(e), 'bad');
       }
       toggle.disabled = false;

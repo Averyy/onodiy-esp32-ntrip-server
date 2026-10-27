@@ -22,6 +22,28 @@ void net_ladder_init(net_ladder_t *l)
     memset(l, 0, sizeof(*l));
 }
 
+static void reset_episode(net_ladder_t *l)
+{
+    uint32_t generation = l->generation;
+    net_ladder_init(l);
+    l->generation = generation;   /* an old queued message must not match the next episode */
+}
+
+void net_ladder_cancel(net_ladder_t *l, uint32_t generation)
+{
+    if (l->pending && l->generation == generation) {
+        l->pending = false;
+        l->queued = false;
+    }
+}
+
+void net_ladder_dispatched(net_ladder_t *l, uint32_t generation, bool accepted)
+{
+    if (l->pending && l->generation == generation) {
+        l->queued = accepted;
+    }
+}
+
 uint8_t net_ladder_triggers(const net_ladder_in_t *in)
 {
     if (!in->sta_configured) {
@@ -53,6 +75,16 @@ static void enter_hold(net_ladder_t *l, uint32_t now_s)
     l->phase = NET_LADDER_HOLD;
     l->hold_start_s = now_s;
     l->probe_asked = false;
+}
+
+static void finish_rung(net_ladder_t *l, net_rung_t rung, uint32_t now_s)
+{
+    net_ladder_cancel(l, l->generation);
+    if (rung == NET_RUNG_REBOOT) {
+        enter_hold(l, now_s);
+    } else {
+        l->next++;
+    }
 }
 
 /*
@@ -96,6 +128,42 @@ static net_ladder_why_t reboot_blocked(net_ladder_t *l, const net_ladder_in_t *i
         return NET_WHY_INHIBITED;
     }
     return ap_check(l, in, now_s);
+}
+
+static net_ladder_why_t rung_blocked(net_ladder_t *l, net_rung_t rung, const net_ladder_in_t *in,
+                                    net_probe_t p, uint32_t now_s)
+{
+    return rung == NET_RUNG_REBOOT ? reboot_blocked(l, in, p, now_s)
+           : rung == NET_RUNG_RESTART_WIFI ? ap_check(l, in, now_s)
+                                          : NET_WHY_NONE;
+}
+
+bool net_ladder_begin(net_ladder_t *l, uint32_t generation, const net_ladder_in_t *in,
+                      uint32_t observed_at_s, uint32_t now_s, net_ladder_out_t *out)
+{
+    if (!l->pending || generation != l->generation) {
+        return false;
+    }
+    if ((uint32_t)(now_s - observed_at_s) > NET_LADDER_INPUT_MAX_AGE_S ||
+        l->phase != NET_LADDER_ACTIVE || net_ladder_triggers(in) == 0) {
+        net_ladder_cancel(l, generation);
+        return false;
+    }
+    net_rung_t rung = (net_rung_t)(l->next + 1);
+    net_probe_t p = l->pending_probe;
+    uint32_t due_age = now_s - l->pass_start_s - s_offset_s[l->next];
+    if (in->probe_valid && (uint32_t)(now_s - in->probe_at_s) <= due_age) {
+        p = in->probe;   /* a probe may have recovered since the offer was queued */
+    }
+    net_ladder_why_t why = rung_blocked(l, rung, in, p, now_s);
+    if (p == NET_PROBE_OK || (why != NET_WHY_NONE && why != NET_WHY_AP_OVERRIDDEN)) {
+        net_ladder_cancel(l, generation);
+        return false;   /* the next tick reports the current skip/withhold */
+    }
+    *out = (net_ladder_out_t){ .act = NET_LADDER_ACT, .rung = rung, .why = why, .generation = generation };
+    finish_rung(l, rung, now_s);
+    l->last_rung = (uint8_t)rung;
+    return true;
 }
 
 /*
@@ -147,13 +215,13 @@ static bool s_only_hold_ends(net_ladder_t *l, const net_ladder_in_t *in, uint32_
 
 net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s)
 {
-    net_ladder_out_t out = { NET_LADDER_NONE, NET_RUNG_NONE, NET_WHY_NONE, 0 };
+    net_ladder_out_t out = { 0 };
     uint8_t triggers = net_ladder_triggers(in);
     bool needed = triggers != 0;
 
     if (l->phase == NET_LADDER_IDLE) {
         if (needed) {
-            net_ladder_init(l);   /* a new episode: the AP-client limit starts afresh */
+            reset_episode(l);   /* a new episode: the AP-client limit starts afresh */
             start_pass(l, now_s);
             l->seen = triggers;
             out.act = NET_LADDER_PASS;
@@ -164,6 +232,7 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
     l->seen |= triggers;
 
     if (!needed) {
+        net_ladder_cancel(l, l->generation);   /* queued work must not disturb a recovered link */
         if (!calm(l, in)) {
             l->healthy = false;
             return out;   /* the pass clock keeps running */
@@ -175,7 +244,7 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
         if ((uint32_t)(now_s - l->healthy_since_s) >= NET_LADDER_HEALTHY_S) {
             out.act = NET_LADDER_RESET;
             out.rung = (net_rung_t)l->last_rung;
-            net_ladder_init(l);
+            reset_episode(l);
         }
         return out;   /* the pass clock keeps running meanwhile */
     }
@@ -205,6 +274,8 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
     net_probe_t p;
     if (in->probe_valid && (uint32_t)(now_s - in->probe_at_s) <= due_age) {
         p = in->probe;
+    } else if (l->pending) {
+        p = l->pending_probe;   /* a timed-out probe also remains evidence while dispatch waits */
     } else if (!l->probe_asked) {
         l->probe_asked = true;
         l->probe_asked_s = now_s;
@@ -219,31 +290,33 @@ net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uin
 
     net_rung_t rung = (net_rung_t)(l->next + 1);
     out.rung = rung;
-    if (rung == NET_RUNG_REBOOT) {
-        enter_hold(l, now_s);
-    } else {
-        l->next++;
-    }
-
     if (p == NET_PROBE_OK) {
+        finish_rung(l, rung, now_s);
         out.act = NET_LADDER_SKIP;
         out.why = NET_WHY_UPSTREAM_OK;
         return out;
     }
-    net_ladder_why_t why = NET_WHY_NONE;
-    if (rung == NET_RUNG_RESTART_WIFI) {
-        why = ap_check(l, in, now_s);
-    } else if (rung == NET_RUNG_REBOOT) {
-        why = reboot_blocked(l, in, p, now_s);
-    }
+    net_ladder_why_t why = rung_blocked(l, rung, in, p, now_s);
     if (why != NET_WHY_NONE && why != NET_WHY_AP_OVERRIDDEN) {
+        finish_rung(l, rung, now_s);
         out.act = NET_LADDER_WITHHELD;
         out.why = why;
         return out;
     }
+    if (!l->pending) {
+        if (++l->generation == 0) {
+            ++l->generation;
+        }
+        l->pending = true;
+        l->queued = false;
+    }
+    l->pending_probe = p;
+    if (l->queued) {
+        return (net_ladder_out_t){ 0 };   /* one queued message at most for this offer */
+    }
     out.act = NET_LADDER_ACT;
     out.why = why;   /* AP_OVERRIDDEN: runs with a client connected */
-    l->last_rung = (uint8_t)rung;
+    out.generation = l->generation;
     return out;
 }
 

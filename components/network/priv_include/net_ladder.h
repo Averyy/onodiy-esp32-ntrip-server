@@ -94,6 +94,7 @@ extern "C" {
 #define NET_LADDER_ASSOC_NO_IP_S 60u     /**< trigger A: associated this long without an IP */
 #define NET_LADDER_UNREACHED_S  180u     /**< trigger S: a slot's failures did not reach its caster for this long */
 #define NET_LADDER_AP_HOLD_MAX_S 1800u   /**< AP clients hold the restart and reboot back at most this long per episode */
+#define NET_LADDER_INPUT_MAX_AGE_S 5u    /**< execution requires a recent health input (normally published each second) */
 
 /** Triggers (bit flags; also the reason byte of the pass-start record). */
 #define NET_TRIG_P (1u << 0)   /**< protected caster down while RTCM is healthy */
@@ -127,7 +128,7 @@ typedef enum {
 typedef enum {
     NET_LADDER_NONE = 0,      /**< nothing to do this tick */
     NET_LADDER_PROBE,         /**< start an upstream probe (the rung waits for its result) */
-    NET_LADDER_ACT,           /**< run `rung` now */
+    NET_LADDER_ACT,           /**< offer `rung` for dispatch; only net_ladder_begin advances it */
     NET_LADDER_SKIP,          /**< `rung` was due and is skipped (`why`) */
     NET_LADDER_WITHHELD,      /**< `rung` (reboot or Wi-Fi restart) is withheld (`why`) */
     NET_LADDER_RESET,         /**< healthy again: ladder back to idle (`rung` = last action started) */
@@ -166,6 +167,10 @@ typedef struct {
     bool ap_held;             /**< AP clients withheld a rung in this episode */
     uint32_t ap_held_since_s; /**< ... the first time */
     uint8_t seen;             /**< NET_TRIG_* that held at some point of this episode */
+    uint32_t generation;      /**< nonzero identity of the latest offer; retained across episode resets */
+    bool pending;             /**< one offered action, not yet started */
+    bool queued;              /**< its message was accepted: do not send another */
+    net_probe_t pending_probe;
 } net_ladder_t;
 
 typedef struct {
@@ -191,6 +196,7 @@ typedef struct {
     net_rung_t rung;
     net_ladder_why_t why;     /**< SKIP/WITHHELD: why; ACT: NONE, or AP_OVERRIDDEN */
     uint8_t triggers;         /**< PASS: NET_TRIG_* holding at the pass start */
+    uint32_t generation;      /**< ACT: admission token, not a command for manual recovery */
 } net_ladder_out_t;
 
 /** The triggers that hold for these inputs (NET_TRIG_*; 0 without credentials). */
@@ -206,8 +212,24 @@ size_t net_ladder_trigger_text(uint8_t triggers, char *buf, size_t cap);
 
 void net_ladder_init(net_ladder_t *l);
 
-/** One decision per call (call once per second). */
+/** One decision per call (call once per second). ACT retains its rung until
+ * begin accepts execution. Failed dispatch is offered again on the next tick;
+ * queued work is cancelled as soon as triggers disappear or policy refuses it. */
 net_ladder_out_t net_ladder_tick(net_ladder_t *l, const net_ladder_in_t *in, uint32_t now_s);
+
+/** Report the nonblocking queue send result. Late reports for old tokens do nothing. */
+void net_ladder_dispatched(net_ladder_t *l, uint32_t generation, bool accepted);
+
+/** Cancel the matching unstarted offer without consuming its rung. */
+void net_ladder_cancel(net_ladder_t *l, uint32_t generation);
+
+/** Admit a queued offer immediately before execution, with current network
+ * inputs and the time the health inputs were last published. A stale token,
+ * stale health snapshot, recovered trigger, newer successful probe or a new
+ * protection refuses it. Only success advances/counts the rung; out describes
+ * the action actually admitted. The caller serializes these operations. */
+bool net_ladder_begin(net_ladder_t *l, uint32_t generation, const net_ladder_in_t *in,
+                      uint32_t observed_at_s, uint32_t now_s, net_ladder_out_t *out);
 
 #ifdef __cplusplus
 }

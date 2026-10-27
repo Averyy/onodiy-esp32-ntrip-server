@@ -8,6 +8,15 @@ there is no radio, no receiver and no real timing.
 
 ## Quick start
 
+For verified TLS 1.2 and server-initiated renegotiation, after building QEMU:
+`uv run tools/qemu/tls_e2e.py --out build-qemu/tls-stream`.
+This reuses the recorded-stream scenario with a local test certificate installed
+through the emulator's custom-CA API. It never contacts a physical station or
+external caster. The script pins its PyOpenSSL test dependency; normal emulator
+tests remain standard-library-only. A passing negotiation supplements the host
+readiness/partial-write regressions; it does not measure worst-case hardware CPU
+contention. `--scenario local-caster` also runs the existing rover scenario.
+
 ```sh
 . $IDF_PATH/export.sh                                  # ESP-IDF v6.1
 python $IDF_PATH/tools/idf_tools.py install qemu-xtensa   # once, then export.sh again

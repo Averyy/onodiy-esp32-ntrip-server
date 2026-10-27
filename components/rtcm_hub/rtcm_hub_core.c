@@ -197,7 +197,8 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
     }
     const rec_hdr_t h = {
         .len = (uint16_t)len,
-        .msg_type = (uint16_t)((msg_type & RTCM_CORE_REC_TYPE_MASK) | (unsure ? RTCM_CORE_REC_UNSURE : 0u)),
+        .msg_type = (uint16_t)((msg_type & RTCM_CORE_REC_TYPE_MASK) | (unsure ? RTCM_CORE_REC_UNSURE : 0u) |
+                              (timed ? RTCM_CORE_REC_EXACT : 0u)),
         .seq = (uint32_t)c->frames_in,
         .rx_ms = rx,
         .epoch = epoch,
@@ -226,6 +227,7 @@ bool rtcm_core_publish(rtcm_core_t *c, const uint8_t *frame, size_t len, uint16_
         rtcm_core_sticky_t *s = &c->sticky[slot];
         s->len[next] = (uint16_t)len;
         s->rx_ms[next] = arrival_ms;
+        s->exact[next] = timed;
         s->active = next;
         s->valid = true;
         s->gen++;
@@ -555,8 +557,29 @@ static void apply(rtcm_core_consumer_t *k, act_t a, uint32_t epoch, uint16_t len
     }
 }
 
+static void arrival_add(rtcm_hub_arrivals_t *a, uint64_t rx_ms, bool known, bool exact)
+{
+    a->frames++;
+    if (!known) {
+        return;
+    }
+    if (a->timed_frames == 0 || rx_ms < a->oldest_rx_ms) {
+        a->oldest_rx_ms = rx_ms;
+    }
+    if (a->timed_frames == 0 || rx_ms > a->newest_rx_ms) {
+        a->newest_rx_ms = rx_ms;
+    }
+    a->timed_frames++;
+    a->exact_frames += exact ? 1u : 0u;
+}
+
+static bool observation_type(uint16_t type)
+{
+    return rtcm_msm_type(type) || (type >= 1001u && type <= 1004u) || (type >= 1009u && type <= 1012u);
+}
+
 static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len, size_t *out,
-                          uint64_t now_ms)
+                          uint64_t now_ms, rtcm_hub_read_meta_t *meta)
 {
     snap_t s;
     snapshot(c, &s);
@@ -616,7 +639,7 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
          * they keep a bad header from ever reaching memcpy. */
         if (!room || h.len < RTCM_CORE_MIN_FRAME || h.len > GNSS_RTCM3_MAX_FRAME ||
             rec_len(h.len) > c->cap - pos || h.seq != (uint32_t)k->frames_pos ||
-            (h.msg_type & (uint16_t)~(RTCM_CORE_REC_TYPE_MASK | RTCM_CORE_REC_UNSURE)) != 0) {
+            (h.msg_type & (uint16_t)~(RTCM_CORE_REC_TYPE_MASK | RTCM_CORE_REC_UNSURE | RTCM_CORE_REC_EXACT)) != 0) {
             lapped_now(c, k, true);
             return RUN_LAPPED;
         }
@@ -636,6 +659,20 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
                 return RUN_LAPPED;
             }
             *out += h.len;
+            if (meta != NULL) {
+                /* Reconstruct the wrapping record stamp relative to the newest
+                 * committed arrival, not the API caller's later wall clock.
+                 * Beyond the half-wrap range its age is ambiguous, so retain
+                 * the frame count and report its timing as unavailable. */
+                uint32_t age = (uint32_t)s.last_rx - h.rx_ms;
+                bool known = s.have_frame && age <= INT32_MAX && age <= s.last_rx;
+                uint64_t rx = known ? s.last_rx - age : 0;
+                bool exact = (h.msg_type & RTCM_CORE_REC_EXACT) != 0;
+                arrival_add(&meta->live, rx, known, exact);
+                if (observation_type(h.msg_type & RTCM_CORE_REC_TYPE_MASK)) {
+                    arrival_add(&meta->observations, rx, known, exact);
+                }
+            }
         }
         apply(k, a, h.epoch, h.len);
         k->rd += rec_len(h.len);
@@ -648,7 +685,7 @@ static run_t read_records(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
 /* Replay the sticky copies still pending. @return false if the buffer filled
  * up first (the rest goes out with the next read). */
 static bool replay_sticky(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len, size_t *out,
-                          uint64_t now_ms)
+                          uint64_t now_ms, rtcm_hub_read_meta_t *meta)
 {
     while (k->sticky_next < RTCM_CORE_STICKY_SLOTS) {
         rtcm_core_sticky_t *st = &c->sticky[k->sticky_next];
@@ -658,6 +695,7 @@ static bool replay_sticky(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
             uint8_t a = st->active;
             size_t len = st->len[a];
             uint64_t rx = st->rx_ms[a];
+            bool exact = st->exact[a];
             uint32_t gen = st->gen;
             unlk(c);
             if (!valid || (now_ms > rx && now_ms - rx > RTCM_CORE_STICKY_MAX_AGE_MS)) {
@@ -675,6 +713,9 @@ static bool replay_sticky(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
                 k->cnt.frames_out++;
                 k->cnt.bytes_out += len;
                 k->cnt.sticky_out++;
+                if (meta != NULL) {
+                    arrival_add(&meta->sticky, rx, true, exact);
+                }
                 break;
             }
         }
@@ -685,7 +726,16 @@ static bool replay_sticky(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf,
 
 size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len, uint64_t now_ms)
 {
+    return rtcm_core_read_with_meta(c, k, buf, max_len, now_ms, NULL);
+}
+
+size_t rtcm_core_read_with_meta(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, size_t max_len,
+                                uint64_t now_ms, rtcm_hub_read_meta_t *meta)
+{
     size_t out = 0;
+    if (meta != NULL) {
+        memset(meta, 0, sizeof(*meta));
+    }
     if (max_len < GNSS_RTCM3_MAX_FRAME) {
         return 0;
     }
@@ -706,10 +756,10 @@ size_t rtcm_core_read(rtcm_core_t *c, rtcm_core_consumer_t *k, uint8_t *buf, siz
         /* While held no sticky copy goes out (they may be newer than the
          * hold point); the release starts every consumer over anyway. Nor
          * while finishing: sticky copies open an epoch. */
-        if (!s.held && !k->finishing && !replay_sticky(c, k, buf, max_len, &out, now_ms)) {
+        if (!s.held && !k->finishing && !replay_sticky(c, k, buf, max_len, &out, now_ms, meta)) {
             break;
         }
-        run_t r = read_records(c, k, buf, max_len, &out, now_ms);
+        run_t r = read_records(c, k, buf, max_len, &out, now_ms, meta);
         if (r != RUN_LAPPED && r != RUN_RELEASED) {
             break;
         }

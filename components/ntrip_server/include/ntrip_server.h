@@ -167,6 +167,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "ntrip_policy.h"
+#include "ntrip_tx_diag.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -395,6 +396,16 @@ esp_err_t ntrip_server_remove_slot(size_t slot);
 
 /** Live status of a slot. Works before ntrip_server_init() (every slot DISABLED). */
 esp_err_t ntrip_server_get_status(size_t slot, ntrip_caster_status_t *out);
+
+/** Passive numeric sender diagnostics, including a live pending write.
+ * No transport API is called by getters. UTC is trusted whole seconds only;
+ * monotonic stamps and generation identify writes without wall-clock jumps. */
+esp_err_t ntrip_server_get_tx_diag(size_t slot, ntrip_tx_diag_t *out);
+
+/** Newest min(cap, 8) completed slow/failed writes, oldest first. RAM only.
+ * A concurrent replacement retries once, then returns ESP_ERR_TIMEOUT and
+ * count=0; individual record copies never hold a lock over the whole export. */
+esp_err_t ntrip_server_get_tx_history(size_t slot, ntrip_tx_write_diag_t *out, size_t cap, size_t *count);
 
 /** Drop and reconnect one slot (health monitor, after a budget overrun). */
 esp_err_t ntrip_server_restart_slot(size_t slot);

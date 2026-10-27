@@ -63,7 +63,7 @@ TEST_CASE("roaming: a strong signal never scans, a weak one only after the settl
     TEST_ASSERT_EQUAL_UINT32(0, run_until(&r, 1000, 1000 + 86400, -69, false, NET_ROAM_SCAN));
 }
 
-TEST_CASE("roaming: one access point and a weak signal scan once per 6 h, and never move", "[net_roam]")
+TEST_CASE("roaming: one access point and a weak signal wait at least 6 h, and never move", "[net_roam]")
 {
     net_roam_t r;
     start(&r, 0, -78);
@@ -103,7 +103,7 @@ TEST_CASE("roaming: a clearly stronger access point found twice 30 s apart makes
     TEST_ASSERT_EQUAL_UINT32(t2 + 1 + CFG.min_interval_s, t3);
 }
 
-TEST_CASE("roaming: a candidate below the gain does not count; mesh seen means a scan every 10 min", "[net_roam]")
+TEST_CASE("roaming: a candidate below the gain does not count; mesh backoff starts at 10 min", "[net_roam]")
 {
     net_roam_t r;
     start(&r, 0, -78);
@@ -131,6 +131,140 @@ TEST_CASE("roaming: the current access point's scan reading raises the baseline"
     net_roam_bss_t low[] = { bss(AP_A, -90, 1), bss(AP_B, -70, 6) };
     net_roam_scan_done(&q, low, 2, t);
     TEST_ASSERT_EQUAL_UINT8(0, q.hits);
+}
+
+/* Complete ordinary scans without a worthwhile alternative, stopping just
+ * after the result which selects the daily interval. */
+static uint32_t reach_daily(net_roam_t *r, uint32_t start_s, int8_t rssi)
+{
+    static const uint32_t waits[] = { 600u, 1800u, 3600u, 10800u, 21600u, 43200u, 86400u };
+    start(r, start_s, rssi);
+    uint32_t t = run_until(r, start_s, start_s + 1000u, rssi, false, NET_ROAM_SCAN);
+    net_roam_bss_t other = bss(AP_B, rssi, 6);
+    for (size_t i = 0; i < sizeof(waits) / sizeof(waits[0]); i++) {
+        net_roam_scan_done(r, &other, 1, t);
+        TEST_ASSERT_EQUAL_UINT32(waits[i], r->scan_wait_s);
+        if (i + 1u < sizeof(waits) / sizeof(waits[0])) {
+            TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(r, false, t + waits[i] - 1u));
+            t += waits[i];
+            TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(r, false, t));
+        }
+    }
+    return t;
+}
+
+TEST_CASE("roaming: completed searches back off to a day and saturate across the clock wrap", "[net_roam]")
+{
+    net_roam_t r;
+    uint32_t t = reach_daily(&r, UINT32_MAX - 1000u, -71);
+    net_roam_bss_t other = bss(AP_B, -74, 6);
+    for (unsigned i = 0; i < 3; i++) {
+        TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + NET_ROAM_SCAN_MAX_S - 1u));
+        t += NET_ROAM_SCAN_MAX_S;
+        TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t));
+        net_roam_scan_done(&r, &other, 1, t);
+        TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MAX_S, r.scan_wait_s);
+    }
+}
+
+TEST_CASE("roaming: a singleton starts at six hours then twelve and twenty four", "[net_roam]")
+{
+    net_roam_t r;
+    start(&r, 0, -78);
+    uint32_t t = run_until(&r, 0, 1000, -78, false, NET_ROAM_SCAN);
+    net_roam_bss_t only = bss(AP_A, -77, 6);
+    const uint32_t waits[] = { 21600u, 43200u, 86400u, 86400u };
+    for (size_t i = 0; i < sizeof(waits) / sizeof(waits[0]); i++) {
+        net_roam_scan_done(&r, &only, 1, t);
+        TEST_ASSERT_EQUAL_UINT32(waits[i], r.scan_wait_s);
+        t += waits[i];
+        TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t));
+    }
+}
+
+TEST_CASE("roaming: threshold oscillations and holds preserve daily backoff and never catch up in a burst", "[net_roam]")
+{
+    net_roam_t r;
+    uint32_t t = reach_daily(&r, 0, -71);
+    uint8_t step = r.negative_step;
+    TEST_ASSERT_EQUAL_UINT32(0, run_until(&r, t + 1, t + 120, -69, false, NET_ROAM_SCAN));
+    TEST_ASSERT_EQUAL_UINT32(0, run_until(&r, t + 121, t + 300, -71, false, NET_ROAM_SCAN));
+    TEST_ASSERT_EQUAL_UINT8(step, r.negative_step);
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MAX_S, r.scan_wait_s);
+    t += NET_ROAM_SCAN_MAX_S + 100;
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, true, t));
+    TEST_ASSERT_EQUAL_UINT8(step, r.negative_step);
+    TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t + 1));
+    net_roam_bss_t other = bss(AP_B, -74, 6);
+    net_roam_scan_done(&r, &other, 1, t + 2);
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 3));
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MAX_S, r.scan_wait_s);
+}
+
+TEST_CASE("roaming: deterioration is sustained, shortens the deadline once and respects the ten minute floor", "[net_roam]")
+{
+    net_roam_t r;
+    uint32_t t = reach_daily(&r, 0, -71);
+    for (unsigned i = 0; i < 40; i++) {
+        net_roam_rssi(&r, -80);
+    }
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 100));
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 100 + NET_ROAM_CHANGE_HOLD_S - 1));
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MAX_S, r.scan_wait_s);
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 100 + NET_ROAM_CHANGE_HOLD_S));
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MESH_S, r.scan_wait_s);
+    TEST_ASSERT_EQUAL_UINT8(0, r.negative_step);
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + NET_ROAM_SCAN_MESH_S - 1));
+    TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t + NET_ROAM_SCAN_MESH_S));
+    net_roam_bss_t other = bss(AP_B, -80, 6);
+    net_roam_scan_done(&r, &other, 1, t + NET_ROAM_SCAN_MESH_S);
+    TEST_ASSERT_EQUAL_UINT32(0, run_until(&r, t + 601, t + 1100, -80, false, NET_ROAM_SCAN));
+    TEST_ASSERT_EQUAL_UINT8(1, r.negative_step);   /* the same poor signal never resets again */
+}
+
+TEST_CASE("roaming: sustained recovery re-arms deterioration without itself resetting backoff", "[net_roam]")
+{
+    net_roam_t r;
+    uint32_t t = reach_daily(&r, 0, -80);
+    for (unsigned i = 0; i < 40; i++) {
+        net_roam_rssi(&r, -65);
+    }
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 1));
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 1 + NET_ROAM_CHANGE_HOLD_S));
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MAX_S, r.scan_wait_s);
+    for (unsigned i = 0; i < 40; i++) {
+        net_roam_rssi(&r, -75);
+    }
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 100));
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 100 + NET_ROAM_CHANGE_HOLD_S));
+    TEST_ASSERT_EQUAL_UINT32(NET_ROAM_SCAN_MESH_S, r.scan_wait_s);
+}
+
+TEST_CASE("roaming: failed scans preserve negative backoff and invalidate confirmation hits", "[net_roam]")
+{
+    net_roam_t r;
+    uint32_t t = reach_daily(&r, 0, -78);
+    uint8_t step = r.negative_step;
+    net_roam_bss_t better = bss(AP_B, -55, 6);
+    t += NET_ROAM_SCAN_MAX_S;
+    TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t));
+    net_roam_scan_done(&r, &better, 1, t);
+    TEST_ASSERT_EQUAL_UINT8(1, r.hits);
+    t += NET_ROAM_CONFIRM_S;
+    TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t));
+    net_roam_scan_failed(&r, t);
+    TEST_ASSERT_EQUAL_UINT8(0, r.hits);
+    TEST_ASSERT_EQUAL_UINT8(step, r.negative_step);
+    t += NET_ROAM_RETRY_S;
+    TEST_ASSERT_EQUAL(NET_ROAM_SCAN, net_roam_tick(&r, false, t));
+    net_roam_scan_done(&r, &better, 1, t);
+    TEST_ASSERT_EQUAL_UINT8(1, r.hits);
+    TEST_ASSERT_EQUAL(NET_ROAM_IDLE, net_roam_tick(&r, false, t + 1));
+    uint32_t gen = r.generation;
+    net_roam_associated(&r, AP_B, t + 2);
+    TEST_ASSERT_EQUAL_UINT32(gen + 1, r.generation);
+    TEST_ASSERT_EQUAL_UINT8(0, r.negative_step);
+    TEST_ASSERT_FALSE(r.ref_ok);
 }
 
 TEST_CASE("roaming: a hold, a recovered signal or a lost association forgets the candidate", "[net_roam]")

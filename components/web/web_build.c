@@ -1563,6 +1563,7 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
 {
     wj_obj_open(w, NULL);
     wj_str(w, "journal", web_journal_name(ctx->journal));
+    wj_bool(w, "session_running", st->flash_session_running);
     if (ctx->journal == WEB_JOURNAL_RUNNING || ctx->journal == WEB_JOURNAL_WAITING) {
         const um98x_flash_journal_t *j = &st->flash_journal;
         wj_obj_open(w, "record");
@@ -2279,6 +2280,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     const station_status_t *st = u->st;
     wj_obj_open(w, NULL);
     wj_str(w, "state", web_fw_state_name(f->state));
+    wj_bool(w, "gnss_job_active", f->gnss_job_active);
     wj_uint(w, "progress_pct", f->progress_pct);
     wj_bool(w, "checks_enabled", u->checks_enabled);
     wj_str_or_null(w, "release_repo", u->release_repo);

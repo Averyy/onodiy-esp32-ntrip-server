@@ -210,6 +210,7 @@ typedef enum {
 /** Status snapshot for the web UI (also the banner fields of /api/status). */
 typedef struct {
     fw_update_state_t state;
+    bool gnss_job_active;         /**< receiver download/restage job queued or running, through its handoff to station */
     char running_version[32];
     fw_update_trial_t trial;
     uint32_t trial_left_s;         /**< remaining time of the current trial stage */

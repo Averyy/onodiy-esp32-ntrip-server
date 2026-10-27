@@ -449,10 +449,14 @@ typedef struct {
     uint32_t at_ms[LCAST_RATE_SAMPLES];
     uint32_t n;                 /**< samples held */
     uint32_t head;              /**< the next slot */
+    uint32_t next_ms;           /**< nominal sampling deadline; actual timestamps above include callback jitter */
 } lcast_rate_t;
 
 void lcast_rate_init(lcast_rate_t *r);
-/** Take a sample when LCAST_RATE_STEP_MS passed since the last one (a gap over twice that, or the count going back, starts over). */
+/** Take a sample at each nominal LCAST_RATE_STEP_MS deadline, retaining the
+ * actual arrival time for the rate. Late callbacks do not move the cadence;
+ * overdue deadlines are coalesced. A gap over twice the step since the last
+ * accepted sample, or the count going back, starts over. */
 void lcast_rate_sample(lcast_rate_t *r, uint32_t now_ms, uint64_t bytes_in);
 /** Bits per second from the oldest sample to now, or from the last of the oldest ones the count stood still over
  * (bytes_now: the count now); 0 without a sample or within LCAST_RATE_MIN_MS of it. */

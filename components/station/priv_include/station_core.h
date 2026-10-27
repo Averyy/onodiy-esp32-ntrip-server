@@ -1319,6 +1319,37 @@ bool stn_line_is_nmea(const char *line, size_t len);
 /** Detection candidates: stored baud first, then the short list; full adds the rest; no duplicates. */
 unsigned stn_detect_candidates(uint32_t stored_baud, bool full, uint32_t *out, unsigned cap);
 
+/* ---- receiver flash lockout ------------------------------------------------ */
+
+typedef struct {
+    bool update_claimed;
+    bool inhibit_held;
+    bool request_reserved;
+    int inhibit;
+} stn_flash_lockout_t;
+
+/* The lifecycle operations return 0 on success, otherwise their error code.
+ * No receiver operation may run until take succeeds. Only resources acquired
+ * by a failed take are unwound; an earlier claim/inhibit still belongs to the
+ * session. Release ends that session, giving back the update slot before the
+ * inhibit (whose release may immediately commit a queued reboot). */
+typedef struct {
+    void *ctx;
+    int (*claim_update)(void *ctx);
+    void (*release_update)(void *ctx);
+    int (*acquire_inhibit)(void *ctx, int *token);
+    void (*release_inhibit)(void *ctx, int token);
+} stn_flash_lockout_ops_t;
+
+int stn_flash_lockout_take(stn_flash_lockout_t *lockout, const stn_flash_lockout_ops_t *ops);
+void stn_flash_lockout_release(stn_flash_lockout_t *lockout, const stn_flash_lockout_ops_t *ops);
+/* Under the station lock. Reserve before claiming the lifecycle update slot,
+ * then clear request_reserved after publishing the job or unwinding its
+ * failed admission. A finishing session also reserves before publishing a
+ * parked/absent journal, until its lifecycle release and final notification
+ * are complete. A losing request must never claim/release that slot. */
+bool stn_flash_lockout_reserve(stn_flash_lockout_t *lockout, bool busy);
+
 #ifdef __cplusplus
 }
 #endif

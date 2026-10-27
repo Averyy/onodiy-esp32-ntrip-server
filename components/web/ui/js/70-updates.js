@@ -335,7 +335,11 @@ async function startMaintenance(b, out) {
 const updatesPart = {
   create(arg) {
     let u = null, staged = null, flash = null;
+    let flashFresh = false, flashReadError = '';
     let rflow = null;          /* receiver flow: {state, text, tone} */
+    let gone = false, revision = 0, mutations = 0, reading = null, readAgain = false;
+    let progressPhase = '', receiverProgress = 0;
+    let attempt = null;
     let stagedDeadline = 0, stagedTimer = 0;
     let appMain = false;       /* the app row shows the card's main button */
     let mainShown = false;     /* the app or receiver row does */
@@ -351,6 +355,79 @@ const updatesPart = {
     const stagedBox = h('div', { class: 'sect' });
     const appErr = errBox(), gnssErr = errBox(), sessionErr = errBox(), maintErr = errBox();
     const maintLeft = h('span');
+
+    /* Age changes on every read; it is not a new result. Without a job id,
+     * an identical old result cannot be attributed to another attempt. */
+    const resultKey = r => r ? JSON.stringify(Object.keys(r).filter(k => k !== 'ended_age_s').sort().map(k => [k, r[k]])) : '';
+    const rememberAttempt = (f = flash, next = u) => ({ last: resultKey(f && f.last), download: resultKey(next && next.last_result), stationSeen: false });
+    const hideReceiverProgress = () => { P.gnss_update.hide(); P.gnss_check.hide(); P.gnss_flash.hide(); };
+    async function receiverAction(fn, accepted) {
+      const own = ++revision;
+      progressPhase = '';
+      mutations++;
+      const previous = attempt;
+      attempt = rememberAttempt();
+      try {
+        const r = await fn();
+        if (!gone && accepted) accepted(r, own === revision);
+        return r;
+      } catch (e) {
+        /* A refused request started no new flow. A transport failure is
+         * uncertain; the next snapshots establish what the station did. */
+        if (own === revision && e instanceof ApiError && e.status >= 400) attempt = previous;
+        throw e;
+      } finally {
+        mutations--;
+        revision++;
+        if (!gone) load().catch(() => {});
+      }
+    }
+
+    function reconcileReceiver(next, f, keepProgress) {
+      if (!f) return;   /* a failed read is not evidence that the operation ended */
+      const installing = f.session_running || f.journal === 'running';
+      const checking = f.check_running;
+      const downloading = next.gnss_job_active || next.state === 'downloading_gnss';
+      if (installing || checking || downloading) {
+        if (!attempt || attempt.done) attempt = rememberAttempt(f, next);
+        const upload = !!(rflow && rflow.upload);
+        if (!keepProgress) hideReceiverProgress();
+        if (installing) {
+          attempt.stationSeen = true;
+          rflow = { state: 'install', upload: upload };
+          /* Before the journal exists the previous session's counters may
+           * remain in the progress snapshot. Show only the accepted work. */
+          if (!keepProgress) P.gnss_flash.set(Object.assign({ job: 'gnss_flash' }, f.journal === 'running' ? f.progress : { phase: 'checking' }, { done: false }));
+        } else if (checking) {
+          attempt.stationSeen = true;
+          rflow = { state: 'check', upload: upload };
+          if (!keepProgress) P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
+        } else {
+          rflow = { state: 'download', upload: upload };
+          if (!keepProgress) P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', pct: next.state === 'downloading_gnss' ? next.progress_pct : null, done: false });
+        }
+        return;
+      }
+      /* Both fields must be present: an older snapshot cannot establish
+       * that accepted, queued work has finished. */
+      if (!attempt || next.gnss_job_active !== false || f.session_running !== false || f.check_running !== false) return;
+      hideReceiverProgress();
+      const last = f.last;
+      const lr = next.last_result;
+      if (last && (attempt.stationSeen || resultKey(last) !== attempt.last)) {
+        rflow = { state: last.outcome === 'success' ? 'installed' : last.outcome === 'checked' ? 'checked' : 'refused',
+          tone: outcomeTone(last.outcome), text: outcomeText(last), upload: !!(rflow && rflow.upload) };
+      } else if (lr && lr.job === 'gnss_update' && lr.result !== 'ok' && lr.result !== 'not_available_yet' && resultKey(lr) !== attempt.download) {
+        rflow = { state: 'failed', tone: resultTone(lr), text: 'Receiver package: ' + resultText(lr) + '.' };
+      } else if (attempt.terminal) {
+        rflow = attempt.terminal;   /* a final WS outcome is evidence too, even without a trusted clock */
+      } else {
+        rflow = { state: 'unknown', tone: 'warn', text: f.journal !== 'none' ? 'The receiver update session needs attention; see below.' :
+          'The update is no longer running, but its final result is unavailable.' };
+      }
+      attempt.done = true;
+      if (rflow.state !== 'unknown') attempt.terminal = rflow;
+    }
 
     /* ---- The card's title row: the last check and "Check now" (a tool, like Refresh) ---- */
     function renderCheck() {
@@ -474,10 +551,12 @@ const updatesPart = {
       if (!ok) return;
       gnssErr.hidden = true;
       try {
-        await busy(button, () => api('POST', '/api/update/gnss', { build: g.latest_build, cross_layout_ack: xl }));
-        rflow = { state: 'download' };
-        P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', done: false });
-        renderGnss();
+        await busy(button, () => receiverAction(() => api('POST', '/api/update/gnss', { build: g.latest_build, cross_layout_ack: xl }), (r, current) => {
+          if (!current) return;
+          rflow = { state: 'download' };
+          P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', done: false });
+          renderGnss();
+        }));
       } catch (e) {
         if (e instanceof ApiError && e.code === 'not_offered') load();
         showErr(e, gnssErr);
@@ -508,7 +587,7 @@ const updatesPart = {
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.'),
           g.blocked === 'app_trial' && firstChecks((u.app || {}).trial) ?
             [' ', fin = btn('Finish checks now', () => finishChecks(fin), 'small')] : null) : null,
-        rflow ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
+        rflow && rflow.state !== 'unknown' ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,
         P.gnss_flash.el,
@@ -552,11 +631,18 @@ const updatesPart = {
     /* ---- Receiver update session ---- */
     function renderSession() {
       const f = flash;
-      if (!f || (f.journal === 'none' && !f.receiver_in_loader)) {
+      if ((!f && !flashReadError) || (flashFresh && f.journal === 'none' && !f.receiver_in_loader)) {
         sessionCard.hidden = true;
         return;
       }
       sessionCard.hidden = false;
+      const stale = !flashFresh ? msg('warn', 'Receiver update status could not refresh. ' +
+        (f ? 'The displayed session is the last known state. ' : 'The current session state is unknown. ') +
+        'Recovery actions wait for a successful refresh. ' + flashReadError) : null;
+      if (!f) {
+        mount(sessionCard, cardHead('Receiver update session', badge('Unknown', 'warn')), stale, sessionErr);
+        return;
+      }
       const rec = f.record;
       const pr = f.progress;
       const acts = f.actions || {};
@@ -566,12 +652,20 @@ const updatesPart = {
         const b = btn(a[2], async () => {
           const ok = await dialog({ title: a[3], ok: a[2], okKind: a[0] === 'clear' ? 'danger solid' : 'primary', body: h('p', null, a[4]) });
           if (!ok) return;
-          const r = await act(b, () => api('POST', '/api/gnss/flash/' + a[1], { confirm: true }), sessionErr);
+          if (gone || !flashFresh || !flash || !((flash.actions || {})[a[0]] || {}).allowed ||
+              resultKey(f.record) !== resultKey(flash.record)) {
+            if (!gone) toast('Receiver update status changed. Wait for a successful refresh and review the action again.', 'warn');
+            return;
+          }
+          const r = await act(b, () => receiverAction(() => api('POST', '/api/gnss/flash/' + a[1], { confirm: true }), (answer, current) => {
+            if (current && a[0] === 'clear') { attempt = null; rflow = null; hideReceiverProgress(); }
+          }), sessionErr);
           if (r !== undefined) {
             toast(a[0] === 'clear' ? 'Session cleared.' : 'Started.', 'ok');
             load();
           }
-        }, a[0] === 'clear' ? 'danger' : '', { disabled: !info.allowed, title: info.allowed ? null : info.why === 'not_available_yet' ? notEnabled(f.flash_reason) : lbl(L.why, info.why) });
+        }, a[0] === 'clear' ? 'danger' : '', { disabled: !flashFresh || !info.allowed,
+          title: !flashFresh ? 'Waiting for a successful refresh' : info.allowed ? null : info.why === 'not_available_yet' ? notEnabled(f.flash_reason) : lbl(L.why, info.why) });
         /* Not in this build: the card's own line says it once for both. */
         if (!info.allowed && info.why && info.why !== 'not_available_yet') notNow.push(h('li', null, a[2] + ': not now, ' + lbl(L.why, info.why) + '.'));
         return b;
@@ -582,6 +676,7 @@ const updatesPart = {
       const tries = pr || rec;
       mount(sessionCard,
         h('div', { class: 'card-head', id: 'session' }, h('h2', null, 'Receiver update session'), badge(lbl(L.journal, f.journal), f.journal === 'running' ? 'info' : 'warn')),
+        stale,
         f.journal !== 'none' ? h('p', null, (L.journal[f.journal] || ['', ''])[1]) : null,
         f.receiver_in_loader ? msg('warn', L.salert.receiver_in_loader[1]) : null,
         f.package_needed ? msg('warn', packageNeededText(f.package_needed)) : null,
@@ -779,18 +874,20 @@ const updatesPart = {
         if (!ok) return;
         err.hidden = true;
         try {
-          const r = await busy(go, () => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: xl }));
-          staged = null;
-          if (r && r.check_only) {
-            /* No receiver flashing in this build: the station checks the package and releases it. */
-            rflow = { state: 'check', upload: true, tone: 'warn', text: checkStarted() };
-            P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
-            renderStaged(msg('info', 'The package check started. Its result shows above.'));
-          } else {
-            rflow = { state: 'install', upload: true };
-            renderStaged(msg('info', 'Receiver update started. Its progress shows above.'));
-          }
-          renderGnss();
+          await busy(go, () => receiverAction(() => api('POST', '/api/upload/gnss/confirm', { sha256: s.sha256, expected_fw: v, cross_layout_ack: xl }), (r, current) => {
+            staged = null;
+            if (!current) { renderStaged(); return; }
+            if (r && r.check_only) {
+              /* No receiver flashing in this build: the station checks the package and releases it. */
+              rflow = { state: 'check', upload: true, tone: 'warn', text: checkStarted() };
+              P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
+              renderStaged(msg('info', 'The package check started. Its result shows above.'));
+            } else {
+              rflow = { state: 'install', upload: true };
+              renderStaged(msg('info', 'Receiver update started. Its progress shows above.'));
+            }
+            renderGnss();
+          }));
         } catch (e) {
           showErr(e, err);
         }
@@ -851,33 +948,66 @@ const updatesPart = {
      * builds its buttons anew. Loads after an action or an event always
      * render. */
     let shownKey = '';
-    async function load(periodic) {
-      const res = await Promise.all([
-        api('GET', '/api/update'),
-        api('GET', '/api/gnss/flash').catch(() => null),
-        staged ? Promise.resolve(staged) : api('GET', '/api/upload/gnss').catch(() => null),
-      ]);
-      u = res[0];
-      flash = res[1];
-      if (!staged && res[2] && res[2].staged) {
-        staged = res[2];
+    function load(periodic) {
+      if (gone || mutations) return Promise.resolve();
+      if (reading) {
+        if (!periodic) readAgain = true;
+        return reading;
+      }
+      reading = read(periodic).finally(() => {
+        reading = null;
+        if (!gone && readAgain) {
+          readAgain = false;
+          load().catch(() => {});
+        }
+      });
+      return reading;
+    }
+    async function read(periodic) {
+      const own = revision;
+      const progress = receiverProgress;
+      /* The worker publishes the receiver job before releasing its busy
+       * flag. Read in this order so a handoff cannot look idle in both. */
+      let next;
+      try {
+        next = await api('GET', '/api/update');
+      } catch (e) {
+        if (!gone && own === revision && !mutations) {
+          flashFresh = false;
+          flashReadError = errText(e);
+          renderSession();
+        }
+        throw e;
+      }
+      if (gone) return;
+      let f = null, failure = '';
+      try {
+        f = await api('GET', '/api/gnss/flash');
+        if (!f || typeof f.journal !== 'string') throw new Error('The receiver update status was incomplete.');
+      } catch (e) {
+        f = null;
+        failure = errText(e);
+      }
+      if (gone) return;
+      const pkg = staged || await api('GET', '/api/upload/gnss').catch(() => null);
+      if (gone || own !== revision || mutations) return;
+      const sessionKey = () => JSON.stringify([flashFresh, flashReadError, flash && flash.journal, flash && flash.receiver_in_loader, flash && flash.actions, flash && flash.record]);
+      const previousSession = sessionKey();
+      reconcileReceiver(next, f, progress !== receiverProgress);
+      u = next;
+      if (f) flash = f;
+      flashFresh = !!f;
+      flashReadError = failure;
+      /* Freshness and admission changes must reach the buttons even while
+       * keyboard focus or a selection holds ordinary periodic rendering. */
+      if (sessionKey() !== previousSession) renderSession();
+      if (!staged && pkg && pkg.staged) {
+        staged = pkg;
         stagedDeadline = Date.now() + (staged.staged.expires_in_s || 900) * 1000;
         renderStaged();
       }
-      if (u.state === 'downloading_gnss' && !rflow) {
-        rflow = { state: 'download' };
-        P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', pct: u.progress_pct, done: false });
-      }
       if (u.state === 'downloading_app') P.app_update.set({ job: 'app_update', phase: 'downloading', pct: u.progress_pct, done: false });
-      if (flash && flash.check_running && !rflow) {
-        rflow = { state: 'check', tone: 'warn', text: checkStarted() };
-        P.gnss_check.set({ job: 'gnss_check', phase: 'checking', done: false });
-      }
-      if (flash && flash.journal === 'running' && flash.progress && !rflow) {
-        rflow = { state: 'install' };
-        P.gnss_flash.set(Object.assign({ job: 'gnss_flash' }, flash.progress, { done: false }));
-      }
-      const key = JSON.stringify([u, flash, rflow]);
+      const key = JSON.stringify([u, flash, rflow, flashFresh, flashReadError]);
       if (periodic && (key === shownKey || interacting(updCard) || interacting(sessionCard))) return;
       shownKey = key;
       renderPkgRow();
@@ -890,6 +1020,20 @@ const updatesPart = {
     }
 
     offs.push(bus.on('progress', m => {
+      if (['gnss_update', 'gnss_flash', 'gnss_check'].includes(m.job)) {
+        const phase = m.job + ':' + m.phase;
+        if (m.done || phase !== progressPhase || (attempt && attempt.done)) revision++;
+        progressPhase = m.done ? '' : phase;
+        receiverProgress++;
+        if (!attempt || (!m.done && attempt.done)) attempt = rememberAttempt();
+        /* A fast flash can finish before the download worker's handoff
+         * message reaches this page. It cannot reopen that finished flow. */
+        if (m.job === 'gnss_update' && m.done && ['ok', 'not_available_yet'].includes(m.result) && attempt.terminal) {
+          P.gnss_update.hide();
+          load().catch(() => {});
+          return;
+        }
+      }
       const w = P[m.job];
       if (m.job === 'check' && m.done) {
         if (w) w.hide();   /* the result shows once, as the row's own message */
@@ -906,6 +1050,8 @@ const updatesPart = {
           rflow = { state: 'install' };
         } else {
           rflow = { state: 'failed', tone: 'bad', text: 'The receiver package could not be prepared: ' + resultText(m) + '. Nothing on the receiver changed.' };
+          attempt.terminal = rflow;
+          attempt.done = true;
         }
         if (u) renderGnss();
       }
@@ -924,13 +1070,15 @@ const updatesPart = {
             text: m.outcome && m.outcome !== 'none' ? resultText(m) :
               (m.job === 'gnss_check' ? 'Package check: ' : 'Receiver update: ') + resultText(m),
           };
+          attempt.terminal = rflow;
+          attempt.done = true;
         }
         renderGnss();
       }
       if (m.done) load().catch(() => {});
     }));
     offs.push(bus.on('event', m => {
-      if (m.event === 'update_state') load().catch(() => {});
+      if (m.event === 'update_state') { revision++; load().catch(() => {}); }
     }));
 
     mount(headBox, cardHead('Updates'));
@@ -946,6 +1094,9 @@ const updatesPart = {
       revert: rbBox,
       update: renderMaint,
       destroy() {
+        gone = true;
+        revision++;
+        readAgain = false;
         stop();
         for (const off of offs) off();
         clearInterval(stagedTimer);

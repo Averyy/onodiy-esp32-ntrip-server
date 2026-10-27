@@ -104,6 +104,7 @@
 #include "net_core.h"
 #include "net_ladder.h"
 #include "net_roam.h"
+#include "net_scan.h"
 #include "sdkconfig.h"
 #include "settings.h"
 
@@ -181,7 +182,6 @@ _Static_assert(WIFI_REASON_ROAMING == NET_REASON_ROAMING, "the supplicant's move
 #define APPLY_DELAY_MS       NET_CRED_APPLY_DELAY_MS   /* new credentials: let the HTTP reply go out first */
 #define DISCONNECT_WAIT_MS   3000    /* deliberate disconnect: connect anyway if no event came */
 #define CONNECT_WATCHDOG_MS  60000   /* a connect attempt with no event at all counts as failed */
-#define SCAN_WATCHDOG_MS     20000   /* a scan without SCAN_DONE is abandoned (it would block connects) */
 #define ROAM_SCAN_MAX_MS     60      /* a roaming scan's longest wait on a channel (only the station's network answers) */
 #define ROAM_SCAN_HOME_MS    60      /* and its time back on the station's channel between two channels */
 #define ROAM_SCAN_KEEP       8       /* access points of the network a roaming scan hands on (the strongest) */
@@ -222,6 +222,7 @@ typedef enum {
     MSG_SCAN_DONE,
     MSG_TIME_SYNC,
     MSG_RECOVER,
+    MSG_LADDER,        /* generation: an automatic offer, revalidated before execution */
     MSG_AP_REQUEST,
     MSG_GOT_IP6,        /* reason: 0 station, 1 access point */
     MSG_MOVE_NOW,       /* the station's own move at once (network_move_now) */
@@ -232,6 +233,7 @@ typedef struct {
     uint8_t reason;     /* disconnect reason, recovery action */
     int8_t rssi;
     uint8_t held;       /* MSG_STA_CONNECTED, MSG_STA_DISCONNECTED: the interface kept its address (net_hold_t) */
+    uint32_t generation; /* MSG_LADDER only; manual MSG_RECOVER has no ladder admission */
 } net_msg_t;
 
 typedef enum {
@@ -267,8 +269,9 @@ static network_status_t s_st;               /* under s_lock */
 static int64_t s_probe_at_us;               /* under s_lock: when the last probe finished */
 static bool s_probe_valid;                  /* under s_lock */
 static bool s_probe_running;                /* under s_lock */
-static bool s_scanning;                     /* under s_lock */
-static int64_t s_scan_started_us;           /* under s_lock */
+static net_scan_t s_scan_owner;             /* under s_lock: active owner, pending request, durable completion */
+static bool s_scan_user_stopped;            /* under s_lock: stop callback ended a user's request */
+static bool s_scan_stopped;                 /* under s_lock: net task must retire its roaming request */
 static bool s_wifi_sta_on;                  /* under s_lock: Wi-Fi runs with the station interface */
 static size_t s_scan_count;                 /* under s_lock */
 EXT_RAM_BSS_ATTR static net_scan_entry_t s_scan[NETWORK_SCAN_MAX];  /* under s_lock */
@@ -363,9 +366,12 @@ static TaskHandle_t s_probe_task;
 static EventGroupHandle_t s_probe_events;
 #define PROBE_IDLE_BIT BIT0
 
-/* Ladder (network_ladder_tick, under s_lock while deciding). */
+/* Ladder: health task proposes, network task admits; all state under s_lock. */
 static net_ladder_t s_ladder;
 static uint8_t s_ladder_note;               /* last journalled skip/withhold: (rung << 4) | why */
+static net_ladder_in_t s_ladder_inputs;     /* latest health input; local network fields refreshed at admission */
+static uint32_t s_ladder_observed_s;
+static void handle_ladder(uint32_t generation);
 
 /* A planned restart is under way (lifecycle shutdown hook): our own Wi-Fi
  * stop on the way down is not a link loss. */
@@ -382,9 +388,7 @@ typedef enum {
 } roam_hold_t;
 static net_roam_t s_roam;
 static volatile uint8_t s_btm_hold;         /* roam_hold_t for the access point's requests: net task writes, Wi-Fi task reads */
-static bool s_roam_scanning;                /* under s_lock: a roaming scan runs */
-static int64_t s_roam_scan_started_us;      /* under s_lock */
-static bool s_user_scan_queued;             /* under s_lock: a user's scan starts once the roaming scan is done */
+static uint32_t s_roam_scan_generation;     /* association whose roaming scan was started */
 static bool s_steer_read;                   /* ap_steering read for this association */
 /* A move under way: from its start to the address on the new link. */
 static bool s_move_on;
@@ -524,9 +528,19 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     (void)base;
     switch (id) {
     case WIFI_EVENT_STA_START:
+        taskENTER_CRITICAL(&s_lock);
+        net_scan_started(&s_scan_owner);
+        taskEXIT_CRITICAL(&s_lock);
         send_msg(MSG_STA_START, 0, 0);
         break;
     case WIFI_EVENT_STA_STOP:
+        /* Retire ownership at the driver's stopped event, never at the
+         * earlier stop request. Keep it even if forwarding fails. */
+        taskENTER_CRITICAL(&s_lock);
+        s_scan_user_stopped |= net_scan_stopped(&s_scan_owner);
+        s_scan_stopped = true;
+        s_wifi_sta_on = false;
+        taskEXIT_CRITICAL(&s_lock);
         send_msg(MSG_STA_STOP, 0, 0);
         break;
     /* WIFI_EVENT_STA_CONNECTED and _DISCONNECTED: on_sta_link. */
@@ -544,9 +558,20 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
             send_msg(MSG_AP_CLIENTS, 0, 0);
         }
         break;
-    case WIFI_EVENT_SCAN_DONE:
-        send_msg(MSG_SCAN_DONE, 0, 0);
+    case WIFI_EVENT_SCAN_DONE: {
+        const wifi_event_sta_scan_done_t *done = data;
+        taskENTER_CRITICAL(&s_lock);
+        net_scan_notify(&s_scan_owner, done != NULL ? done->status : UINT32_MAX,
+                        (uint32_t)(esp_timer_get_time() / 1000));
+        taskEXIT_CRITICAL(&s_lock);
+        /* The mailbox above is authoritative. A full ordinary event queue
+         * must not discard status or invoke unrelated link recovery. */
+        net_msg_t m = { .type = MSG_SCAN_DONE };
+        if (s_queue != NULL) {
+            (void)xQueueSend(s_queue, &m, 0);
+        }
         break;
+    }
     default:
         break;
     }
@@ -1069,10 +1094,7 @@ static void hold_cut(const char *why);
 static bool scanning(void)
 {
     taskENTER_CRITICAL(&s_lock);
-    bool s = s_scanning;
-#if CONFIG_NETWORK_ROAM
-    s = s || s_roam_scanning;
-#endif
+    bool s = net_scan_radio_busy(&s_scan_owner);
     taskEXIT_CRITICAL(&s_lock);
     return s;
 }
@@ -1213,14 +1235,12 @@ static void wifi_stop(void)
     hold_cut("Wi-Fi stops");
 #endif
     s_sta_state = STA_IDLE;
-    set_wifi_sta_on(false);
     taskENTER_CRITICAL(&s_lock);
-    s_scanning = false;   /* a stop ends any scan */
-#if CONFIG_NETWORK_ROAM
-    s_roam_scanning = false;
-    s_user_scan_queued = false;
-#endif
+    net_scan_stopping(&s_scan_owner, s_wifi_sta_on);
+    s_wifi_sta_on = false;
     taskEXIT_CRITICAL(&s_lock);
+    /* Do not free scan ownership before the driver's stop event: a scan
+     * completion already on its event loop still belongs to the old scan. */
     esp_err_t err = esp_wifi_stop();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
@@ -1836,48 +1856,18 @@ static void move_done(bool kept)
              gap);
 }
 
-/* The user's scan of every network (the setup page's list). */
-static esp_err_t user_scan_driver_start(void)
-{
-    wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
-    return esp_wifi_scan_start(&sc, false);
-}
-
-/* The roaming scan is over (read, failed or abandoned): a user's scan that waited for it starts now. */
-static void roam_scan_end(void)
-{
-    taskENTER_CRITICAL(&s_lock);
-    s_roam_scanning = false;
-    bool user = s_user_scan_queued;
-    s_user_scan_queued = false;
-    if (user) {
-        s_scan_started_us = esp_timer_get_time();
-    }
-    taskEXIT_CRITICAL(&s_lock);
-    if (user && user_scan_driver_start() != ESP_OK) {
-        taskENTER_CRITICAL(&s_lock);
-        s_scanning = false;
-        taskEXIT_CRITICAL(&s_lock);
-        ESP_LOGW(TAG, "scan did not start: the list stays as it was");
-        post_event(NETWORK_EVENT_SCAN_DONE);   /* the page stops waiting */
-    }
-}
-
 /* A scan for the station's own SSID only, short on each channel: the setup page's list is not touched. */
 static void roam_scan_start(uint32_t now)
 {
     static uint8_t ssid[33];   /* the driver reads it after the call returned */
     taskENTER_CRITICAL(&s_lock);
-    bool busy = s_scanning || s_roam_scanning;
-    if (!busy) {
-        s_roam_scanning = true;
-        s_roam_scan_started_us = esp_timer_get_time();
-    }
+    bool begin = net_scan_begin(&s_scan_owner, NET_SCAN_ROAM, (uint32_t)(esp_timer_get_time() / 1000));
     taskEXIT_CRITICAL(&s_lock);
-    if (busy) {
+    if (!begin) {
         net_roam_scan_failed(&s_roam, now);
         return;
     }
+    s_roam_scan_generation = s_roam.generation;
     memset(ssid, 0, sizeof(ssid));
     memcpy(ssid, s_ssid, strnlen(s_ssid, sizeof(ssid) - 1));
     wifi_scan_config_t sc = {
@@ -1890,20 +1880,29 @@ static void roam_scan_start(uint32_t now)
     esp_err_t err = esp_wifi_scan_start(&sc, false);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "roaming scan: %s (tried again in %u s)", esp_err_to_name(err), (unsigned)NET_ROAM_RETRY_S);
-        roam_scan_end();
+        taskENTER_CRITICAL(&s_lock);
+        net_scan_start_failed(&s_scan_owner);
+        taskEXIT_CRITICAL(&s_lock);
         net_roam_scan_failed(&s_roam, now);
     }
 }
 
 /* SCAN_DONE of a roaming scan: the network's access points (its SSID, the security the station uses). */
-static void roam_scan_done(void)
+static bool roam_scan_done(uint32_t duration_ms)
 {
     net_roam_bss_t found[ROAM_SCAN_KEEP];
     size_t n = 0;
     size_t len = strnlen(s_ssid, 32);
     bool want_secured = s_pass[0] != '\0';
+    uint16_t total = 0;
+    bool valid = esp_wifi_scan_get_ap_num(&total) == ESP_OK && s_roam.assoc &&
+                 s_roam.generation == s_roam_scan_generation;
     wifi_ap_record_t rec;
-    while (esp_wifi_scan_get_ap_record(&rec) == ESP_OK) {
+    for (uint16_t i = 0; valid && i < total; i++) {
+        if (esp_wifi_scan_get_ap_record(&rec) != ESP_OK) {
+            valid = false;
+            break;
+        }
         bool secured = rec.authmode != WIFI_AUTH_OPEN && rec.authmode != WIFI_AUTH_WEP && rec.authmode != WIFI_AUTH_OWE;
         if (strnlen((const char *)rec.ssid, sizeof(rec.ssid)) != len || memcmp(rec.ssid, s_ssid, len) != 0 ||
             secured != want_secured) {
@@ -1928,16 +1927,19 @@ static void roam_scan_done(void)
         found[at] = e;
     }
     (void)esp_wifi_clear_ap_list();
-    roam_scan_end();
+    if (!valid) {
+        return false;
+    }
     net_roam_scan_done(&s_roam, found, n, now_s());
     if (s_roam.hits > 0) {
-        ESP_LOGI(TAG, "roaming scan: a stronger access point, %d dBm on channel %u (%d dBm here), found %u of %u times",
+        ESP_LOGI(TAG, "roaming scan: a stronger access point, %d dBm on channel %u (%d dBm here), found %u of %u times (%lu ms)",
                  s_roam.cand.rssi, s_roam.cand.channel, net_roam_avg_dbm(&s_roam), s_roam.hits,
-                 (unsigned)NET_ROAM_HITS);
+                 (unsigned)NET_ROAM_HITS, (unsigned long)duration_ms);
     } else {
-        ESP_LOGI(TAG, "roaming scan: %u access point(s) of the network, none clearly stronger than here (%d dBm)",
-                 (unsigned)n, net_roam_avg_dbm(&s_roam));
+        ESP_LOGI(TAG, "roaming scan: %u access point(s) of the network, none clearly stronger than here (%d dBm); %lu ms, next check not before %lu s",
+                 (unsigned)n, net_roam_avg_dbm(&s_roam), (unsigned long)duration_ms, (unsigned long)s_roam.scan_wait_s);
     }
+    return true;
 }
 
 /* ---- keeping the address across a move (net_hold_t) ---- */
@@ -2230,13 +2232,12 @@ static void roam_tick(uint32_t now)
     roam_hold_t gate = (h == ROAM_HOLD_NONE && !net_roam_btm_open(&s_roam, false, now)) ? ROAM_HOLD_GAP : h;
     __atomic_store_n(&s_btm_hold, (uint8_t)gate, __ATOMIC_RELAXED);
     taskENTER_CRITICAL(&s_lock);
-    bool user_scan = s_scanning;
+    bool scan_busy = !s_scan_owner.radio_ready || s_scan_owner.phase != NET_SCAN_IDLE ||
+                     s_scan_owner.user_queued || s_scan_owner.done;
     bool ladder = s_st.ladder_active;
     taskEXIT_CRITICAL(&s_lock);
-    if (user_scan) {
-        return;   /* no roaming scan beside the user's */
-    }
-    bool held = h != ROAM_HOLD_NONE || s_leaving || ladder || s_move_on || !s_has_ip || s_sta_state != STA_CONNECTED;
+    bool held = h != ROAM_HOLD_NONE || s_leaving || ladder || s_move_on || !s_has_ip || s_sta_state != STA_CONNECTED ||
+                (scan_busy && !s_roam.scanning);
     switch (net_roam_tick(&s_roam, held, now)) {
     case NET_ROAM_SCAN:
         roam_scan_start(now);
@@ -2346,55 +2347,140 @@ esp_err_t __wrap_esp_wifi_set_config(wifi_interface_t interface, wifi_config_t *
 
 static void start_scan_internal(void)
 {
-    wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
     taskENTER_CRITICAL(&s_lock);
-    bool busy = s_scanning;
-    s_scanning = true;
-    s_scan_started_us = esp_timer_get_time();
+    (void)net_scan_request_user(&s_scan_owner);
     taskEXIT_CRITICAL(&s_lock);
-    if (busy) {
-        return;
-    }
-    if (esp_wifi_scan_start(&sc, false) != ESP_OK) {
-        taskENTER_CRITICAL(&s_lock);
-        s_scanning = false;
-        taskEXIT_CRITICAL(&s_lock);
-    }
 }
 
 static void handle_scan_done(void)
 {
     taskENTER_CRITICAL(&s_lock);
-    bool user = s_scanning;
-#if CONFIG_NETWORK_ROAM
-    bool roam = s_roam_scanning;
-#endif
+    net_scan_done_t done = net_scan_take_done(&s_scan_owner);
     taskEXIT_CRITICAL(&s_lock);
+    if (!done.ready) {
+        return;
+    }
+    if (done.user_cancelled) {
+        post_event(NETWORK_EVENT_SCAN_DONE);
+    }
+    if (done.ambiguous) {
+        ESP_LOGW(TAG, "scan completion ownership ambiguous: further scans wait for station stop");
+    }
+    if (done.cancelled || done.owner == NET_SCAN_NONE) {
+        (void)esp_wifi_clear_ap_list();
+        /* A cancelled request was already reported by the watchdog. Only
+         * now may the next owner start; a late completion has no results. */
+        return;
+    }
+    bool valid = done.success;
 #if CONFIG_NETWORK_ROAM
-    if (roam) {
-        roam_scan_done();
+    if (done.owner == NET_SCAN_ROAM) {
+        if (valid) {
+            valid = roam_scan_done(done.duration_ms);
+        } else {
+            (void)esp_wifi_clear_ap_list();
+        }
+        if (!valid) {
+            net_roam_scan_failed(&s_roam, now_s());
+            ESP_LOGW(TAG, "roaming scan failed: status %lu, %lu ms%s; retry in %u s",
+                     (unsigned long)done.status, (unsigned long)done.duration_ms,
+                     done.ambiguous ? ", ambiguous completion" : "", (unsigned)NET_ROAM_RETRY_S);
+        }
         return;
     }
 #endif
-    if (!user) {
-        (void)esp_wifi_clear_ap_list();   /* not a scan of ours: keep the cache */
-        return;
-    }
     size_t count = 0;
+    uint16_t total = 0;
+    valid = valid && esp_wifi_scan_get_ap_num(&total) == ESP_OK;
     wifi_ap_record_t rec;
-    while (esp_wifi_scan_get_ap_record(&rec) == ESP_OK) {
+    for (uint16_t i = 0; valid && i < total; i++) {
+        if (esp_wifi_scan_get_ap_record(&rec) != ESP_OK) {
+            valid = false;
+            break;
+        }
         net_scan_entry_t e = { .rssi = rec.rssi, .channel = rec.primary, .secured = rec.authmode != WIFI_AUTH_OPEN };
         memcpy(e.ssid, rec.ssid, sizeof(e.ssid) - 1);
         e.ssid[sizeof(e.ssid) - 1] = '\0';
         count = net_scan_insert(s_scan_tmp, count, NETWORK_SCAN_MAX, &e);
     }
     (void)esp_wifi_clear_ap_list();
-    taskENTER_CRITICAL(&s_lock);
-    memcpy(s_scan, s_scan_tmp, count * sizeof(s_scan[0]));
-    s_scan_count = count;
-    s_scanning = false;
-    taskEXIT_CRITICAL(&s_lock);
+    if (valid) {
+        taskENTER_CRITICAL(&s_lock);
+        memcpy(s_scan, s_scan_tmp, count * sizeof(s_scan[0]));
+        s_scan_count = count;
+        taskEXIT_CRITICAL(&s_lock);
+        ESP_LOGI(TAG, "scan complete: %u network(s), %lu ms", (unsigned)count, (unsigned long)done.duration_ms);
+    } else {
+        ESP_LOGW(TAG, "scan failed: status %lu, %lu ms%s; previous results kept", (unsigned long)done.status,
+                 (unsigned long)done.duration_ms, done.ambiguous ? ", ambiguous completion" : "");
+    }
     post_event(NETWORK_EVENT_SCAN_DONE);
+}
+
+/* The network task alone calls scan_start/stop. Completed results are read
+ * before starting a queued request; cancellation owns the radio until its
+ * completion, so a stopped scan cannot finish a newly started user scan. */
+static void scan_housekeeping(void)
+{
+    handle_scan_done();   /* also consumes completions whose queue wakeup was lost */
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    taskENTER_CRITICAL(&s_lock);
+    bool stopped = s_scan_stopped;
+    bool user_stopped = s_scan_user_stopped;
+    s_scan_stopped = false;
+    s_scan_user_stopped = false;
+    bool queued = s_scan_owner.user_queued;
+    net_scan_owner_t owner = s_scan_owner.owner;
+    uint32_t duration = owner != NET_SCAN_NONE ? now - s_scan_owner.started_ms : 0;
+    net_scan_action_t action = net_scan_tick(&s_scan_owner, now);
+    taskEXIT_CRITICAL(&s_lock);
+#if CONFIG_NETWORK_ROAM
+    if (stopped && s_roam.scanning) {
+        net_roam_scan_failed(&s_roam, now_s());
+    }
+#else
+    (void)stopped;
+#endif
+    if (user_stopped) {
+        post_event(NETWORK_EVENT_SCAN_DONE);
+    }
+    if (action == NET_SCAN_STOP) {
+        ESP_LOGW(TAG, "%s scan timed out after %lu ms: awaiting cancellation", owner == NET_SCAN_ROAM ? "roaming" : "user",
+                 (unsigned long)duration);
+        esp_err_t err = esp_wifi_scan_stop();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "scan stop: %s; ownership kept until completion or station stop", esp_err_to_name(err));
+        }
+#if CONFIG_NETWORK_ROAM
+        if (owner == NET_SCAN_ROAM) {
+            net_roam_scan_failed(&s_roam, now_s());
+        }
+#endif
+        if (owner == NET_SCAN_USER) {
+            post_event(NETWORK_EVENT_SCAN_DONE);
+        }
+    } else if (action == NET_SCAN_GIVE_UP) {
+        ESP_LOGW(TAG, "scan cancellation unresolved after %u ms: further scans wait for completion or station stop",
+                 (unsigned)NET_SCAN_CANCEL_MS);
+        if (queued) {
+            post_event(NETWORK_EVENT_SCAN_DONE);
+        }
+    }
+    taskENTER_CRITICAL(&s_lock);
+    bool begin = s_wifi_sta_on && !s_leaving && s_scan_owner.user_queued &&
+                 net_scan_begin(&s_scan_owner, NET_SCAN_USER, now);
+    taskEXIT_CRITICAL(&s_lock);
+    if (begin) {
+        wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
+        esp_err_t err = esp_wifi_scan_start(&sc, false);
+        if (err != ESP_OK) {
+            taskENTER_CRITICAL(&s_lock);
+            net_scan_start_failed(&s_scan_owner);
+            taskEXIT_CRITICAL(&s_lock);
+            ESP_LOGW(TAG, "scan did not start: %s; previous results kept", esp_err_to_name(err));
+            post_event(NETWORK_EVENT_SCAN_DONE);
+        }
+    }
 }
 
 static void trial_revert(network_cred_revert_t why);
@@ -3007,6 +3093,9 @@ static void handle_msg(const net_msg_t *m)
     case MSG_RECOVER:
         do_recovery((network_recovery_t)m->reason);
         break;
+    case MSG_LADDER:
+        handle_ladder(m->generation);
+        break;
     case MSG_GOT_IP6:
         ip6_note(m->reason);
         break;
@@ -3079,8 +3168,7 @@ static void resync(void)
     s_st.setup_ap_active = ap_running;
     s_st.ap_clients = ap_running ? clients : 0;
     taskEXIT_CRITICAL(&s_lock);
-    /* A lost SCAN_DONE is left to the scan watchdog: a scan still running
-     * keeps its results. */
+    /* Scan completion has a separate durable mailbox, read on every pass. */
 }
 
 static void housekeeping(void)
@@ -3120,29 +3208,7 @@ static void housekeeping(void)
         apply_credentials();
     }
 
-    taskENTER_CRITICAL(&s_lock);
-    bool scan_stuck = s_scanning && now_us - s_scan_started_us > (int64_t)SCAN_WATCHDOG_MS * 1000;
-    if (scan_stuck) {
-        s_scanning = false;
-    }
-    taskEXIT_CRITICAL(&s_lock);
-    if (scan_stuck) {
-        ESP_LOGW(TAG, "scan did not finish: abandoned");
-        (void)esp_wifi_scan_stop();
-        (void)esp_wifi_clear_ap_list();
-    }
-#if CONFIG_NETWORK_ROAM
-    taskENTER_CRITICAL(&s_lock);
-    bool roam_stuck = s_roam_scanning && now_us - s_roam_scan_started_us > (int64_t)SCAN_WATCHDOG_MS * 1000;
-    taskEXIT_CRITICAL(&s_lock);
-    if (roam_stuck) {
-        ESP_LOGW(TAG, "roaming scan did not finish: abandoned");
-        (void)esp_wifi_scan_stop();
-        (void)esp_wifi_clear_ap_list();
-        roam_scan_end();
-        net_roam_scan_failed(&s_roam, now_s());
-    }
-#endif
+    scan_housekeeping();
 
     if (s_started && s_sta_configured && !ap_is_up() && wifi_start_due()) {
         /* Wi-Fi did not start (a failed start or restart): nothing else would try again. */
@@ -3354,6 +3420,7 @@ esp_err_t network_init(void)
         return ESP_OK;
     }
     account_boot();
+    net_scan_init(&s_scan_owner);
     taskENTER_CRITICAL(&s_lock);
     s_st.probe_age_s = UINT32_MAX;
     s_st.ap_close_in_s = UINT32_MAX;
@@ -3660,33 +3727,11 @@ esp_err_t network_scan_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     taskENTER_CRITICAL(&s_lock);
-    bool ok = s_wifi_sta_on && !s_scanning;
-    bool queued = false;
-    if (ok) {
-        s_scanning = true;
-        s_scan_started_us = esp_timer_get_time();
-#if CONFIG_NETWORK_ROAM
-        /* A roaming scan runs (a second or two): this one starts when it is done. */
-        queued = s_roam_scanning;
-        s_user_scan_queued = queued;
-#endif
-    }
+    bool ok = s_wifi_sta_on && !s_leaving && net_scan_request_user(&s_scan_owner);
     taskEXIT_CRITICAL(&s_lock);
-    if (!ok) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (queued) {
-        return ESP_OK;
-    }
-    wifi_scan_config_t sc = { .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE };
-    esp_err_t err = esp_wifi_scan_start(&sc, false);
-    if (err != ESP_OK) {
-        taskENTER_CRITICAL(&s_lock);
-        s_scanning = false;
-        taskEXIT_CRITICAL(&s_lock);
-        return (err == ESP_ERR_WIFI_STATE) ? ESP_ERR_INVALID_STATE : err;
-    }
-    return ESP_OK;
+    /* The request is durable without a queue message. The network task
+     * starts it within its next poll, or after the active scan completes. */
+    return ok ? ESP_OK : ESP_ERR_INVALID_STATE;
 }
 
 esp_err_t network_get_scan_results(network_scan_entry_t *entries, size_t max_entries, size_t *out_count)
@@ -3804,6 +3849,61 @@ static const char *rung_name(net_rung_t r)
     }
 }
 
+/* Under s_lock. Health owns caster/receiver evidence; the network task can
+ * refresh its own address, AP and probe evidence at the instant of admission. */
+static void ladder_network_inputs(net_ladder_in_t *in, uint32_t now, int64_t now_us)
+{
+    in->sta_configured = s_st.sta_configured;
+    in->assoc_no_ip_s = s_st.assoc_no_ip_s;
+    in->has_ip = s_st.online;
+    in->ap_clients = s_st.ap_clients;
+    in->probe_valid = s_probe_valid;
+    in->probe = (net_probe_t)s_st.probe;
+    in->probe_at_s = now - (uint32_t)((now_us - s_probe_at_us) / 1000000);
+}
+
+static void handle_ladder(uint32_t generation)
+{
+    uint32_t now = now_s();
+    int64_t now_us = esp_timer_get_time();
+    bool inhibited = lifecycle_reboot_inhibited(NULL);
+    net_ladder_out_t out;
+    taskENTER_CRITICAL(&s_lock);
+    net_ladder_in_t in = s_ladder_inputs;
+    ladder_network_inputs(&in, now, now_us);
+    in.reboot_inhibited = inhibited;
+    in.since_reboot_s = net_rtc_age_now(&s_rtc, now);
+    if (s_leaving) {
+        net_ladder_cancel(&s_ladder, generation);
+    }
+    bool admitted = net_ladder_begin(&s_ladder, generation, &in, s_ladder_observed_s, now, &out);
+    if (admitted) {
+        s_st.ladder_actions++;
+        s_st.ladder_rung = s_ladder.last_rung;
+        s_st.ladder_active = s_ladder.phase != NET_LADDER_IDLE;
+        s_ladder_note = 0;
+    }
+    taskEXIT_CRITICAL(&s_lock);
+    if (!admitted) {
+        return;   /* obsolete/healthy/held work has neither an action count nor a started journal entry */
+    }
+    ladder_journal(LADDER_OUTCOME_STARTED, out.rung, out.why);
+    if (out.why == NET_WHY_AP_OVERRIDDEN) {
+        ESP_LOGW(TAG, "network ladder: %s although an AP client is connected (held back for %u s already)",
+                 rung_name(out.rung), (unsigned)NET_LADDER_AP_HOLD_MAX_S);
+    }
+    if (out.rung == NET_RUNG_REBOOT) {
+        ESP_LOGE(TAG, "network ladder: reboot (protected caster down, the fault is on this side)");
+        (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_NETWORK_LADDER);
+    } else {
+        ESP_LOGW(TAG, "network ladder: %s", rung_name(out.rung));
+        network_recovery_t action = (out.rung == NET_RUNG_RECONNECT)    ? NETWORK_RECOVER_RECONNECT
+                                    : (out.rung == NET_RUNG_RENEW_DHCP) ? NETWORK_RECOVER_RENEW_DHCP
+                                                                        : NETWORK_RECOVER_RESTART_WIFI;
+        do_recovery(action);
+    }
+}
+
 esp_err_t network_ladder_tick(const network_ladder_input_t *in)
 {
     if (in == NULL) {
@@ -3825,13 +3925,9 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
         .min_reboot_interval_s = in->min_reboot_interval_s,
     };
     taskENTER_CRITICAL(&s_lock);
-    lin.sta_configured = s_st.sta_configured;
-    lin.assoc_no_ip_s = s_st.assoc_no_ip_s;
-    lin.has_ip = s_st.online;
-    lin.ap_clients = s_st.ap_clients;
-    lin.probe_valid = s_probe_valid;
-    lin.probe = (net_probe_t)s_st.probe;
-    lin.probe_at_s = now - (uint32_t)((now_us - s_probe_at_us) / 1000000);
+    ladder_network_inputs(&lin, now, now_us);
+    s_ladder_inputs = lin;
+    s_ladder_observed_s = now;
     net_ladder_out_t out = net_ladder_tick(&s_ladder, &lin, now);
     s_st.ladder_triggers = net_ladder_triggers(&lin);
     s_st.ladder_active = s_ladder.phase != NET_LADDER_IDLE;
@@ -3841,15 +3937,14 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     } else if (out.act == NET_LADDER_RESET) {
         s_st.ladder_withheld = NETWORK_LADDER_WHY_NONE;
     }
-    if (out.act == NET_LADDER_ACT) {
-        s_st.ladder_actions++;
-    }
     taskEXIT_CRITICAL(&s_lock);
 
     switch (out.act) {
     case NET_LADDER_PASS: {
         /* rung code 0 = "pass started", the reason byte = the triggers holding now */
+        taskENTER_CRITICAL(&s_lock);
         s_ladder_note = 0;
+        taskEXIT_CRITICAL(&s_lock);
         ladder_journal(LADDER_OUTCOME_STARTED, NET_RUNG_NONE, out.triggers);
         char why[80];
         (void)net_ladder_trigger_text(out.triggers, why, sizeof(why));
@@ -3859,32 +3954,26 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
     case NET_LADDER_PROBE:
         probe_kick();
         break;
-    case NET_LADDER_ACT:
-        s_ladder_note = 0;
-        ladder_journal(LADDER_OUTCOME_STARTED, out.rung, out.why);
-        if (out.why == NET_WHY_AP_OVERRIDDEN) {
-            ESP_LOGW(TAG, "network ladder: %s although an AP client is connected (held back for %u s already)",
-                     rung_name(out.rung), (unsigned)NET_LADDER_AP_HOLD_MAX_S);
-        }
-        if (out.rung == NET_RUNG_REBOOT) {
-            ESP_LOGE(TAG, "network ladder: reboot (protected caster down, the fault is on this side)");
-            (void)lifecycle_request_reboot(LIFECYCLE_REBOOT_NETWORK_LADDER);
-        } else {
-            ESP_LOGW(TAG, "network ladder: %s", rung_name(out.rung));
-            network_recovery_t action = (out.rung == NET_RUNG_RECONNECT)    ? NETWORK_RECOVER_RECONNECT
-                                        : (out.rung == NET_RUNG_RENEW_DHCP) ? NETWORK_RECOVER_RENEW_DHCP
-                                                                            : NETWORK_RECOVER_RESTART_WIFI;
-            net_msg_t m = { .type = MSG_RECOVER, .reason = (uint8_t)action };
-            if (xQueueSend(s_queue, &m, 0) != pdTRUE) {
-                ESP_LOGW(TAG, "network ladder: queue full, %s dropped", rung_name(out.rung));
-            }
-        }
+    case NET_LADDER_ACT: {
+        net_msg_t m = { .type = MSG_LADDER, .generation = out.generation };
+        bool accepted = xQueueSend(s_queue, &m, 0) == pdTRUE;
+        taskENTER_CRITICAL(&s_lock);
+        net_ladder_dispatched(&s_ladder, out.generation, accepted);
+        taskEXIT_CRITICAL(&s_lock);
+        /* A refused send retains this rung for the next health tick. The
+         * network task alone counts/logs it once admitted for execution. */
         break;
+    }
     case NET_LADDER_SKIP:
     case NET_LADDER_WITHHELD: {
         uint8_t note = (uint8_t)(((uint32_t)out.rung << 4) | (uint32_t)out.why);
-        if (note != s_ladder_note) {
+        taskENTER_CRITICAL(&s_lock);
+        bool changed = note != s_ladder_note;
+        if (changed) {
             s_ladder_note = note;
+        }
+        taskEXIT_CRITICAL(&s_lock);
+        if (changed) {
             ladder_journal(LADDER_OUTCOME_HELD, out.rung, out.why);
             ESP_LOGI(TAG, "network ladder: %s %s (reason %d)", rung_name(out.rung),
                      out.act == NET_LADDER_SKIP ? "skipped" : "withheld", (int)out.why);
@@ -3892,7 +3981,9 @@ esp_err_t network_ladder_tick(const network_ladder_input_t *in)
         break;
     }
     case NET_LADDER_RESET:
+        taskENTER_CRITICAL(&s_lock);
         s_ladder_note = 0;
+        taskEXIT_CRITICAL(&s_lock);
         if (out.rung != NET_RUNG_NONE) {
             ladder_journal(LADDER_OUTCOME_HEALTHY, out.rung, NET_WHY_NONE);
         }

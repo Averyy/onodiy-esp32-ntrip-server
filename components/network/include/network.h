@@ -157,8 +157,9 @@
  * of the previous move, unless the access point disconnects it anyway.
  * While its own signal is weak (averaged at or below
  * CONFIG_NETWORK_ROAM_WEAK_DBM for a minute) the station scans for its SSID
- * (every 10 min once another access point of it was seen in this
- * association, else every 6 h; never with a strong signal) and reconnects
+ * (valid searches without a candidate back off through 10 min, 30 min,
+ * 1 h, 3 h, 6 h, 12 h and 24 h; start at 6 h if no alternate was seen;
+ * never with a strong signal) and reconnects
  * when an access point CONFIG_NETWORK_ROAM_MIN_GAIN_DB stronger shows in two
  * scans 30 s apart, at most once per CONFIG_NETWORK_ROAM_MIN_INTERVAL_S
  * after the previous move of either kind, under the same holds and never
@@ -208,7 +209,7 @@ typedef enum {
     NETWORK_EVENT_SETUP_AP_UP,
     NETWORK_EVENT_SETUP_AP_DOWN,
     NETWORK_EVENT_TIME_SYNCED,     /**< SNTP set the clock (every sync) */
-    NETWORK_EVENT_SCAN_DONE,       /**< cached scan results updated */
+    NETWORK_EVENT_SCAN_DONE,       /**< user scan finished or failed (previous results kept on failure) */
 } network_event_t;
 
 /** Result of the last upstream probe. */
@@ -406,9 +407,12 @@ esp_err_t network_retry_pending_credentials(void);
 esp_err_t network_discard_pending_credentials(void);
 
 /**
- * Start a scan in the background; NETWORK_EVENT_SCAN_DONE when finished.
- * @return ESP_ERR_INVALID_STATE while Wi-Fi is not running, a scan runs or
- *         the station is in the middle of connecting.
+ * Queue a background scan for the network task; NETWORK_EVENT_SCAN_DONE
+ * when finished or failed. A driver refusal keeps the previous result list.
+ * A request behind a roaming scan starts only after its completion. No new
+ * scan is accepted while ownership of an abandoned scan is uncertain.
+ * @return ESP_ERR_INVALID_STATE while Wi-Fi is not running, a user scan is
+ *         pending/running, shutdown is under way or cancellation is pending.
  */
 esp_err_t network_scan_start(void);
 

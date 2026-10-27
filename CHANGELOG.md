@@ -4,6 +4,28 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## v0.1.11
+
+- Wi-Fi: back off roaming searches without a better access point up to 24 h;
+  sustained signal deterioration can shorten the wait. Fix overlapping scans.
+- Diagnostics: add caster write/TCP history and internal RTCM arrival timing,
+  without changing transmitted bytes or delivery rules; measure sampling cost.
+- Logs → Network: optional ten-minute router, internet and caster probe
+  recording, with stop and JSON export.
+- Status: refresh satellite details every five seconds while visible and show
+  refresh errors. Fix stalled response bodies stopping API polling.
+- TLS casters: fix retry readiness during renegotiation, preserving pending bytes.
+- Local caster: fix zero advertised bitrate caused by timer jitter.
+- Network recovery: retry queued actions when capacity returns and cancel
+  obsolete automatic actions before execution.
+- Receiver updates: require reboot/update protection before receiver operations;
+  fix competing-request races and preserve recovery journals on failure.
+- Updates: recover progress after missed events, report queued work, and retain
+  stale recovery details with actions disabled until refreshed.
+- Logout: clear displayed passwords, ignore delayed password replies and offer
+  retry when logout cannot be confirmed.
+- Build: increase the compressed project UI budget from 150 to 160 KiB.
+
 ## v0.1.10
 
 - Onocoy: add an unchecked “Show Onocoy statistics” option with a note about

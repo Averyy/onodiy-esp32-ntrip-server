@@ -181,6 +181,15 @@ void rtcm_hub_detach(rtcm_hub_consumer_t consumer)
 esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_len,
                         size_t *out_len, uint32_t timeout_ms)
 {
+    return rtcm_hub_read_with_meta(consumer, buf, max_len, out_len, timeout_ms, NULL);
+}
+
+esp_err_t rtcm_hub_read_with_meta(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_len,
+                                  size_t *out_len, uint32_t timeout_ms, rtcm_hub_read_meta_t *meta)
+{
+    if (meta != NULL) {
+        memset(meta, 0, sizeof(*meta));
+    }
     if (out_len != NULL) {
         *out_len = 0;
     }
@@ -195,7 +204,7 @@ esp_err_t rtcm_hub_read(rtcm_hub_consumer_t consumer, uint8_t *buf, size_t max_l
     const int64_t start_us = esp_timer_get_time();
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
     for (;;) {
-        size_t n = rtcm_core_read(c, k, buf, max_len, now_ms());
+        size_t n = rtcm_core_read_with_meta(c, k, buf, max_len, now_ms(), meta);
         if (n > 0) {
             *out_len = n;
             return ESP_OK;
