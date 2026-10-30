@@ -4,23 +4,17 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.12
 
-- Logs → History: a caster or Wi-Fi drop and its return are one row that
-  starts with how long it was offline, and these rows are no longer folded
-  together. An Onocoy filter shows only that slot's drops, returns and stops.
-- Connection history: record a caster's return after a recorded drop also
-  when it reconnects within 10 s. Saving a caster's settings and a restart
-  you start (restart, update, rollback) are no longer recorded as a drop,
-  nor the reconnect unless an attempt fails. A pause for receiver work that
-  closes the session shows as a neutral "paused" row.
-- Logs → History: the network recovery pass that starts while Onocoy
-  connects in a start's first minute reads "Reconnecting to Onocoy".
-- Logs: caster session ends include the session length; reconnects include
-  the time offline and failed attempts.
-- Status: ping loss marks are as tall as the share of each 5-minute block's
-  pings to that target that got no reply (`GET /api/monitor` adds
-  `router_sent`, `internet_sent` and `server_sent`).
+- Logs → History: each caster and Wi-Fi drop shows how long it was offline,
+  short reconnects included; new Onocoy filter.
+- Logs → History: saved settings and restarts you start are no longer
+  outages; receiver work shows as a planned pause; after a start it says
+  "Reconnecting to Onocoy" instead of a network recovery.
+- Logs: caster session ends and reconnects say how long the session and
+  the outage lasted.
+- Status: ping loss marks scale with the share of pings lost
+  (`GET /api/monitor` adds `router_sent`, `internet_sent`, `server_sent`).
 
 ## v0.1.11
 
