@@ -132,6 +132,15 @@ class TLSE2E(e2e.E2E):
     def stream_body(self, port, password):
         return {**super().stream_body(port, password), "tls": True, "trust": "custom_ca"}
 
+    def stream(self):
+        super().stream()
+        # The scenario ends right after its restart, while slot 1 reconnects: stopping then would cut that TLS
+        # handshake, which the caster counts as a failure. Wait for the reconnect, and check it.
+        def streaming():
+            s = self.slot(1)["status"]
+            return s if s.get("state") == "streaming" else None
+        self.check(self.poll(streaming, 60) is not None, "slot 1 streams over TLS again after the restart")
+
     def api(self, method, path, body=None, timeout=30):
         if method == "PUT" and path == "/api/casters/1" and body and body.get("tls") and not self.ca_saved:
             status, data = super().api("PUT", "/api/casters/1/ca", {"pem": self.pem}, timeout)

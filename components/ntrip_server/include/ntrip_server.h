@@ -72,10 +72,15 @@
  * core with host tests.
  *
  * Connection history (diag journal): DIAG_EV_CASTER_DOWN when a session that
- * reached STREAMING ends, DIAG_EV_CASTER_UP when one starts after failed
- * attempts or a gap (see diag.h for the fields and the flapping limit). A
- * record the journal's rate limit refuses waits in the slot (a few at most)
- * and is written a moment later.
+ * reached STREAMING ends, DIAG_EV_CASTER_UP when the next one starts after a
+ * DOWN that was written, failed attempts or a gap (see diag.h for the fields
+ * and the flapping limit). New settings the user saved are not an outage:
+ * their close is not journalled, nor the reconnect unless an attempt fails
+ * (a slot turned back on counts that outage from then). A record the
+ * journal's rate limit refuses waits in the slot (a few at most) and is
+ * written a moment later. The log says how long each session lasted and,
+ * when streaming starts again, how long the outage was and how many
+ * attempts failed in it.
  *
  * Network events: ESP-IDF's default station handlers clear the address at a
  * Wi-Fi disconnect and lwIP aborts every session bound to it, so sessions

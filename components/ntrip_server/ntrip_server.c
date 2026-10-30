@@ -715,6 +715,13 @@ static bool hard_abort(slot_t *s)
     return (close_planned(s) && !draining(s)) || !s_running || !net_ready() || (s->open && s->net_gen != s_net_gen);
 }
 
+/* A write aborted only for new settings the user saved: not for a lost network, a new address or a shutdown. */
+static bool abort_for_settings(const slot_t *s)
+{
+    return (s->cmd & CMD_CONFIG) != 0 && s_running && !s_shutdown && net_ready() &&
+           !(s->open && s->net_gen != s_net_gen);
+}
+
 /* A connection attempt also stops for a pause (nothing has been streamed yet). */
 static bool connect_abort(slot_t *s)
 {
@@ -1657,14 +1664,22 @@ static void note_stop(slot_t *s)
     hist_flush(s);
 }
 
-static void end_planned(slot_t *s, uint32_t now, bool clean)
+/* A planned close; settings: for new settings the user saved (the connection history leaves it out: no outage). */
+static void end_planned(slot_t *s, uint32_t now, bool clean, bool settings)
 {
     bool was_open = s->open;
+    unsigned len_s = (unsigned)ntrip_hist_session_s(&s->hist, uptime_s());
     session_close(s, clean);
     ntrip_sm_closed(&s->sm, now);
+    if (settings) {
+        ntrip_hist_new_settings(&s->hist, uptime_s());   /* ends the session in the history, or starts the outage now */
+    }
     if (was_open) {
         s->st.connected_since = 0;
-        hist_down(s, NTRIP_CLS_NONE);
+        if (!settings) {
+            hist_down(s, NTRIP_CLS_NONE);
+        }
+        ESP_LOGI(TAG, "cst%u (%s): session ended after %u s", (unsigned)s->idx, s->cfg.name, len_s);
     }
 }
 
@@ -1701,7 +1716,9 @@ static void handle_commands(slot_t *s, uint32_t now)
         strlcpy(old_host, s->cfg.host, sizeof(old_host));
         bool was_protected = s->cfg.protected_slot;
         if (s->open || s->fd >= 0 || s->tls != NULL) {
-            end_planned(s, now, true);
+            end_planned(s, now, true, true);
+        } else {
+            ntrip_hist_new_settings(&s->hist, uptime_s());   /* no session: a slot turned on starts its outage now */
         }
         copy_cfg(s);
         bool other_server = strcasecmp(old_host, s->cfg.host) != 0;
@@ -1745,14 +1762,14 @@ static void handle_commands(slot_t *s, uint32_t now)
     }
     if (cmd & CMD_RESTART) {
         if (s->open || s->fd >= 0 || s->tls != NULL) {
-            end_planned(s, now, true);
+            end_planned(s, now, true, false);
         }
         s->st.restarts++;
         ESP_LOGW(TAG, "cst%u (%s): restarted by the health monitor", (unsigned)s->idx, s->cfg.name);
     }
     if (s->open && s->net_gen != s_net_gen) {
         /* the address changed: the old socket is dead, no clean close possible */
-        end_planned(s, now, false);
+        end_planned(s, now, false, false);
         ntrip_sm_stagger(&s->sm, now, esp_random());
         ESP_LOGI(TAG, "cst%u (%s): address changed, reconnecting", (unsigned)s->idx, s->cfg.name);
     }
@@ -1780,6 +1797,7 @@ static void count_failure(slot_t *s, const ntrip_failure_t *f, bool after_stream
 
 static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
 {
+    unsigned len_s = (unsigned)ntrip_hist_session_s(&s->hist, uptime_s());
     if (net_lost_settled()) {
         /* The session died while the network was down: a drop, not a caster
          * failure; the gate waits for the network instead of a backoff. */
@@ -1788,8 +1806,8 @@ static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
         s->st.disconnects++;
         ntrip_sm_closed(&s->sm, now);
         hist_down(s, NTRIP_CLS_NONE);   /* not a caster failure */
-        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended while the network was down (%s)", (unsigned)s->idx,
-                 s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls]);
+        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended after %u s while the network was down (%s)",
+                 (unsigned)s->idx, s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, len_s, k_class_name[cls]);
         return;
     }
     ntrip_failure_t f;
@@ -1806,13 +1824,14 @@ static void session_failed(slot_t *s, ntrip_cls_t cls, uint32_t now)
     hist_down(s, cls);
     uint32_t d = ntrip_sm_failed(&s->sm, &f, now, esp_random());
     if (s->sm.state == NTRIP_SM_STOPPED) {
-        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
-                 (unsigned)s->cfg.port, k_class_name[cls]);
+        ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended after %u s (%s)", (unsigned)s->idx, s->cfg.name,
+                 s->cfg.host, (unsigned)s->cfg.port, len_s, k_class_name[cls]);
         note_stop(s);
         return;
     }
-    ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended (%s); retry in %u s", (unsigned)s->idx, s->cfg.name,
-             s->cfg.host, (unsigned)s->cfg.port, k_class_name[cls], (unsigned)((d + 999u) / 1000u));
+    ESP_LOGW(TAG, "cst%u (%s): session to %s:%u ended after %u s (%s); retry in %u s", (unsigned)s->idx,
+             s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, len_s, k_class_name[cls],
+             (unsigned)((d + 999u) / 1000u));
 }
 
 static void connect_once(slot_t *s, uint32_t now)
@@ -1896,12 +1915,22 @@ static void connect_once(slot_t *s, uint32_t now)
     s->st.connected_since = unix_now();
     int32_t ha;
     int32_t hb;
-    if (ntrip_hist_up(&s->hist, (uint32_t)s->idx, uptime_s(), &ha, &hb)) {
+    uint32_t up_now = uptime_s();
+    uint32_t outage_s = 0;
+    uint32_t fails = 0;
+    bool had_outage = ntrip_hist_outage(&s->hist, up_now, &outage_s, &fails);
+    if (ntrip_hist_up(&s->hist, (uint32_t)s->idx, up_now, &ha, &hb)) {
         hist_queue(s, DIAG_EV_CASTER_UP, ha, hb);
         hist_flush(s);
     }
-    ESP_LOGI(TAG, "cst%u (%s): streaming to %s:%u (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
-             (unsigned)s->cfg.port, s->st.last_status_line);
+    if (had_outage) {
+        ESP_LOGI(TAG, "cst%u (%s): streaming to %s:%u (%s) after %u s offline, %u failed attempt%s", (unsigned)s->idx,
+                 s->cfg.name, s->cfg.host, (unsigned)s->cfg.port, s->st.last_status_line, (unsigned)outage_s,
+                 (unsigned)fails, fails == 1u ? "" : "s");
+    } else {
+        ESP_LOGI(TAG, "cst%u (%s): streaming to %s:%u (%s)", (unsigned)s->idx, s->cfg.name, s->cfg.host,
+                 (unsigned)s->cfg.port, s->st.last_status_line);
+    }
 }
 
 /* A line the caster sent during the session is complete: show it, log the first of the session. */
@@ -2026,7 +2055,7 @@ static void stream_step(slot_t *s, uint32_t now)
         break;
     case WR_ABORT:
     default:
-        end_planned(s, t, false);   /* mid-chunk: no terminator, just close */
+        end_planned(s, t, false, abort_for_settings(s));   /* mid-chunk: no terminator, just close */
         break;
     }
 }
@@ -2104,7 +2133,7 @@ static void slot_step(slot_t *s, uint32_t now)
                                              "no RTCM from the receiver" };
         ESP_LOGI(TAG, "cst%u (%s): closing session (%s)", (unsigned)s->idx, s->cfg.name,
                  k_why[(size_t)why < sizeof(k_why) / sizeof(k_why[0]) ? (size_t)why : 0]);
-        end_planned(s, now, why != NTRIP_WHY_NO_IP);
+        end_planned(s, now, why != NTRIP_WHY_NO_IP, false);
     } else if (act == NTRIP_ACT_CONNECT) {
         if (s->low_heap_wait && (int32_t)(now - s->low_heap_until_ms) < 0) {
             wait_kick(s, IDLE_WAIT_MS);

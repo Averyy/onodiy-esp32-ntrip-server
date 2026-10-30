@@ -502,14 +502,17 @@ function stationCard(s, st) {
  * CPU and free memory, each its latest reading (status `monitor`, a new one
  * every 30 s), its last 24 h in words, and a line over the same time (GET
  * /api/monitor, 5-min buckets, read by the page every 5 min while it is
- * shown): the newest at the right edge, red marks where a ping got no reply.
+ * shown): the newest at the right edge, red marks where a ping got no reply
+ * (as tall as the share of the bucket's pings to that target that got none).
  */
 const MON_DAY_S = 86400;
 
 /* A line over the time the figures cover (the card's "Last ..."; at most 24 h): values oldest first (null = none) from
  * the left edge to the right; scaled to lo..hi (default: the values' own range; zero: from 0; span: at least this much
  * range, so a small jitter stays a flat line). A lone value is a dot. Its scale is written under it ("0 to 45ms": the
- * line's bottom and top; unit: after the figures, fmtv: how a figure is written). */
+ * line's bottom and top; unit: after the figures, fmtv: how a figure is written). lost: per bucket, the pings without a
+ * reply, a red mark up from the bottom as tall as their share of the pings sent (of; at least a quarter of the height,
+ * so one lost ping still shows; the whole height without of). */
 function sparkline(vals, label, o) {
   const H = 32, n = vals.length, W = Math.max(n - 1, 1);
   const x = i => (n === 1 ? W : i);
@@ -529,7 +532,10 @@ function sparkline(vals, label, o) {
   if (n === 1 && known.length) d = 'M0 ' + y(vals[0]) + 'H' + W;   /* one bucket so far: a flat line, not a dot at the edge */
   let loss = '';
   (o.lost || []).forEach((k, i) => {
-    if (k) loss += 'M' + x(i) + ' 0V' + H;
+    if (!k) return;
+    const of = o.of && o.of[i];
+    const part = of ? Math.max(0.25, Math.min(1, k / of)) : 1;
+    loss += 'M' + x(i) + ' ' + H + 'V' + (H - part * H).toFixed(1);
   });
   const fv = o.fmtv || (v => String(Math.round(v)));
   return h('div', { class: 'spark-box' },
@@ -577,12 +583,12 @@ function perfCard(s, st, mon) {
   const r = m.rssi, c = m.cpu, mem = m.memory;
   return wrap(h('div', { class: 'perf' },
     perfRow('Router ping', pingNow(m.router), pingDay(m.router),
-      sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('router_lost') })),
+      sparkline(col('router_avg'), 'Router ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('router_lost'), of: col('router_sent') })),
     perfRow(server, pingNow(m.server), pingDay(m.server),
-      sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, unit: 'ms', lost: col('server_lost') })),
+      sparkline(col('server_avg'), server + ' over the same time', { zero: true, span: 10, unit: 'ms', lost: col('server_lost'), of: col('server_sent') })),
     perfRow(h('span', { title: 'Cloudflare (' + (m.internet?.name || '1.1.1.1') + ')' }, 'Cloudflare ping'),
       pingNow(m.internet), pingDay(m.internet),
-      sparkline(col('internet_avg'), 'Cloudflare ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('internet_lost') })),
+      sparkline(col('internet_avg'), 'Cloudflare ping over the same time', { zero: true, span: 10, unit: 'ms', lost: col('internet_lost'), of: col('internet_sent') })),
     perfRow('Wi-Fi signal', r.now !== null ? rssiView(r.now, true) : DASH,
       r.avg !== null ? dotted(['avg ' + dbmText(r.avg), 'weakest ' + dbmText(r.min)]) : 'No readings yet',
       sparkline(col('rssi_avg'), 'Wi-Fi signal over the same time', { span: 10, unit: NB + 'dBm', fmtv: v => String(Math.round(v)).replace('-', '\u2212') })),

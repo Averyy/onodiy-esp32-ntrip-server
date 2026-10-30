@@ -4,6 +4,20 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Logs → History: a caster or Wi-Fi drop and its return are one row that
+  starts with how long it was offline, and these rows are no longer folded
+  together. An Onocoy filter shows only that slot's drops, returns and stops.
+- Connection history: record a caster's return after a recorded drop also
+  when it reconnects within 10 s. Saving a caster's settings is no longer
+  recorded as a drop, nor its reconnect unless an attempt fails.
+- Logs: caster session ends include the session length; reconnects include
+  the time offline and failed attempts.
+- Status: ping loss marks are as tall as the share of each 5-minute block's
+  pings to that target that got no reply (`GET /api/monitor` adds
+  `router_sent`, `internet_sent` and `server_sent`).
+
 ## v0.1.11
 
 - Wi-Fi: back off roaming searches without a better access point up to 24 h;

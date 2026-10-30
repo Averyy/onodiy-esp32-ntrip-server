@@ -2721,16 +2721,20 @@ history is in RAM). Each figure is an array with one element per bucket,
 
 ```json
 {"sample_s": 30, "bucket_s": 300, "buckets": 2, "samples": [10, 3],
- "router_avg": [4, 3], "router_max": [9, 3], "router_lost": [0, 0],
- "internet_avg": [20, 19], "internet_max": [45, 22], "internet_lost": [1, 0],
- "server_avg": [118, 117], "server_max": [140, 120], "server_lost": [1, 0],
+ "router_avg": [4, 3], "router_max": [9, 3], "router_lost": [0, 0], "router_sent": [10, 3],
+ "internet_avg": [20, 19], "internet_max": [45, 22], "internet_lost": [1, 0], "internet_sent": [10, 3],
+ "server_avg": [118, 117], "server_max": [140, 120], "server_lost": [1, 0], "server_sent": [10, 3],
  "rssi_avg": [-79, -78], "cpu_avg": [11, 9], "cpu_max": [30, 12], "mem_min": [97000, 98200]}
 ```
 
-`*_avg` and `*_max` in ms over the bucket's replies, `*_lost` the pings
-without a reply (`null`: no ping had a target); `rssi_avg` dBm; `cpu_avg`
-and `cpu_max` the busier core's load in %; `mem_min` the lowest free
-internal memory sampled, bytes. The UI reads it every 5 min while the page
+`samples` the sampling cycles in the bucket; `*_avg` and `*_max` in ms
+over the bucket's replies, `*_sent` the pings sent to that target and
+`*_lost` those without a reply (both `null`: no ping had a target; a target
+is not pinged in a cycle without one, so `*_sent` can be below `samples`);
+`rssi_avg` dBm; `cpu_avg` and `cpu_max` the busier core's load in %;
+`mem_min` the lowest free internal memory sampled, bytes. The UI draws a
+target's lost pings as a mark as tall as `*_lost` / `*_sent` of the bucket
+(at least a quarter of the line's height). The UI reads it every 5 min while the page
 is shown (its buckets close every 5 min); the latest values are in the
 status (`monitor`).
 
@@ -3044,8 +3048,8 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `safe_mode` | episode | — |
 | `wifi_disconnect` | `wifi_err_reason_t` | RSSI at the drop in dBm (-127 to -1); `null` when unknown (stored as 0; also the -128 of records from earlier builds) |
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
-| `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30) | session length s |
-| `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30) | outage s |
+| `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30). Not written for a session ended by new settings the user saved | session length s |
+| `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30). After new settings the user saved, written only when an attempt failed | outage s |
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
 | `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one, 3 asked for on the bench console) \| bit 24: its reconnect found no stronger one after all and it stayed \| bit 25: the address and the connections were kept (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address, with bit 25 without a link (bits 16-30) |
@@ -3114,7 +3118,7 @@ newest first, read backwards through the journal.
 | `complete` | every journal record was looked at (the list holds every connection record the journal keeps) |
 | `time_unix` | `null` without a trusted clock then: `uptime_s` dates it after its boot |
 | `slot`, `slot_name` | caster records: the slot and its name now (`null` without one, and in safe mode); `null` for Wi-Fi |
-| `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a configuration change, a health restart, the receiver's RTCM stopping, the network going down); `null` otherwise |
+| `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a health restart, the receiver's RTCM stopping, the network going down; a session ended by new settings the user saved has no `caster_down`); `null` otherwise |
 | `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `caster_stop` and `wifi_disconnect` |
 | `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `caster_stop` and `wifi_disconnect` |
 | `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop in dBm (-127 to -1; `rssi` `null` when unknown, as the journal's `b`); both `null` otherwise |

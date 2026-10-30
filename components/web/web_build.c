@@ -780,12 +780,15 @@ void web_build_monitor_series(wj_t *w, const monitor_bucket_t *b, size_t n)
     SERIES(w, "router_avg", b, n, x->router.ok > 0, (x->router.sum_ms + x->router.ok / 2u) / x->router.ok);
     SERIES(w, "router_max", b, n, x->router.ok > 0, x->router.max_ms);
     SERIES(w, "router_lost", b, n, x->router.sent > 0, x->router.sent - x->router.ok);
+    SERIES(w, "router_sent", b, n, x->router.sent > 0, x->router.sent);
     SERIES(w, "internet_avg", b, n, x->internet.ok > 0, (x->internet.sum_ms + x->internet.ok / 2u) / x->internet.ok);
     SERIES(w, "internet_max", b, n, x->internet.ok > 0, x->internet.max_ms);
     SERIES(w, "internet_lost", b, n, x->internet.sent > 0, x->internet.sent - x->internet.ok);
+    SERIES(w, "internet_sent", b, n, x->internet.sent > 0, x->internet.sent);
     SERIES(w, "server_avg", b, n, x->server.ok > 0, (x->server.sum_ms + x->server.ok / 2u) / x->server.ok);
     SERIES(w, "server_max", b, n, x->server.ok > 0, x->server.max_ms);
     SERIES(w, "server_lost", b, n, x->server.sent > 0, x->server.sent - x->server.ok);
+    SERIES(w, "server_sent", b, n, x->server.sent > 0, x->server.sent);
     SERIES(w, "rssi_avg", b, n, x->rssi_n > 0, (x->rssi_sum * 2 - (int32_t)x->rssi_n) / (2 * (int32_t)x->rssi_n));
     SERIES(w, "cpu_avg", b, n, x->cpu_n > 0, (x->cpu_sum + x->cpu_n / 2u) / x->cpu_n);
     SERIES(w, "cpu_max", b, n, x->cpu_n > 0, x->cpu_max);

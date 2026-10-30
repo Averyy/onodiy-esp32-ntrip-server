@@ -817,10 +817,14 @@ function rssiSuffix(v) {
   return rssiKnown(v) ? ', signal ' + dbmText(v) : '';
 }
 
+/* "Onocoy offline 40s": a drop and its return as one event, how long it lasted first. */
+const offlineEv = (who, s) => who + ' offline ' + fmt.dur(s);
+
 /*
  * One connection record in words (the GET /api/connections shape, connOf),
  * or a drop together with the return that ended it (back: the caster_up or
- * wifi_up after it): [event, details, tone].
+ * wifi_up after it; the event then says how long it was offline): [event,
+ * details, tone].
  */
 function connRow(e, back) {
   const name = e.slot === null || e.slot === undefined ? '' : slotName(e.slot, e.slot_name);
@@ -828,7 +832,7 @@ function connRow(e, back) {
   switch (e.kind) {
     case 'caster_down': {
       const why = e.class && e.class !== 'none' ? ', ' + lbl(L.fail, e.class).toLowerCase() : '';
-      return [name + ' disconnected', (back ? 'back after ' + fmt.dur(back.duration_s) : 'after ' + fmt.dur(e.duration_s) + ' online') + why +
+      return [back ? offlineEv(name, back.duration_s) : name + ' disconnected', 'after ' + fmt.dur(e.duration_s) + ' online' + why +
         (back ? tries(back.count) : '') + (e.count ? ', ' + plural(e.count, 'shorter session', 'shorter sessions') + ' not listed' : ''), 'warn'];
     }
     case 'caster_up':
@@ -838,7 +842,7 @@ function connRow(e, back) {
     case 'wifi_up':
       return ['Wi-Fi back', 'after ' + fmt.dur(e.duration_s) + (e.count ? ', ' + plural(e.count, 'connect attempt', 'connect attempts') : ''), 'ok'];
     case 'wifi_disconnect':
-      return ['Wi-Fi dropped', (back ? 'back after ' + fmt.dur(back.duration_s) + ', ' : '') + wifiReason(e.reason) + rssiSuffix(e.rssi), 'warn'];
+      return [back ? offlineEv('Wi-Fi', back.duration_s) : 'Wi-Fi dropped', wifiReason(e.reason) + rssiSuffix(e.rssi), 'warn'];
     default:
       return [words(e.kind), name, ''];
   }
@@ -1211,9 +1215,10 @@ function journalByBoot(entries) {
   return groups;
 }
 
-/* The filter of the event list: [value, label, kinds (null: all)]. */
+/* The filter of the event list: [value, label, kinds (null: all), only the Onocoy slot's]. */
 const EV_FILTER = [
   ['all', 'All events', null],
+  ['onocoy', 'Onocoy', ['caster_down', 'caster_up', 'caster_stop'], true],
   ['starts', 'Starts and restarts', ['boot', 'session', 'reboot', 'safe_mode', 'rx_boot', 'board']],
   ['recovery', 'Recovery', ['ladder_step']],
   ['casters', 'NTRIP', ['caster_down', 'caster_up', 'caster_stop', 'rover_connect', 'rover_disconnect']],
@@ -1232,11 +1237,14 @@ const RESET_KEYS = Object.keys(L.resetReason);
  * it started (its boot and session records, and the restart record that
  * announced it), below what happened after it. A caster's or the Wi-Fi's
  * drop and the return after it are one row (the connection history), repeats
- * collapsed. entries: oldest first; atStart:
+ * collapsed (but never a drop with its return: each says how long it was
+ * offline). entries: oldest first; atStart:
  * they reach back to the journal's oldest record (else the oldest start may
- * just not be loaded yet); kinds: the filter (null: everything).
+ * just not be loaded yet); kinds: the filter (null: everything); slot: only
+ * this caster slot's records (null or undefined: every slot's).
  */
-function journalItems(entries, atStart, kinds) {
+function journalItems(entries, atStart, kinds, slot) {
+  const otherSlot = e => slot !== null && slot !== undefined && e.kind.indexOf('caster_') === 0 && (e.a & 0xff) !== slot;
   const groups = journalByBoot(entries);
   const items = [];
   const year = new Date().getFullYear();
@@ -1293,7 +1301,7 @@ function journalItems(entries, atStart, kinds) {
     const rows = [];
     for (let i = es.length - 1; i >= 0; i--) {
       const e = es[i];
-      if (e === boot || e === sess || e === told || used.has(e) || (kinds && kinds.indexOf(e.kind) < 0)) continue;
+      if (e === boot || e === sess || e === told || used.has(e) || (kinds && kinds.indexOf(e.kind) < 0) || otherSlot(e)) continue;
       const when = at(e);
       const sky = skyOf.get(e);
       if (sky) {
@@ -1310,7 +1318,8 @@ function journalItems(entries, atStart, kinds) {
       if (isConn(e)) {
         const back = backOf.get(e);
         const c = connRow(connOf(e), back && connOf(back));
-        rows.push(Object.assign(when, { k: [e.kind, connKey(e), !!back].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
+        /* A drop with its return is an outage of its own: a key no other row has. */
+        rows.push(Object.assign(when, { k: back ? 'outage ' + e.seq : [e.kind, connKey(e)].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
       } else if (e.kind === 'rover_connect' || e.kind === 'rover_disconnect') {
         const c = roverEvent(e, roverOf.get(e));
         rows.push(Object.assign(when, { k: e.kind + '|' + c[1], seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
@@ -1358,11 +1367,17 @@ function journalItems(entries, atStart, kinds) {
 function eventCard() {
   const recs = new Map();   /* seq -> record */
   const open = new Set();
-  let avail = true, oldest = 0, atStart = false, shown = EV_PAGE, kinds = null;
+  let avail = true, oldest = 0, atStart = false, shown = EV_PAGE, kinds = null, onlyOnocoy = false;
   const out = h('div', null, h('p', { class: 'loading' }, 'Loading…'));
   const err = errBox();
   const keys = () => Array.from(recs.keys());
-  const items = () => journalItems(Array.from(recs.values()).sort((x, y) => x.seq - y.seq), atStart, kinds);
+  /* The Onocoy filter: the slot the status names now (none: no slot's records). */
+  const onoSlot = () => {
+    const c = S.status ? onocoySlot(S.status) : null;
+    return c ? c.slot : -1;
+  };
+  const items = () => journalItems(Array.from(recs.values()).sort((x, y) => x.seq - y.seq), atStart, kinds,
+    onlyOnocoy ? onoSlot() : null);
   async function read(cursor) {
     const r = await api('GET', '/api/journal?cursor=' + cursor);
     let added = 0;
@@ -1414,7 +1429,7 @@ function eventCard() {
     mount(out, !avail ? msg('warn', 'The journal partition is missing or unusable: events are not recorded.') :
       !recs.size ? h('p', { class: 'muted' }, 'No events recorded.') :
         all.length ? eventTable('Events', all.slice(0, shown), open) :
-          h('p', { class: 'muted' }, 'No events of this kind.'),
+          h('p', { class: 'muted' }, onlyOnocoy && onoSlot() < 0 ? 'No Onocoy server is set up.' : 'No events of this kind.'),
     avail && recs.size && atStart && all.length <= shown ? h('p', { class: 'muted small' }, 'No older events.') : null);
     older.hidden = all.length <= shown && atStart;
     wipe.hidden = !avail || !recs.size;
@@ -1459,7 +1474,9 @@ function eventCard() {
   const refreshBtn = btn('Refresh', () => act(refreshBtn, refresh, err));
   const sel = selectInput(EV_FILTER.map(f => [f[0], f[1]]), 'all', { 'aria-label': 'Show' });
   sel.addEventListener('change', () => act(null, async () => {
-    kinds = EV_FILTER.find(f => f[0] === sel.value)[2];
+    const f = EV_FILTER.find(x => x[0] === sel.value);
+    kinds = f[2];
+    onlyOnocoy = !!f[3];
     shown = EV_PAGE;
     await fill();
     render();

@@ -683,7 +683,11 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   record's very first epoch, and only without sticky copies in front of it,
   may lack its leading station messages, never its MSMs; anywhere else a
   missing station message fails the check); nothing between frames, a cut frame
-  only at the very end; receiver maintenance answers its start and
+  only at the very end; saving slot 1's settings again while it streams
+  closes the session and the slot streams again within 60 s, with no
+  `caster_down` or `caster_up` of slot 1 in the journal for it (new
+  settings are not an outage) and a "session ended after" line on the
+  console; receiver maintenance answers its start and
   extension with the time it set (900 s, then 1800 s left), and
   `GET /api/gnss` agrees; a restart during it (`POST /api/system/reboot`,
   the replay paused across it) resumes it from its RTC record with its

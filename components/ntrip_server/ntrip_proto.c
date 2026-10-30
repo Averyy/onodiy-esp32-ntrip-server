@@ -2187,27 +2187,45 @@ void ntrip_hist_failed(ntrip_hist_t *h, uint32_t now_s)
     }
 }
 
+uint32_t ntrip_hist_session_s(const ntrip_hist_t *h, uint32_t now_s)
+{
+    return h->in_session ? now_s - h->session_start_s : 0u;
+}
+
+bool ntrip_hist_outage(const ntrip_hist_t *h, uint32_t now_s, uint32_t *outage_s, uint32_t *fails)
+{
+    *fails = h->fails;
+    if (h->streamed) {
+        *outage_s = now_s - h->prev_end_s;
+        return true;
+    }
+    *outage_s = h->first_fail_valid ? now_s - h->first_fail_s : 0u;
+    return h->first_fail_valid;
+}
+
 bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, int32_t *b)
 {
     bool write = false;
-    bool after_gap = h->streamed && (uint32_t)(now_s - h->prev_end_s) >= NTRIP_HIST_UP_GAP_S;
-    if (h->fails > 0 || after_gap) {
+    /* A drop that was written always gets its return: at most one per DOWN, so the DOWN limit bounds them. */
+    bool listed = h->streamed && h->prev_listed;
+    bool after_gap = h->streamed && !h->prev_settings && (uint32_t)(now_s - h->prev_end_s) >= NTRIP_HIST_UP_GAP_S;
+    if (listed || h->fails > 0 || after_gap) {
         uint32_t outage = 0;
-        if (h->streamed) {
-            outage = now_s - h->prev_end_s;
-        } else if (h->first_fail_valid) {
-            outage = now_s - h->first_fail_s;
-        }
-        bool limited = h->streamed && h->prev_short && h->up_written &&
+        uint32_t fails = 0;
+        (void)ntrip_hist_outage(h, now_s, &outage, &fails);
+        /* After new settings an UP needs a failed attempt, so the user's saves bound them, not the flapping limit. */
+        bool limited = !listed && !h->prev_settings && h->streamed && h->prev_short && h->up_written &&
                        (uint32_t)(now_s - h->up_at_s) < NTRIP_HIST_LIMIT_S;
         if (!limited) {
             write = true;
-            *a = ntrip_hist_pack(slot, 0, h->fails);
+            *a = ntrip_hist_pack(slot, 0, fails);
             *b = (int32_t)(outage > INT32_MAX ? INT32_MAX : outage);
             h->up_written = true;
             h->up_at_s = now_s;
         }
     }
+    h->prev_listed = false;   /* one return per drop written */
+    h->prev_settings = false;
     h->in_session = true;
     h->session_start_s = now_s;
     h->fails = 0;
@@ -2235,7 +2253,25 @@ bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s
     h->streamed = true;
     h->prev_end_s = now_s;
     h->prev_short = is_short;
+    h->prev_listed = write;
+    h->prev_settings = false;
     return write;
+}
+
+void ntrip_hist_new_settings(ntrip_hist_t *h, uint32_t now_s)
+{
+    if (!h->in_session) {
+        if (h->prev_settings && h->fails == 0) {
+            h->prev_end_s = now_s;   /* saved again (the slot turned back on): the time off is no outage */
+        }
+        return;
+    }
+    h->in_session = false;
+    h->streamed = true;
+    h->prev_end_s = now_s;
+    h->prev_short = (uint32_t)(now_s - h->session_start_s) < NTRIP_HIST_SHORT_S;
+    h->prev_listed = false;
+    h->prev_settings = true;
 }
 
 /* ---- Onocoy daily budget ----------------------------------------------------------- */

@@ -863,21 +863,30 @@ uint32_t ntrip_cred_hash(const char *host, uint16_t port, bool v2, const char *m
 
 #define NTRIP_HIST_SHORT_S   60u      /**< a session shorter than this is "short" (the healthy-session rule) */
 #define NTRIP_HIST_LIMIT_S   600u     /**< short sessions: one record of a kind per slot in this long */
-#define NTRIP_HIST_UP_GAP_S  10u      /**< an UP is written after this long without a session, failed attempts or not */
+#define NTRIP_HIST_UP_GAP_S  10u      /**< after a DOWN not written: an UP after this long without a session, failed attempts or not */
 #define NTRIP_HIST_COUNT_MAX 32767u   /**< counts in a record saturate here (bits 16-30) */
 
 /**
  * Per slot. DOWN when a session that reached STREAMING ends (end class, the
  * short sessions not journalled since the last DOWN, its length); UP when a
- * session reaches STREAMING after at least one failed attempt or at least
+ * session reaches STREAMING after a session whose DOWN was written, however
+ * soon, or after at least one failed attempt or at least
  * NTRIP_HIST_UP_GAP_S after the previous session ended (failed attempts
  * since that session, the outage: from that session's end, or from the
- * first failed attempt when the slot had not streamed this boot). A DOWN
- * for a session shorter than NTRIP_HIST_SHORT_S, and the UP after such a
- * session, are written only when the slot wrote no record of that kind in
- * the last NTRIP_HIST_LIMIT_S; a skipped DOWN is counted into the next DOWN
- * written. Failed attempts are never recorded one by one. Times are seconds
- * of a monotonic clock (uptime).
+ * first failed attempt when the slot had not streamed this boot). So a DOWN
+ * written gets the UP that says how long the outage lasted once the slot
+ * streams again in the same boot (a stopped or disabled slot, or a restart,
+ * leaves it without one). A session ended for new settings the user saved
+ * is not an outage: no DOWN, and the UP after it only after a failed attempt
+ * (not for the reconnect itself, nor after a gap: the slot may have been
+ * off; a save that turns it back on starts that outage).
+ * A DOWN for a session shorter than NTRIP_HIST_SHORT_S is written only when
+ * the slot wrote no DOWN in the last NTRIP_HIST_LIMIT_S, and the UP after
+ * such a session whose DOWN was not written (nor ended by new settings) only
+ * when the slot wrote no UP in that long; a skipped DOWN is counted into the
+ * next DOWN written.
+ * Failed attempts are never recorded one by one. Times are seconds of a
+ * monotonic clock (uptime).
  */
 typedef struct {
     bool streamed;               /**< a session reached STREAMING this boot */
@@ -885,6 +894,8 @@ typedef struct {
     uint32_t session_start_s;
     uint32_t prev_end_s;         /**< the previous session's end (valid once streamed) */
     bool prev_short;             /**< the previous session was short */
+    bool prev_listed;            /**< the previous session's DOWN was written */
+    bool prev_settings;          /**< the previous session ended for new settings (ntrip_hist_new_settings) */
     uint32_t fails;              /**< failed attempts since the previous session (or since boot) */
     bool first_fail_valid;
     uint32_t first_fail_s;       /**< first failed attempt of this boot */
@@ -912,6 +923,26 @@ bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, i
  * record is due (a = slot | cls << 8 | skipped << 16, b = length s).
  */
 bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s, int32_t *a, int32_t *b);
+
+/**
+ * New settings the user saved. In a session: it ended for them (or the slot
+ * was turned off), and no DOWN is written; the UP after it is written only
+ * after a failed attempt (whatever the flapping limit), its outage from this
+ * end. Outside a session after such an end, with no failed attempt since
+ * (the slot turned back on): the outage counts from now. Else nothing.
+ */
+void ntrip_hist_new_settings(ntrip_hist_t *h, uint32_t now_s);
+
+/** The session's length so far, s (0 outside a session): what its DOWN would say. */
+uint32_t ntrip_hist_session_s(const ntrip_hist_t *h, uint32_t now_s);
+
+/**
+ * Before ntrip_hist_up: the outage a session reaching STREAMING now ends
+ * and the failed attempts in it, as an UP would say them, whether one is
+ * written or not. @return false when there is none (the boot's first
+ * attempt worked).
+ */
+bool ntrip_hist_outage(const ntrip_hist_t *h, uint32_t now_s, uint32_t *outage_s, uint32_t *fails);
 
 /** `a` of a history record: slot bits 0-7, class bits 8-15, count bits 16-30 (saturating). */
 int32_t ntrip_hist_pack(uint32_t slot, uint32_t cls, uint32_t count);

@@ -187,21 +187,25 @@ typedef enum {
      * a = diag_caster_a(slot, end class, short sessions not journalled since
      * the slot's previous DOWN), b = session length in s. End class:
      * ntrip_fail_class_t of a failure; 0 when the end was not a caster
-     * failure (pause, configuration change, health restart, shutdown, the
-     * receiver's RTCM stopping, the network going down: the records beside
-     * it tell which). Sessions shorter than 60 s are journalled only when
+     * failure (pause, health restart, shutdown, the receiver's RTCM
+     * stopping, the network going down: the records beside it tell which).
+     * A session ended for new settings the user saved is not journalled (it
+     * is not an outage). Sessions shorter than 60 s are journalled only when
      * the slot wrote no DOWN in the last 10 min; the skipped ones are counted
      * into the next DOWN written.
      */
     DIAG_EV_CASTER_DOWN = 11,
     /**
-     * A caster session reached STREAMING after at least one failed attempt,
-     * or at least 10 s after the slot's previous session ended:
+     * A caster session reached STREAMING after a session whose DOWN was
+     * written (however soon, so that DOWN gets its outage), after at least
+     * one failed attempt, or at least 10 s after the slot's previous session
+     * ended (not after new settings: only after a failed attempt then):
      * a = diag_caster_a(slot, 0, failed attempts since that session),
-     * b = outage in s (from the previous session's end, or from the first
-     * failed attempt when the slot had not streamed this boot). After a
-     * session shorter than 60 s it is journalled only when the slot wrote no
-     * UP in the last 10 min.
+     * b = outage in s (from the previous session's end, from a save that
+     * turned the slot back on, or from the first failed attempt when the
+     * slot had not streamed this boot). After a session shorter than 60 s
+     * whose DOWN was not written (and not ended by new settings) it is
+     * journalled only when the slot wrote no UP in the last 10 min.
      */
     DIAG_EV_CASTER_UP = 12,
     DIAG_EV_WIFI_UP = 13,       /**< the station got its IP back (not the first IP of a boot): a = connect attempts during the outage, b = outage in s */

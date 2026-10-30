@@ -1371,14 +1371,24 @@ TEST_CASE("ntrip history: UP after failures or a gap, DOWN with class and length
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 430, &a, &b));
     TEST_ASSERT_EQUAL_INT32(2 | (3 << 16), a);
     TEST_ASSERT_EQUAL_INT32(30, b);
-    /* a planned close (class 0), back 9 s later without a failure: no UP; 10 s later: UP */
+    /* a planned close (class 0), back 2 s later without a failure: its DOWN was written, so the UP is too */
     TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 1000, &a, &b));
     TEST_ASSERT_EQUAL_INT32(2, a);
-    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 2, 1009, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 1002, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(2, a);
+    TEST_ASSERT_EQUAL_INT32(2, b);
+    /* the same at once (0 s), and after a failure-free 10 s gap */
     TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 2000, &a, &b));
-    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 2010, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 2000, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(0, b);
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 3000, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 3010, &a, &b));
     TEST_ASSERT_EQUAL_INT32(2, a);
     TEST_ASSERT_EQUAL_INT32(10, b);
+    /* a second UP without a DOWN between them is not another return (within the 10 s gap) */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 2, 0, 4000, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 2, 4001, &a, &b));
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 2, 4005, &a, &b));
 
     /* not streamed this boot: the outage counts from the first failed attempt */
     ntrip_hist_init(&h);
@@ -1426,8 +1436,8 @@ TEST_CASE("ntrip history: short sessions are written once per 10 min, the skippe
     TEST_ASSERT_EQUAL_UINT32(3, downs);
     /* the third DOWN carries the 14 skipped since the second */
     TEST_ASSERT_EQUAL_INT32(1 | (NTRIP_CLS_WRITE_STALL << 8) | (14 << 16), last_down_a);
-    /* UPs after short sessions: one per 10 min as well (the first UP followed a failure, never a short session) */
-    TEST_ASSERT_TRUE(ups >= 3 && ups <= 4);
+    /* the UP after each DOWN written (at 1040, 1640 and 2240); the others fall within 10 min of one of them */
+    TEST_ASSERT_EQUAL_UINT32(3, ups);
 
     /* still after a short session, within 10 min of the last UP: not written */
     TEST_ASSERT_FALSE(ntrip_hist_up(&h, 1, t, &a, &b));
@@ -1438,6 +1448,148 @@ TEST_CASE("ntrip history: short sessions are written once per 10 min, the skippe
     TEST_ASSERT_EQUAL_INT32(120, b);
     ntrip_hist_failed(&h, t + 1);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 1, t + 5, &a, &b));
+}
+
+TEST_CASE("ntrip history: a short session's DOWN that was written gets its UP inside the UP limit", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    (void)ntrip_hist_up(&h, 3, 100, &a, &b);
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1000, &a, &b));   /* long */
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 3, 1001, &a, &b));
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1021, &a, &b));  /* short, DOWN 21 s ago */
+    ntrip_hist_failed(&h, 1100);
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 3, 1200, &a, &b));    /* its DOWN skipped, UP 199 s ago: limited */
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1210, &a, &b));  /* short, DOWN 210 s ago */
+    ntrip_hist_failed(&h, 1700);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 3, 1801, &a, &b));     /* its DOWN skipped, UP 800 s ago: written */
+    /* a short session whose DOWN is written (none for 821 s), back 3 s later: the UP 23 s after the last one is written */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 3, NTRIP_CLS_WRITE_STALL, 1821, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(3 | (NTRIP_CLS_WRITE_STALL << 8) | (2 << 16), a);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 3, 1824, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(3, a);
+    TEST_ASSERT_EQUAL_INT32(3, b);
+}
+
+TEST_CASE("ntrip history: after a DOWN not written, an UP after a failure or the 10 s gap, once per 10 min", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    (void)ntrip_hist_up(&h, 3, 100, &a, &b);
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1000, &a, &b));   /* long */
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 3, 1001, &a, &b));
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1021, &a, &b));  /* short, skipped */
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 3, 1025, &a, &b));    /* 4 s, no failure: nothing to say */
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1045, &a, &b));  /* short, skipped */
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 3, 1060, &a, &b));    /* the 15 s gap, but an UP 59 s ago */
+    TEST_ASSERT_FALSE(ntrip_hist_down(&h, 3, NTRIP_CLS_REMOTE_CLOSE, 1080, &a, &b));  /* short, skipped */
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 3, 1700, &a, &b));     /* the gap, the last UP 699 s ago */
+    TEST_ASSERT_EQUAL_INT32(3, a);
+    TEST_ASSERT_EQUAL_INT32(620, b);
+}
+
+TEST_CASE("ntrip history: new settings are not an outage, unless an attempt after them fails", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    (void)ntrip_hist_up(&h, 4, 100, &a, &b);
+    /* saved settings: no DOWN; the reconnect at once, or after a gap (the slot was off), writes no UP */
+    ntrip_hist_new_settings(&h, 1000);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_hist_session_s(&h, 1001));
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 1002, &a, &b));
+    ntrip_hist_new_settings(&h, 2000);
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 9000, &a, &b));
+    /* new settings that fail first (a wrong password): the UP says the outage from the save */
+    ntrip_hist_new_settings(&h, 10000);
+    ntrip_hist_failed(&h, 10001);
+    ntrip_hist_failed(&h, 10300);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 10900, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(4 | (2 << 16), a);
+    TEST_ASSERT_EQUAL_INT32(900, b);
+    /* and the next drop is an ordinary one again: its DOWN, then its UP at once */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 4, NTRIP_CLS_TIMEOUT, 12000, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 12001, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(1, b);
+    /* outside a session it changes nothing */
+    ntrip_hist_init(&h);
+    ntrip_hist_new_settings(&h, 50);
+    TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 100, &a, &b));
+}
+
+TEST_CASE("ntrip history: new settings, a failure: UP past the flap limit; on again: outage from then", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    (void)ntrip_hist_up(&h, 4, 100, &a, &b);
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 4, NTRIP_CLS_REMOTE_CLOSE, 1000, &a, &b));
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 1001, &a, &b));
+    /* a 29 s session ends for new settings that then fail once: its UP 199 s after the last one is written */
+    ntrip_hist_new_settings(&h, 1030);
+    ntrip_hist_failed(&h, 1031);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 1200, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(4 | (1 << 16), a);
+    TEST_ASSERT_EQUAL_INT32(170, b);
+    /* turned off by a save, on again a day later, the first attempt fails: the outage counts from turning on */
+    ntrip_hist_new_settings(&h, 2000);
+    ntrip_hist_new_settings(&h, 90000);
+    ntrip_hist_failed(&h, 90010);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 90030, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(30, b);
+    /* new settings that fail, saved again to fix them: the outage still counts from the first save */
+    ntrip_hist_new_settings(&h, 95000);
+    ntrip_hist_failed(&h, 95001);
+    ntrip_hist_new_settings(&h, 95100);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 95200, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(4 | (1 << 16), a);
+    TEST_ASSERT_EQUAL_INT32(200, b);
+    /* after an ordinary drop, a save outside the session leaves the outage at the drop */
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 4, NTRIP_CLS_TIMEOUT, 96000, &a, &b));
+    ntrip_hist_failed(&h, 96001);
+    ntrip_hist_new_settings(&h, 96100);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 96110, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(110, b);
+}
+
+TEST_CASE("ntrip history: the session length and the outage for the log", "[ntrip]")
+{
+    ntrip_hist_t h;
+    ntrip_hist_init(&h);
+    int32_t a = 0;
+    int32_t b = 0;
+    uint32_t outage = 99;
+    uint32_t fails = 99;
+    /* the boot's first attempt works: nothing to tell */
+    TEST_ASSERT_FALSE(ntrip_hist_outage(&h, 100, &outage, &fails));
+    TEST_ASSERT_EQUAL_UINT32(0, outage);
+    TEST_ASSERT_EQUAL_UINT32(0, fails);
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_hist_session_s(&h, 100));
+    (void)ntrip_hist_up(&h, 0, 100, &a, &b);
+    TEST_ASSERT_EQUAL_UINT32(250, ntrip_hist_session_s(&h, 350));
+    TEST_ASSERT_TRUE(ntrip_hist_down(&h, 0, NTRIP_CLS_TIMEOUT, 400, &a, &b));
+    TEST_ASSERT_EQUAL_UINT32(0, ntrip_hist_session_s(&h, 401));
+    /* after a session: from its end, with the failed attempts since */
+    ntrip_hist_failed(&h, 405);
+    ntrip_hist_failed(&h, 410);
+    TEST_ASSERT_TRUE(ntrip_hist_outage(&h, 430, &outage, &fails));
+    TEST_ASSERT_EQUAL_UINT32(30, outage);
+    TEST_ASSERT_EQUAL_UINT32(2, fails);
+    TEST_ASSERT_TRUE(ntrip_hist_up(&h, 0, 430, &a, &b));
+    TEST_ASSERT_EQUAL_INT32(30, b);
+
+    /* not streamed this boot yet: from the first failed attempt */
+    ntrip_hist_init(&h);
+    ntrip_hist_failed(&h, 50);
+    TEST_ASSERT_TRUE(ntrip_hist_outage(&h, 80, &outage, &fails));
+    TEST_ASSERT_EQUAL_UINT32(30, outage);
+    TEST_ASSERT_EQUAL_UINT32(1, fails);
 }
 
 /* ---- Onocoy: what its console gives (mountpoint, username, password) --------------------- */

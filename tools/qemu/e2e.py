@@ -50,7 +50,11 @@ What it does:
      forwards, such as the SBAS numbers 1101-1107, are skipped), and any gap
      falls on an epoch boundary (an epoch's last frame, then sticky copies
      and an epoch's first frame); nothing between frames, a partial frame
-     only at the very end; receiver maintenance answers its start and
+     only at the very end; saving slot 1's settings again while it streams
+     closes the session and the slot streams again within 60 s, with no
+     caster_down or caster_up of slot 1 in the journal for it (new settings
+     are not an outage) and a "session ended after" line on the console;
+     receiver maintenance answers its start and
      extension with the time it set, and GET /api/gnss agrees; a restart
      during it (the replay paused across it) resumes it with its time left
      (never more, at most 5 s less) and the station only listens;
@@ -1226,7 +1230,33 @@ class E2E:
         lease_lines = [x for x in self.console_text()[console_at:].splitlines() if IDENTIFY_LEASE_LINE in x]
         self.check(not lease_lines, f"no {IDENTIFY_LEASE_LINE!r} on the console while RTCM flows"
                    + (f": {lease_lines[0].strip()[:120]}" if lease_lines else ""))
+        self.settings_save_check()
         self.maintenance_check()
+
+    def settings_save_check(self) -> None:
+        """Saving slot 1's settings while it streams is not an outage: the session closes and the slot streams
+        again, the journal has no caster_down or caster_up of slot 1 for it, and the console says how long the
+        session lasted."""
+        cursor = (self.health().get("journal") or {}).get("newest_seq") or 0
+        connects = self.slot(1)["status"].get("connects") or 0
+        console_at = len(self.console_text())
+        status, data = self.api("PUT", "/api/casters/1", self.slot1_body)
+        if not self.check(status == 200, f"PUT /api/casters/1 again (the same settings, saved while streaming): "
+                                         f"HTTP {status}"):
+            return
+
+        def again():
+            s = self.slot(1)["status"]
+            return s if s.get("state") == "streaming" and (s.get("connects") or 0) > connects else None
+        if not self.check(self.poll(again, 60) is not None, "slot 1 streams again within 60 s after the save"):
+            return
+        time.sleep(2)   # the journal's writer
+        entries, _ = self.journal_since(cursor)
+        mine = [e["kind"] for e in entries if e.get("kind") in ("caster_down", "caster_up") and e["a"] & 0xFF == 1]
+        self.check(not mine, f"no caster_down or caster_up of slot 1 in the journal for the save: {mine}")
+        ended = [x for x in self.console_text()[console_at:].splitlines() if "cst1" in x and "session ended after" in x]
+        self.check(bool(ended), "console: " + (ended[-1].strip()[-90:] if ended else
+                                               "no 'session ended after' line for cst1 after the save"))
 
     def maintenance_check(self) -> None:
         """Receiver maintenance answers with the state the start or extension set ("effective at once"),

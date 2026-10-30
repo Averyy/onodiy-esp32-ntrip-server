@@ -404,7 +404,7 @@ async function eventFilterEarly() {
   sent.length = 0;
   const card = ui.eventCard();
   const sel = [...card.el.walk()].find(e => e.tagName === 'SELECT');
-  sel.value = sel.options[1].v;
+  sel.value = sel.options.find(o => o.v === 'starts').v;
   sel.fire('change');
   await settle();
   routes = null;
@@ -2711,7 +2711,7 @@ def test_event_list_says_every_rows_date_in_a_column_of_one_width():
     assert head == ["TH", "when", None, None, "Event"]
     assert start[:2] == ["TH", "when"] and start[3].startswith("about ")
     assert start[4] == "Started after power-on or a reset by its pin"
-    assert drop[:3] == ["TD", "when", start[2]] and not drop[3].startswith("about") and drop[4].startswith("Wi-Fi dropped")
+    assert drop[:3] == ["TD", "when", start[2]] and not drop[3].startswith("about") and drop[4].startswith("Wi-Fi offline 6s")
     assert rx[:3] == ["TD", "when", start[2]] and rx[3].startswith("about ") and rx[4] == "Receiver at the start Kept running"
 
 
@@ -3549,8 +3549,11 @@ MON = {"running": True, "sample_s": 30, "span_s": 7200,
        "memory": {"free": 120000, "min": 98000}}
 MON_SERIES = {"sample_s": 30, "bucket_s": 300, "buckets": 5, "samples": [10, 10, 10, 10, 3],
               "router_avg": [None, 4, 5, None, 2], "router_max": [None, 9, 8, None, 2], "router_lost": [None, 0, 1, None, 0],
+              "router_sent": [None, 10, 10, None, 3],
               "internet_avg": [20, 21, None, 19, 20], "internet_max": [45, 30, None, 25, 22], "internet_lost": [0, 0, 1, 0, 0],
+              "internet_sent": [10, 10, 1, 10, 3],
               "server_avg": [118, 117, 120, 119, 117], "server_max": [140, 130, 150, 125, 120], "server_lost": [0, 1, 0, 0, 0],
+              "server_sent": [10, 10, 10, 10, 3],
               "rssi_avg": [-79, -78, -80, -79, -78], "cpu_avg": [8, 9, 10, 9, 8], "cpu_max": [10, 20, 30, 40, 50],
               "mem_min": [98000, 98500, 99000, 99000, 98800]}
 
@@ -3559,8 +3562,9 @@ def test_status_performance_card():
     """The Performance card: per figure its name, its latest reading and the last 24 h in words (a ping without a reply
     in the warning colour), fine print for the time covered, one link to the
     Logs page; a line per figure over that time from the left edge to the right (a gap where a bucket has nothing, a lone
-    value a dot (one bucket alone: a flat line), red marks where a ping got no reply, at least 10 ms of range so a millisecond's jitter stays flat). Before
-    the first reading, and in safe mode, one muted line."""
+    value a dot (one bucket alone: a flat line), red marks where a ping got no reply (as tall as the share of the bucket's
+    pings to that target that got none, at least a quarter), at least 10 ms of range so a millisecond's jitter stays
+    flat). Before the first reading, and in safe mode, one muted line."""
     nb = " "
     (o, day, unnamed, waiting, none) = dashboards(over(BASE, monitor=MON), over(BASE, monitor={**MON, "span_s": 86100}),
                                                   over(BASE, monitor={**MON, "server": {**MON["server"], "name": ""}}),
@@ -3587,10 +3591,12 @@ def test_status_performance_card():
     assert all(s["viewBox"] == "0 0 4 32" for s in sparks)
     # Each line says its own scale (bottom to top) under it.
     assert card["scales"] == ["0 to 10ms", "0 to 120ms", "0 to 21ms", f"−80 to −70{nb}dBm", "0 to 100%", f"0{nb}B to 97{nb}KB"]
-    # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost a ping; 0..10 ms (its 5 ms would fill it).
-    assert sparks[0]["paths"] == [["spark-loss", "M2 0V32"], ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
-    # Cloudflare: independent latency and loss (bucket 2 has no replies).
-    assert sparks[2]["paths"] == [["spark-loss", "M2 0V32"], ["spark-line", "M0 4.2L1 3.0M3 5.5L4 4.2"]]
+    # Router: buckets 1-2 joined, 3 empty, 4 alone (a dot); bucket 2 lost one ping of 10 (a quarter-height mark);
+    # 0..10 ms (its 5 ms would fill it).
+    assert sparks[0]["paths"] == [["spark-loss", "M2 32V24.0"], ["spark-line", "M1 18.6L2 16.0M4 23.8h0"]]
+    # Cloudflare: independent latency and loss (bucket 2 had a target in one cycle only, and it got no reply: the
+    # whole height, the share of its own pings, not of the bucket's 10 samples).
+    assert sparks[2]["paths"] == [["spark-loss", "M2 32V0.0"], ["spark-line", "M0 4.2L1 3.0M3 5.5L4 4.2"]]
     # CPU on 0..100 %.
     assert sparks[4]["paths"][-1] == ["spark-line", "M0 26.4L1 23.8L2 21.2L3 18.6L4 16.0"]
     assert unnamed["cards"]["Performance"]["perf"][1][0] == "Server ping"
@@ -3599,6 +3605,11 @@ def test_status_performance_card():
         assert c["perf"] == [] and c["notes"] == [["Waiting for the first reading (every 30s).", "muted"]] and c["chip"] is None
     safe = matrix()["safe"]["cards"]["Performance"]
     assert safe["notes"] == [["Not available in safe mode.", "muted"]] and safe["perf"] == []
+    # A mark as tall as the share lost: half of 10, all 3 of the newest bucket's; no count sent: the whole height.
+    (lossy,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "server_lost": [0, 5, 0, 0, 3]})
+    (uncounted,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "router_sent": [None] * 5})
+    assert lossy["cards"]["Performance"]["sparks"][1]["paths"][0] == ["spark-loss", "M1 32V16.0M4 32V0.0"]
+    assert uncounted["cards"]["Performance"]["sparks"][0]["paths"][0] == ["spark-loss", "M2 32V0.0"]
     # One bucket so far: a flat line across the box.
     (one,) = dashboards(over(BASE, monitor=MON), mon={**MON_SERIES, "buckets": 1, "router_avg": [4], "router_lost": [0]})
     assert one["cards"]["Performance"]["sparks"][0]["viewBox"] == "0 0 1 32"

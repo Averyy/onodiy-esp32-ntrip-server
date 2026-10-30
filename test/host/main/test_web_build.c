@@ -3092,9 +3092,9 @@ TEST_CASE("GET /api/monitor: one array per figure, null where a bucket has none"
     web_build_monitor_series(&w, b, 2);
     TEST_ASSERT_EQUAL_STRING(
         "{\"sample_s\":30,\"bucket_s\":300,\"buckets\":2,\"samples\":[10,1],"
-        "\"router_avg\":[4,null],\"router_max\":[9,null],\"router_lost\":[1,null],"
-        "\"internet_avg\":[20,null],\"internet_max\":[45,null],\"internet_lost\":[2,null],"
-        "\"server_avg\":[null,null],\"server_max\":[null,null],\"server_lost\":[null,null],"
+        "\"router_avg\":[4,null],\"router_max\":[9,null],\"router_lost\":[1,null],\"router_sent\":[10,null],"
+        "\"internet_avg\":[20,null],\"internet_max\":[45,null],\"internet_lost\":[2,null],\"internet_sent\":[10,null],"
+        "\"server_avg\":[null,null],\"server_max\":[null,null],\"server_lost\":[null,null],\"server_sent\":[null,null],"
         "\"rssi_avg\":[-79,null],\"cpu_avg\":[11,null],\"cpu_max\":[30,null],\"mem_min\":[97000,null]}",
         wj_text(&w));
 }

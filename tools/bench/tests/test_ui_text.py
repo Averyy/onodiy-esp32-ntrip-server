@@ -52,7 +52,7 @@ vm.createContext(ctx);
 /* healthCardShown: Logs' Health card is on its page (the notices' cases unless one says otherwise). */
 const fns = vm.runInContext('"use strict";\n(function () {\n' + src +
   '\nhealthCardShown = true;\nreturn { restartPlanText, restartPlanShort, onocoyNow: a => onocoyNow(a[0], a[1]), onocoyElsewhereText, connRow, journalDetail, presetInfo: () => ({ PRESETS, PRESET_INFO }),\n' +
-  '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2]); }, evFilter: () => EV_FILTER,\n' +
+  '  journalItems: a => { S.status = a[3] || null; return journalItems(a[0], a[1], a[2], a[4]); }, evFilter: () => EV_FILTER,\n' +
   '  healthChip: a => healthChip(a[0], a[1], a[2]), sinceStart: hl => sinceStart(hl), logParts: l => logParts(l),\n' +
   '  timeRange: a => timeRange(a[0], a[1]), whenParts: a => whenParts(a[0], a[1], a[2], a[3]),\n' +
   '  logsTabs: () => LOGS_TABS.map(t => t[1]), dayParts: a => dayParts(a[0], a[1]),\n' +
@@ -317,10 +317,10 @@ def test_connection_row_rssi():
 
 def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
     """The journal's connection records as one list (no separate connection history): a drop and the return after
-    it are one row, the same row three times in a row is one row with a "x3" toggle; a drop without a return stays
-    as it is. Casters by their name now, never a slot number."""
+    it are one row that says how long it was offline, each its own row; the same drop without a return three times
+    in a row is one row with a "x3" toggle. Casters by their name now, never a slot number."""
     rc, to, dup = 5, 4, 5   # remote_close and timeout (ntrip_fail_class_t), duplicate (ntrip_stop_t)
-    recs = [jrec(5, "caster_stop", dup << 8, 0, 5)]
+    recs = [jrec(1 + i, "caster_down", rc << 8, 3600, 1 + i) for i in range(3)] + [jrec(5, "caster_stop", dup << 8, 0, 5)]
     for i in range(3):
         recs += [jrec(10 + 2 * i, "caster_down", rc << 8, 3600, 10 + 2 * i), jrec(11 + 2 * i, "caster_up", 2 << 16, 20, 11 + 2 * i)]
     recs += [jrec(20, "wifi_disconnect", 202, -67, 20), jrec(21, "wifi_up", 3, 40, 21), jrec(30, "caster_down", to << 8, 60, 30)]
@@ -328,16 +328,46 @@ def test_event_list_pairs_a_drop_with_its_return_and_folds_repeats():
     every, casters = run_ui([("journalItems", [recs, True, None, st]),
                              ("journalItems", [recs, True, ["caster_down", "caster_up", "caster_stop"], st])])
     rows = [i for i in every if "head" not in i]
-    assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi dropped", "Onocoy disconnected", "Onocoy stopped"]
+    # A drop with its return says how long it was offline first, every one in a row of its own.
+    assert [r["ev"] for r in rows] == ["Onocoy disconnected", "Wi-Fi offline 40s"] + ["Onocoy offline 20s"] * 3 + [
+        "Onocoy stopped", "Onocoy disconnected"]
     assert rows[0]["det"] == "after 1min online, timed out" and rows[0]["tone"] == "warn"
-    assert rows[1]["det"] == "back after 40s, authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
-    assert rows[2]["det"] == "back after 20s, closed by the server, 2 failed attempts"
-    assert len(rows[2]["all"]) == 3 and rows[2]["id"] == "r10"
-    assert rows[3]["det"] == "duplicate stream, no new attempt until you act" and rows[3]["tone"] == "bad"
+    assert rows[1]["det"] == "authentication failed (wrong password?) (202), signal \u221267\u00a0dBm"
+    assert rows[2]["det"] == "after 1h online, closed by the server, 2 failed attempts"
+    assert not any(r.get("all") for r in rows[:6])
+    assert rows[5]["det"] == "duplicate stream, no new attempt until you act" and rows[5]["tone"] == "bad"
+    # The three drops without a return: one row, x3.
+    assert rows[6]["det"] == "after 1h online, closed by the server"
+    assert len(rows[6]["all"]) == 3 and rows[6]["id"] == "r1"
     for r in rows:
         assert "slot" not in (r["ev"] + r["det"]).lower()
     # The Casters filter keeps the pairs and drops the Wi-Fi.
-    assert [r["ev"] for r in casters if "head" not in r] == ["Onocoy disconnected", "Onocoy disconnected", "Onocoy stopped"]
+    assert [r["ev"] for r in casters if "head" not in r] == ["Onocoy disconnected"] + ["Onocoy offline 20s"] * 3 + [
+        "Onocoy stopped", "Onocoy disconnected"]
+
+
+def test_event_list_onocoy_filter_keeps_only_the_onocoy_slot():
+    """The Onocoy filter: only the Onocoy slot's drops, returns and stops (another caster's and the Wi-Fi's are left
+    out, the pairing is the same), and a return at once still says how long it was offline."""
+    rc = 5   # remote_close (ntrip_fail_class_t)
+    recs = [jrec(10, "caster_down", rc << 8, 7200, 10), jrec(11, "caster_up", 0, 0, 11),
+            jrec(12, "caster_down", 1 | (rc << 8), 600, 12), jrec(13, "caster_up", 1 | (1 << 16), 30, 13),
+            jrec(14, "wifi_disconnect", 8, -70, 14), jrec(15, "wifi_up", 1, 12, 15),
+            jrec(16, "caster_down", rc << 8, 900, 16), jrec(17, "caster_up", 2 << 16, 45, 17)]
+    st = {"casters": [{"slot": 0, "name": "Onocoy", "protected": True, "enabled": True},
+                      {"slot": 1, "name": "RTK2go", "protected": False, "enabled": True}]}
+    filters = run_ui([("evFilter", None)])[0]
+    ono = next(f for f in filters if f[0] == "onocoy")
+    only, every = run_ui([("journalItems", [recs, True, ono[2], st, 0]), ("journalItems", [recs, True, None, st])])
+    assert ono[3] is True
+    assert [(r["ev"], r["det"]) for r in only if "head" not in r] == [
+        ("Onocoy offline 45s", "after 15min online, closed by the server, 2 failed attempts"),
+        ("Onocoy offline 0s", "after 2h online, closed by the server")]
+    assert [r["ev"] for r in every if "head" not in r] == [
+        "Onocoy offline 45s", "Wi-Fi offline 12s", "RTK2go offline 30s", "Onocoy offline 0s"]
+    # No Onocoy slot (-1): no caster records at all.
+    (none,) = run_ui([("journalItems", [recs, True, ono[2], st, -1])])
+    assert [r for r in none if "head" not in r] == []
 
 
 def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None = None) -> dict:
@@ -367,7 +397,7 @@ def test_event_list_names_moves_between_access_points():
     rows = [(r["ev"], r["det"]) for r in every if "head" not in r]
     # The time offline first: a phone cuts the end of the row off.
     assert rows == [
-        ("Wi-Fi dropped", "back after 6s, left the network (8), signal \u221270\u00a0dBm"),
+        ("Wi-Fi offline 6s", "left the network (8), signal \u221270\u00a0dBm"),
         ("Wi-Fi moved", "2s offline, to a stronger access point, channel 11 to 1"),
         ("Wi-Fi reconnected", "5s offline, no stronger access point after all"),
         ("Wi-Fi moved", "4s offline, to a stronger access point, channel 6, signal \u221275 to \u221258\u00a0dBm"),

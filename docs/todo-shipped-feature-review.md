@@ -126,6 +126,37 @@ Back to [development](development.md) · [Latency work](todo-network-latency.md)
   host tests pass. The unchanged NTRIP 1 and NTRIP 2 source-table assertions
   both pass in the final TLS/rover emulator run (92 checks, no failures).
 
+- [ ] **Show how long each Onocoy/NTRIP outage lasted in Logs → History,
+  alongside the daily totals.**
+  - [x] Journal the return after every journalled drop once the slot streams
+    again, however soon. It was skipped when the first attempt reconnected
+    within 10 s; the fast profile's first retry is 1 s. Host tests cover the
+    immediate return, the 10-minute flapping limit and one return per drop.
+    Saved settings are not an outage: their close is not journalled, nor the
+    reconnect unless an attempt fails.
+  - [x] Put the outage's length first in the event list ("Onocoy offline
+    40s"), keep the session length, give each outage its own row instead of
+    folding it into a run, and add an Onocoy filter. Console log lines now say
+    how long a session lasted and, on reconnecting, how long the slot was
+    offline and how many attempts failed.
+  - [ ] Flapping: sessions shorter than 60 s within 10 minutes of the last
+    journalled drop are counted into the next drop, but their offline time is
+    not recorded. Recording it would need a new journal kind (kind values
+    are never renumbered); decide once the new records show how often it
+    happens.
+  - [ ] Reconcile the listed outages with the day's offline total. The ledger
+    also counts receiver RTCM gaps while the session stays open, start-up after
+    a restart, power-off gaps and stopped slots. The journal may not reach back
+    30 days, and outages can cross midnight or a restart.
+  - [ ] An outage across a restart is not paired: the first return after a boot
+    counts from that boot's first failed attempt, not from the drop before the
+    restart.
+- [ ] Separate a lost reply at the internet target from a lost internet path.
+  The internet ping is one ICMP echo to `1.1.1.1` every 30 s. Compare the
+  router, Cloudflare and caster losses per bucket (`GET /api/monitor`) over
+  several days first; if Cloudflare's losses do not coincide with the router's,
+  try a second target only after a lost reply and count the internet lost
+  only when both fail.
 - [ ] Add an upload progress/response watchdog to the raw XMLHttpRequest helper;
   currently a stalled upload response can leave its UI pending indefinitely.
   Never automatically replay uploads: reconcile server state after uncertainty.
