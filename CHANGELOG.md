@@ -14,6 +14,8 @@ before tagging ([releases](docs/releases.md)).
   you start (restart, update, rollback) are no longer recorded as a drop,
   nor the reconnect unless an attempt fails. A pause for receiver work that
   closes the session shows as a neutral "paused" row.
+- Logs → History: the network recovery pass that starts while Onocoy
+  connects in a start's first minute reads "Reconnecting to Onocoy".
 - Logs: caster session ends include the session length; reconnects include
   the time offline and failed attempts.
 - Status: ping loss marks are as tall as the share of each 5-minute block's

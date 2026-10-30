@@ -1233,6 +1233,16 @@ const EV_FILTER = [
   ['loss', 'Data loss', ['data_loss']],
 ];
 
+/*
+ * A network recovery pass that started (ladder_step, network, code 0) on
+ * "Onocoy down" alone in a start's first minute: Onocoy has not connected
+ * yet after the start (the pass's first step is due at 60 s), so the row
+ * says that rather than a recovery. Steps the pass runs later show as usual.
+ */
+const START_CONNECT_S = 60;
+const startReconnect = e => e.kind === 'ladder_step' && e.a === 1 && (e.b & 0xff) === 0 && ((e.b >>> 16) & 0xff) === 1 &&
+  e.uptime_s < START_CONNECT_S;
+
 /* esp_reset_reason_t by C value, as L.resetReason names them. */
 const RESET_KEYS = Object.keys(L.resetReason);
 
@@ -1339,6 +1349,10 @@ function journalItems(entries, atStart, kinds, slot) {
         /* A move whose reconnect found no stronger access point stayed: no move; a reconnect, unless the connections
          * were kept (nothing dropped). */
         const stayed = e.kind === 'wifi_roam' && (e.a >>> 24) & 1 ? ((e.a >>> 25) & 1 ? 'Wi-Fi stayed' : 'Wi-Fi reconnected') : null;
+        if (startReconnect(e)) {
+          rows.push(Object.assign(when, { k: 'start reconnect', seq: e.seq, ev: 'Reconnecting to Onocoy', det: '' }));
+          continue;
+        }
         rows.push(Object.assign(when, { k: e.kind + sub, seq: e.seq, ev: e.kind === 'ladder_step' ? capFirst(J.ladder[e.a] || 'ladder ' + e.a) +
           ' recovery' : loss || stayed || J.kind[e.kind] || words(e.kind), det: journalDetail(e) }));
       }

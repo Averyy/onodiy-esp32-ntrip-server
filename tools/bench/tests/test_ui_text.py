@@ -385,6 +385,20 @@ def test_event_list_pause_for_receiver_work_is_planned():
                     ("Onocoy paused 3min", "for receiver work, after 2h online", "")]
 
 
+def test_event_list_start_reconnect_is_no_recovery():
+    """A network recovery pass that starts on "Onocoy down" alone in a start's first minute is Onocoy connecting
+    after the start: "Reconnecting to Onocoy", no tone. Later in the start, or with another trigger, it is a recovery."""
+    p_only, p_and_a = 1 << 16, 3 << 16   # trigger bits P, P | A (ladder_step b: reason << 16, code 0 = pass started)
+    start = [jrec(1, "boot", 1, 4, 0), jrec(2, "session", 3600, 3, 0)]
+    at_start, later, other = run_ui([("journalItems", [start + [jrec(3, "ladder_step", 1, p_only, 1)], True, None]),
+                                     ("journalItems", [start + [jrec(3, "ladder_step", 1, p_only, 300)], True, None]),
+                                     ("journalItems", [start + [jrec(3, "ladder_step", 1, p_and_a, 1)], True, None])])
+    row = lambda items: [(r["ev"], r["det"], r.get("tone")) for r in items if "head" not in r]
+    assert row(at_start) == [("Reconnecting to Onocoy", "", None)]
+    assert row(later) == [("Network recovery", "started: Onocoy down", None)]
+    assert row(other) == [("Network recovery", "started: Onocoy down, no IP address", None)]
+
+
 def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None = None) -> dict:
     return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
 
