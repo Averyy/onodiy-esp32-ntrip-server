@@ -186,11 +186,14 @@ typedef enum {
      * A caster session that reached STREAMING ended (any reason):
      * a = diag_caster_a(slot, end class, short sessions not journalled since
      * the slot's previous DOWN), b = session length in s. End class:
-     * ntrip_fail_class_t of a failure; 0 when the end was not a caster
-     * failure (pause, health restart, shutdown, the receiver's RTCM
-     * stopping, the network going down: the records beside it tell which).
-     * A session ended for new settings the user saved is not journalled (it
-     * is not an outage). Sessions shorter than 60 s are journalled only when
+     * ntrip_fail_class_t of a failure; DIAG_CASTER_END_PAUSED when the
+     * casters were paused for receiver work (planned; also the stall of a
+     * session silent since such a pause); 0 when the end was
+     * not a caster failure (health restart, a restart the station started,
+     * the receiver's RTCM stopping, the network going down: the records
+     * beside it tell which). A session the user ended (new settings they
+     * saved, a restart they asked for) is not journalled: it is not an
+     * outage. Sessions shorter than 60 s are journalled only when
      * the slot wrote no DOWN in the last 10 min; the skipped ones are counted
      * into the next DOWN written.
      */
@@ -199,12 +202,12 @@ typedef enum {
      * A caster session reached STREAMING after a session whose DOWN was
      * written (however soon, so that DOWN gets its outage), after at least
      * one failed attempt, or at least 10 s after the slot's previous session
-     * ended (not after new settings: only after a failed attempt then):
+     * ended (after a session the user ended: only after a failed attempt):
      * a = diag_caster_a(slot, 0, failed attempts since that session),
      * b = outage in s (from the previous session's end, from a save that
      * turned the slot back on, or from the first failed attempt when the
      * slot had not streamed this boot). After a session shorter than 60 s
-     * whose DOWN was not written (and not ended by new settings) it is
+     * whose DOWN was not written (and not ended by the user) it is
      * journalled only when the slot wrote no UP in the last 10 min.
      */
     DIAG_EV_CASTER_UP = 12,
@@ -365,6 +368,9 @@ typedef enum {
  * `a` of DIAG_EV_CASTER_DOWN / _UP: slot index in bits 0-7, end class in bits
  * 8-15, a count in bits 16-30 (saturating at 32 767, so `a` stays >= 0).
  */
+/** End class of a DIAG_EV_CASTER_DOWN: paused for receiver work past the idle limit (no ntrip_fail_class_t). */
+#define DIAG_CASTER_END_PAUSED 255u
+
 static inline int32_t diag_caster_a(uint32_t slot, uint32_t cls, uint32_t count)
 {
     if (count > 32767u) {

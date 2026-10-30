@@ -125,6 +125,7 @@ _Static_assert((int)NTRIP_PROF_FAST == (int)NTRIP_BACKOFF_FAST &&
                    (int)NTRIP_PROF_POLITE == (int)NTRIP_BACKOFF_POLITE,
                "core profiles must match ntrip_backoff_profile_t");
 _Static_assert(CONFIG_NTRIP_MAX_CASTERS <= 24, "one event-group bit per slot");
+_Static_assert((unsigned)NTRIP_FAIL_CLASS_COUNT < DIAG_CASTER_END_PAUSED, "the paused end class is no failure class");
 
 #define TICK_MS             100u    /* longest single wait while a session is open */
 #define IDLE_WAIT_MS        200u    /* idle loop: fresh-data gate and backoff checks */
@@ -227,6 +228,7 @@ typedef struct {
     uint32_t drain_start_ms;
     uint32_t drain_until_ms;
     bool paused_seen;
+    bool silent_since_pause;     /* the session sent nothing since a pause for receiver work: its stall is the pause's */
     bool logged_unexpected;
     ntrip_sess_text_t stext;     /* lines the caster sends during the session */
     ntrip_stop_t stop_seen;      /* the stop already logged and journalled */
@@ -304,6 +306,7 @@ static char s_agent[NTRIP_AGENT_MAX];
 static volatile bool s_running;
 static volatile bool s_paused;
 static volatile bool s_shutdown;
+static volatile bool s_user_reboot;   /* shutting down for a restart the user asked for */
 static volatile uint32_t s_shutdown_drain_until;   /* set before s_shutdown: sessions finish their epoch until then */
 static volatile bool s_net_up;           /* station got an IP and has not dropped since */
 static volatile uint32_t s_net_gen;      /* bumped when the address returns or changes: older sockets are dead */
@@ -796,6 +799,7 @@ static write_result_t write_all(slot_t *s, const uint8_t *p, size_t n, uint32_t 
             s->mid_chunk = pending.remaining > 0;
             last = now_ms();
             s->last_tx_ms = last;
+            s->silent_since_pause = false;
             s->progress_ms = last;
             if (count) {
                 ntrip_sm_sent(&s->sm, (size_t)r, last);
@@ -855,6 +859,7 @@ static void session_close(slot_t *s, bool clean)
     tx_diag_connection(s, false);
     s->mid_chunk = false;
     s->paused_seen = false;
+    s->silent_since_pause = false;
     s->draining = false;
     s->drained = false;
 }
@@ -1637,8 +1642,8 @@ static void hist_flush(slot_t *s)
     }
 }
 
-/* A session that reached STREAMING ended; cls = NONE when it was not a caster failure. */
-static void hist_down(slot_t *s, ntrip_cls_t cls)
+/* A session that reached STREAMING ended; cls = NONE when not a caster failure, DIAG_CASTER_END_PAUSED when paused. */
+static void hist_down(slot_t *s, uint8_t cls)
 {
     int32_t a;
     int32_t b;
@@ -1664,20 +1669,28 @@ static void note_stop(slot_t *s)
     hist_flush(s);
 }
 
-/* A planned close; settings: for new settings the user saved (the connection history leaves it out: no outage). */
-static void end_planned(slot_t *s, uint32_t now, bool clean, bool settings)
+/* What a planned close is for, as the connection history records it. */
+typedef enum {
+    END_OTHER = 0,   /* a health restart, a new address, no RTCM, a shutdown: a DOWN of class none */
+    END_SETTINGS,    /* new settings the user saved: no outage, no DOWN */
+    END_PAUSE,       /* paused for receiver work past the idle limit (or silent since): a DOWN of class ..._PAUSED */
+} end_why_t;
+
+static void end_planned(slot_t *s, uint32_t now, bool clean, end_why_t why)
 {
     bool was_open = s->open;
     unsigned len_s = (unsigned)ntrip_hist_session_s(&s->hist, uptime_s());
+    /* A restart the user asked for is no outage either (its heading in the event list says why). */
+    bool user = why == END_SETTINGS || (s_shutdown && s_user_reboot);
     session_close(s, clean);
     ntrip_sm_closed(&s->sm, now);
-    if (settings) {
-        ntrip_hist_new_settings(&s->hist, uptime_s());   /* ends the session in the history, or starts the outage now */
+    if (user) {
+        ntrip_hist_user_end(&s->hist, uptime_s());   /* ends the session in the history, or starts the outage now */
     }
     if (was_open) {
         s->st.connected_since = 0;
-        if (!settings) {
-            hist_down(s, NTRIP_CLS_NONE);
+        if (!user) {
+            hist_down(s, why == END_PAUSE ? (uint8_t)DIAG_CASTER_END_PAUSED : (uint8_t)NTRIP_CLS_NONE);
         }
         ESP_LOGI(TAG, "cst%u (%s): session ended after %u s", (unsigned)s->idx, s->cfg.name, len_s);
     }
@@ -1716,9 +1729,9 @@ static void handle_commands(slot_t *s, uint32_t now)
         strlcpy(old_host, s->cfg.host, sizeof(old_host));
         bool was_protected = s->cfg.protected_slot;
         if (s->open || s->fd >= 0 || s->tls != NULL) {
-            end_planned(s, now, true, true);
+            end_planned(s, now, true, END_SETTINGS);
         } else {
-            ntrip_hist_new_settings(&s->hist, uptime_s());   /* no session: a slot turned on starts its outage now */
+            ntrip_hist_user_end(&s->hist, uptime_s());   /* no session: a slot turned on starts its outage now */
         }
         copy_cfg(s);
         bool other_server = strcasecmp(old_host, s->cfg.host) != 0;
@@ -1762,14 +1775,14 @@ static void handle_commands(slot_t *s, uint32_t now)
     }
     if (cmd & CMD_RESTART) {
         if (s->open || s->fd >= 0 || s->tls != NULL) {
-            end_planned(s, now, true, false);
+            end_planned(s, now, true, END_OTHER);
         }
         s->st.restarts++;
         ESP_LOGW(TAG, "cst%u (%s): restarted by the health monitor", (unsigned)s->idx, s->cfg.name);
     }
     if (s->open && s->net_gen != s_net_gen) {
         /* the address changed: the old socket is dead, no clean close possible */
-        end_planned(s, now, false, false);
+        end_planned(s, now, false, END_OTHER);
         ntrip_sm_stagger(&s->sm, now, esp_random());
         ESP_LOGI(TAG, "cst%u (%s): address changed, reconnecting", (unsigned)s->idx, s->cfg.name);
     }
@@ -1901,6 +1914,7 @@ static void connect_once(slot_t *s, uint32_t now)
     s->mid_chunk = false;
     ntrip_epoch_track_init(&s->epochs);
     s->paused_seen = false;
+    s->silent_since_pause = false;
     s->logged_unexpected = false;
     ntrip_sess_text_start(&s->stext);
     s->last_tx_ms = t1;
@@ -2055,7 +2069,7 @@ static void stream_step(slot_t *s, uint32_t now)
         break;
     case WR_ABORT:
     default:
-        end_planned(s, t, false, abort_for_settings(s));   /* mid-chunk: no terminator, just close */
+        end_planned(s, t, false, abort_for_settings(s) ? END_SETTINGS : END_OTHER);   /* mid-chunk: just close */
         break;
     }
 }
@@ -2114,6 +2128,9 @@ static void slot_step(slot_t *s, uint32_t now)
 {
     handle_commands(s, now);
 
+    if (s_paused && s->open) {
+        s->silent_since_pause = true;   /* until it sends again: a stall right after the resume is still the pause */
+    }
     bool net = net_ready();   /* the address goes with the link (see "Network state") */
     ntrip_sm_in_t in = {
         .enabled = s->cfg.enabled && s_running && !s_shutdown,
@@ -2133,7 +2150,8 @@ static void slot_step(slot_t *s, uint32_t now)
                                              "no RTCM from the receiver" };
         ESP_LOGI(TAG, "cst%u (%s): closing session (%s)", (unsigned)s->idx, s->cfg.name,
                  k_why[(size_t)why < sizeof(k_why) / sizeof(k_why[0]) ? (size_t)why : 0]);
-        end_planned(s, now, why != NTRIP_WHY_NO_IP, false);
+        bool pause = why == NTRIP_WHY_PAUSE_IDLE || (why == NTRIP_WHY_SOURCE_STALL && s->silent_since_pause);
+        end_planned(s, now, why != NTRIP_WHY_NO_IP, pause ? END_PAUSE : END_OTHER);
     } else if (act == NTRIP_ACT_CONNECT) {
         if (s->low_heap_wait && (int32_t)(now - s->low_heap_until_ms) < 0) {
             wait_kick(s, IDLE_WAIT_MS);
@@ -2211,8 +2229,8 @@ static void wait_sessions_closed(uint32_t budget_ms)
  * handshake is skipped. */
 static void on_shutdown(lifecycle_reboot_reason_t reason, uint32_t deadline_ms, void *ctx)
 {
-    (void)reason;
     (void)ctx;
+    __atomic_store_n(&s_user_reboot, lifecycle_reboot_user_planned(reason), __ATOMIC_SEQ_CST);
     uint32_t drain = deadline_ms / 2u < DRAIN_MS ? deadline_ms / 2u : DRAIN_MS;
     __atomic_store_n(&s_shutdown_drain_until, now_ms() + drain, __ATOMIC_SEQ_CST);
     __atomic_store_n(&s_shutdown, true, __ATOMIC_SEQ_CST);

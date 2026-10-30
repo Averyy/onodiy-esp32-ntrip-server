@@ -690,7 +690,8 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   console; receiver maintenance answers its start and
   extension with the time it set (900 s, then 1800 s left), and
   `GET /api/gnss` agrees; a restart during it (`POST /api/system/reboot`,
-  the replay paused across it) resumes it from its RTC record with its
+  the replay paused across it; asked for, so slot 1's session it closes
+  leaves no `caster_down`) resumes it from its RTC record with its
   time left (never more than was left, at most 5 s less: the RTC timer
   runs on through a software restart in this QEMU too), the console says
   so and the station only listens (`idle`, `rx_maintenance`). With
@@ -843,7 +844,10 @@ for it). PASS or FAIL for each of these (exit status 1 if any failed):
   new settings, a restart by the health monitor) closed every session at
   once, and the last chunk a caster got ended inside an epoch whenever the
   close fell in the receiver's MSM burst; the restart in the comparison
-  above, with the replay paused 2 s before it, could not show that. And
+  above, with the replay paused 2 s before it, could not show that. Slot
+  1's `caster_down` records of the scenario all carry the end class of a
+  pause for receiver work (255, the stall right after a resume included):
+  its saves and the restarts asked for leave none. And
   every caster record of the scenario (the slot is paused for each switch
   and each apply) passes the strict epoch check above, against the fixture
   as that receiver sends it; a record that ended (the station closed the

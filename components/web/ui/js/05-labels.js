@@ -335,6 +335,8 @@ const J = {
   netTrigger: ['Onocoy down', 'no IP address', 'a server not reached'],
   fail: ['none', 'dns', 'connect', 'tls', 'timeout', 'remote_close', 'write_stall', 'keepalive', 'auth', 'mount_busy', 'config', 'banned',
     'login_blocked', 'in_use', 'replaced', 'local'],
+  /* A caster_down's end class when the casters were paused for receiver work (DIAG_CASTER_END_PAUSED) */
+  paused: 255,
   /* ntrip_stop_t (a caster_stop record's bits 8-15) */
   stop: ['none', 'rejected', 'login_blocked', 'in_use', 'kicked', 'duplicate', 'banned'],
   /* Why a rover's session ended (local_caster_end_t, a rover_disconnect record's bits 8-15) */

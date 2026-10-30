@@ -56,7 +56,8 @@ What it does:
      are not an outage) and a "session ended after" line on the console;
      receiver maintenance answers its start and
      extension with the time it set, and GET /api/gnss agrees; a restart
-     during it (the replay paused across it) resumes it with its time left
+     during it (the replay paused across it; asked for, so slot 1's session
+     it closes leaves no caster_down) resumes it with its time left
      (never more, at most 5 s less) and the station only listens;
   scenario "local-caster" (the station's own caster for a rover, "Your
   rover"; with --scenario all right after "stream", whose slot 1 session
@@ -116,7 +117,9 @@ What it does:
      close that waited for its epoch's end and none that gave up, and a
      restart timed to come inside an epoch while the replay streams (paused
      once that session has ended) whose session finished its epoch first;
-     every caster record of the scenario passes the strict epoch check
+     slot 1's caster_down records of the scenario all have the end class
+     of a pause for receiver work (255; saves and restarts asked for leave
+     none); every caster record of the scenario passes the strict epoch check
      above, and a session that ended (closed during a pause, for new
      settings, or by a restart) ends on a whole epoch, as does the part of
      the first session before the configuration's pause; one check per
@@ -210,6 +213,7 @@ QEMU_TOLERANCE_S = 2.0
 IDENTIFY_LEASE_LINE = "COMMAND lease taken by identify"
 SGT_PHASE_S = 60
 SGT_PAUSES = 12              # applies in a row for the pause check, twice (signal-test scenario, step 5)
+DIAG_CASTER_END_PAUSED = 255  # a caster_down's end class for a pause for receiver work (diag.h)
 # The second time each epoch's last MSM is sent this long after the rest of it. The rest takes about 0.3 s to
 # reach the station (the emulated UART paces it), so the last MSM comes about 0.4 s after the one before it:
 # longer than the hub's 250 ms gap rule, well within the station's 1 s wait for an epoch in flight.
@@ -1299,6 +1303,7 @@ class E2E:
             return
         self.replay.pause()   # quiet across the restart (reboot_check says why)
         time.sleep(2)
+        cursor = (self.health().get("journal") or {}).get("newest_seq") or 0
         status, data = self.api("POST", "/api/system/reboot", {})
         if not self.check(status == 202, f"POST /api/system/reboot during maintenance: HTTP {status} {data}"):
             self.replay.resume()
@@ -1310,6 +1315,13 @@ class E2E:
         self.replay.resume()
         if not self.check(back and self.login(first=False), "back after the restart during maintenance"):
             return
+        # A restart the user asked for is no outage: slot 1's session it closed leaves no caster_down.
+        entries, _ = self.journal_since(cursor)
+        before_boot = entries[:next((i for i, e in enumerate(entries) if e.get("kind") == "boot"), len(entries))]
+        downs = [e for e in before_boot if e.get("kind") == "caster_down" and e["a"] & 0xFF == 1]
+        self.check(not downs and len(before_boot) < len(entries),
+                   f"no caster_down of slot 1 for the restart asked for (records before its boot: "
+                   f"{[e.get('kind') for e in before_boot]})")
         after = maint()
         want = before["left_s"] - (time.monotonic() - t_ref)
         self.save("maintenance-after-restart.json", after)
@@ -2471,6 +2483,7 @@ class E2E:
             self.skip("signal-test: needs the fake caster's per-session records (not with --caster docker)")
             return
         self.stream_slot()
+        _, sgt_cursor = self.journal_since(0)
         first_conn = max((c["n"] for c in self.caster.all_connections()), default=0)
         self.sgt_spans = [(max(first_conn, 1), "since the scenario's start")]
         resp = Um982Responder(group=(4, 5), restart_s=3.0)
@@ -2664,6 +2677,12 @@ class E2E:
                        f"signal-test caster records {what}: "
                        + ("; ".join(text + ("" if ok else " (FAILED)") for ok, text in parts) or "none carried an epoch"))
         self.check(checked >= 1, f"{checked} caster record(s) of the signal-test scenario checked")
+        # Every close in this scenario is receiver work, a save or a restart asked for: only pauses are journalled,
+        # as planned (end class 255), the stall right after a resume included; the others are no outage at all.
+        entries, _ = self.journal_since(sgt_cursor)
+        downs = [(e["a"] >> 8) & 0xFF for e in entries if e.get("kind") == "caster_down" and e["a"] & 0xFF == 1]
+        self.check(all(c == DIAG_CASTER_END_PAUSED for c in downs),
+                   f"signal-test: slot 1's caster_down records are all pauses for receiver work (end classes {downs})")
         # Holds the station had to force (no epoch boundary within its 1 s wait) and the long ones it noted.
         for line in self.console_text().splitlines():
             if "station: casters held" in line:

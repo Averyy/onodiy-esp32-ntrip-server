@@ -10,8 +10,10 @@ before tagging ([releases](docs/releases.md)).
   starts with how long it was offline, and these rows are no longer folded
   together. An Onocoy filter shows only that slot's drops, returns and stops.
 - Connection history: record a caster's return after a recorded drop also
-  when it reconnects within 10 s. Saving a caster's settings is no longer
-  recorded as a drop, nor its reconnect unless an attempt fails.
+  when it reconnects within 10 s. Saving a caster's settings and a restart
+  you start (restart, update, rollback) are no longer recorded as a drop,
+  nor the reconnect unless an attempt fails. A pause for receiver work that
+  closes the session shows as a neutral "paused" row.
 - Logs: caster session ends include the session length; reconnects include
   the time offline and failed attempts.
 - Status: ping loss marks are as tall as the share of each 5-minute block's

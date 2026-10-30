@@ -370,6 +370,21 @@ def test_event_list_onocoy_filter_keeps_only_the_onocoy_slot():
     assert [r for r in none if "head" not in r] == []
 
 
+def test_event_list_pause_for_receiver_work_is_planned():
+    """A session the station closed during a pause for receiver work (end class 255) is planned, not an outage:
+    with its return one neutral row that says how long ("Onocoy paused 3min"), without one "Onocoy paused"; a pause
+    never folds with a failed drop next to it."""
+    paused, rc = 255, 5   # DIAG_CASTER_END_PAUSED, remote_close
+    recs = [jrec(10, "caster_down", paused << 8, 7200, 10), jrec(11, "caster_up", 0, 180, 11),
+            jrec(12, "caster_down", paused << 8, 600, 12), jrec(13, "caster_down", rc << 8, 600, 13)]
+    st = {"casters": [{"slot": 0, "name": "Onocoy", "protected": True, "enabled": True}]}
+    (items,) = run_ui([("journalItems", [recs, True, None, st])])
+    rows = [(r["ev"], r["det"], r.get("tone")) for r in items if "head" not in r]
+    assert rows == [("Onocoy disconnected", "after 10min online, closed by the server", "warn"),
+                    ("Onocoy paused", "for receiver work, after 10min online", ""),
+                    ("Onocoy paused 3min", "for receiver work, after 2h online", "")]
+
+
 def jrec(seq: int, kind: str, a: int = 0, b: int = 0, up: int = 1, t: int | None = None) -> dict:
     return {"seq": seq, "time_unix": t, "uptime_s": up, "kind": kind, "a": a, "b": b}
 

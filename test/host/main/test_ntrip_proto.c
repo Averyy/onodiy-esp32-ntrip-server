@@ -1402,8 +1402,9 @@ TEST_CASE("ntrip history: UP after failures or a gap, DOWN with class and length
     ntrip_hist_init(&h);
     TEST_ASSERT_FALSE(ntrip_hist_down(&h, 0, 0, 10, &a, &b));
 
-    /* the packing matches the journal's */
+    /* the packing matches the journal's, the paused end class too */
     TEST_ASSERT_EQUAL_INT32(diag_caster_a(7, NTRIP_CLS_KEEPALIVE, 40000), ntrip_hist_pack(7, NTRIP_CLS_KEEPALIVE, 40000));
+    TEST_ASSERT_EQUAL_INT32(3 | (255 << 8), ntrip_hist_pack(3, DIAG_CASTER_END_PAUSED, 0));
     TEST_ASSERT_EQUAL_INT32(7 | (NTRIP_CLS_KEEPALIVE << 8) | (32767 << 16),
                             ntrip_hist_pack(7, NTRIP_CLS_KEEPALIVE, 40000));
 }
@@ -1500,13 +1501,13 @@ TEST_CASE("ntrip history: new settings are not an outage, unless an attempt afte
     int32_t b = 0;
     (void)ntrip_hist_up(&h, 4, 100, &a, &b);
     /* saved settings: no DOWN; the reconnect at once, or after a gap (the slot was off), writes no UP */
-    ntrip_hist_new_settings(&h, 1000);
+    ntrip_hist_user_end(&h, 1000);
     TEST_ASSERT_EQUAL_UINT32(0, ntrip_hist_session_s(&h, 1001));
     TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 1002, &a, &b));
-    ntrip_hist_new_settings(&h, 2000);
+    ntrip_hist_user_end(&h, 2000);
     TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 9000, &a, &b));
     /* new settings that fail first (a wrong password): the UP says the outage from the save */
-    ntrip_hist_new_settings(&h, 10000);
+    ntrip_hist_user_end(&h, 10000);
     ntrip_hist_failed(&h, 10001);
     ntrip_hist_failed(&h, 10300);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 10900, &a, &b));
@@ -1518,7 +1519,7 @@ TEST_CASE("ntrip history: new settings are not an outage, unless an attempt afte
     TEST_ASSERT_EQUAL_INT32(1, b);
     /* outside a session it changes nothing */
     ntrip_hist_init(&h);
-    ntrip_hist_new_settings(&h, 50);
+    ntrip_hist_user_end(&h, 50);
     TEST_ASSERT_FALSE(ntrip_hist_up(&h, 4, 100, &a, &b));
 }
 
@@ -1532,28 +1533,28 @@ TEST_CASE("ntrip history: new settings, a failure: UP past the flap limit; on ag
     TEST_ASSERT_TRUE(ntrip_hist_down(&h, 4, NTRIP_CLS_REMOTE_CLOSE, 1000, &a, &b));
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 1001, &a, &b));
     /* a 29 s session ends for new settings that then fail once: its UP 199 s after the last one is written */
-    ntrip_hist_new_settings(&h, 1030);
+    ntrip_hist_user_end(&h, 1030);
     ntrip_hist_failed(&h, 1031);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 1200, &a, &b));
     TEST_ASSERT_EQUAL_INT32(4 | (1 << 16), a);
     TEST_ASSERT_EQUAL_INT32(170, b);
     /* turned off by a save, on again a day later, the first attempt fails: the outage counts from turning on */
-    ntrip_hist_new_settings(&h, 2000);
-    ntrip_hist_new_settings(&h, 90000);
+    ntrip_hist_user_end(&h, 2000);
+    ntrip_hist_user_end(&h, 90000);
     ntrip_hist_failed(&h, 90010);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 90030, &a, &b));
     TEST_ASSERT_EQUAL_INT32(30, b);
     /* new settings that fail, saved again to fix them: the outage still counts from the first save */
-    ntrip_hist_new_settings(&h, 95000);
+    ntrip_hist_user_end(&h, 95000);
     ntrip_hist_failed(&h, 95001);
-    ntrip_hist_new_settings(&h, 95100);
+    ntrip_hist_user_end(&h, 95100);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 95200, &a, &b));
     TEST_ASSERT_EQUAL_INT32(4 | (1 << 16), a);
     TEST_ASSERT_EQUAL_INT32(200, b);
     /* after an ordinary drop, a save outside the session leaves the outage at the drop */
     TEST_ASSERT_TRUE(ntrip_hist_down(&h, 4, NTRIP_CLS_TIMEOUT, 96000, &a, &b));
     ntrip_hist_failed(&h, 96001);
-    ntrip_hist_new_settings(&h, 96100);
+    ntrip_hist_user_end(&h, 96100);
     TEST_ASSERT_TRUE(ntrip_hist_up(&h, 4, 96110, &a, &b));
     TEST_ASSERT_EQUAL_INT32(110, b);
 }

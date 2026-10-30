@@ -2070,6 +2070,25 @@ TEST_CASE("connections: a caster_stop row names the slot and the stop reason", "
     cJSON_Delete(root);
 }
 
+TEST_CASE("connections: a drop paused for receiver work has the class paused", "[web_build]")
+{
+    fixture();
+    diag_journal_entry_t e[1] = {
+        { .seq = 9, .unix_s = 1760000000, .uptime_s = 900, .kind = DIAG_EV_CASTER_DOWN,
+          .a = diag_caster_a(0, DIAG_CASTER_END_PAUSED, 0), .b = 7200 },
+    };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_connections(&w, e, 1, s_snap.cfg, s_snap.slots, true);
+    TEST_ASSERT_TRUE(wj_ok(&w));
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *down = cJSON_GetArrayItem(at(root, "entries"), 0);
+    TEST_ASSERT_EQUAL_STRING("paused", at(down, "class")->valuestring);
+    TEST_ASSERT_EQUAL(7200, at(down, "duration_s")->valueint);
+    cJSON_Delete(root);
+}
+
 TEST_CASE("a Wi-Fi drop's RSSI outside -127..-1 dBm is null in the journal and the connections", "[web_build]")
 {
     fixture();

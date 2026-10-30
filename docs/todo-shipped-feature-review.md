@@ -132,8 +132,11 @@ Back to [development](development.md) · [Latency work](todo-network-latency.md)
     again, however soon. It was skipped when the first attempt reconnected
     within 10 s; the fast profile's first retry is 1 s. Host tests cover the
     immediate return, the 10-minute flapping limit and one return per drop.
-    Saved settings are not an outage: their close is not journalled, nor the
-    reconnect unless an attempt fails.
+    Saved settings and restarts the user asks for are not an outage: their
+    close is not journalled, nor the reconnect unless an attempt fails. A
+    pause for receiver work past the idle limit (or a stall still silent
+    from one after the resume) is journalled as planned and shown as a
+    neutral "paused" row; health-monitor restarts stay outages.
   - [x] Put the outage's length first in the event list ("Onocoy offline
     40s"), keep the session length, give each outage its own row instead of
     folding it into a run, and add an Onocoy filter. Console log lines now say

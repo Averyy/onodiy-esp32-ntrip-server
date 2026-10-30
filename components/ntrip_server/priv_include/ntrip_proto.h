@@ -876,13 +876,14 @@ uint32_t ntrip_cred_hash(const char *host, uint16_t port, bool v2, const char *m
  * first failed attempt when the slot had not streamed this boot). So a DOWN
  * written gets the UP that says how long the outage lasted once the slot
  * streams again in the same boot (a stopped or disabled slot, or a restart,
- * leaves it without one). A session ended for new settings the user saved
- * is not an outage: no DOWN, and the UP after it only after a failed attempt
- * (not for the reconnect itself, nor after a gap: the slot may have been
- * off; a save that turns it back on starts that outage).
+ * leaves it without one). A session the user ended (new settings they
+ * saved, a restart they asked for) is not an outage: no DOWN, and the UP
+ * after it only after a failed attempt (not for the reconnect itself, nor
+ * after a gap: the slot may have been off; a save that turns it back on
+ * starts that outage).
  * A DOWN for a session shorter than NTRIP_HIST_SHORT_S is written only when
  * the slot wrote no DOWN in the last NTRIP_HIST_LIMIT_S, and the UP after
- * such a session whose DOWN was not written (nor ended by new settings) only
+ * such a session whose DOWN was not written (nor ended by the user) only
  * when the slot wrote no UP in that long; a skipped DOWN is counted into the
  * next DOWN written.
  * Failed attempts are never recorded one by one. Times are seconds of a
@@ -895,7 +896,7 @@ typedef struct {
     uint32_t prev_end_s;         /**< the previous session's end (valid once streamed) */
     bool prev_short;             /**< the previous session was short */
     bool prev_listed;            /**< the previous session's DOWN was written */
-    bool prev_settings;          /**< the previous session ended for new settings (ntrip_hist_new_settings) */
+    bool prev_user;              /**< the user ended the previous session (ntrip_hist_user_end) */
     uint32_t fails;              /**< failed attempts since the previous session (or since boot) */
     bool first_fail_valid;
     uint32_t first_fail_s;       /**< first failed attempt of this boot */
@@ -919,19 +920,21 @@ bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, i
 
 /**
  * The session ended. `cls` = the failure class that ended it, 0 for an end
- * that was not a caster failure. @return true with *a, *b set when a DOWN
- * record is due (a = slot | cls << 8 | skipped << 16, b = length s).
+ * that was not a caster failure (DIAG_CASTER_END_PAUSED: paused for receiver
+ * work). @return true with *a, *b set when a DOWN record is due (a = slot |
+ * cls << 8 | skipped << 16, b = length s).
  */
 bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s, int32_t *a, int32_t *b);
 
 /**
- * New settings the user saved. In a session: it ended for them (or the slot
- * was turned off), and no DOWN is written; the UP after it is written only
- * after a failed attempt (whatever the flapping limit), its outage from this
- * end. Outside a session after such an end, with no failed attempt since
- * (the slot turned back on): the outage counts from now. Else nothing.
+ * The user ended the session: new settings they saved (or turned the slot
+ * off), or a restart they asked for. In a session: no DOWN is written; the
+ * UP after it is written only after a failed attempt (whatever the flapping
+ * limit), its outage from this end. Outside a session after such an end,
+ * with no failed attempt since (a save turned the slot back on): the outage
+ * counts from now. Else nothing.
  */
-void ntrip_hist_new_settings(ntrip_hist_t *h, uint32_t now_s);
+void ntrip_hist_user_end(ntrip_hist_t *h, uint32_t now_s);
 
 /** The session's length so far, s (0 outside a session): what its DOWN would say. */
 uint32_t ntrip_hist_session_s(const ntrip_hist_t *h, uint32_t now_s);

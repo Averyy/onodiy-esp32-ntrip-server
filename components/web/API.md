@@ -3048,8 +3048,8 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `safe_mode` | episode | — |
 | `wifi_disconnect` | `wifi_err_reason_t` | RSSI at the drop in dBm (-127 to -1); `null` when unknown (stored as 0; also the -128 of records from earlier builds) |
 | `data_loss` | counter id (`diag_loss_id_t`) | increase since the previous record for that id |
-| `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30). Not written for a session ended by new settings the user saved | session length s |
-| `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30). After new settings the user saved, written only when an attempt failed | outage s |
+| `caster_down` | slot (bits 0-7) \| end class (`ntrip_fail_class_t`, 0 = not a caster failure, 255 = paused for receiver work, or silent since such a pause until the stall limit; bits 8-15) \| short sessions not journalled since the previous `caster_down` (bits 16-30). Not written for a session the user ended: new settings they saved, a restart they asked for | session length s |
+| `caster_up` | slot (bits 0-7) \| failed attempts since the previous session (bits 16-30). After a session the user ended, written only when an attempt failed | outage s |
 | `caster_stop` | slot (bits 0-7) \| stop reason (`ntrip_stop_t`, bits 8-15): the Onocoy login guard stopped the slot until the user acts (once per stop) | 0 |
 | `wifi_up` | connect attempts during the outage | outage s |
 | `wifi_roam` | the station moved to another access point of its network and got its address there (no `wifi_disconnect` or `wifi_up` for it): channel before (bits 0-7) \| channel after (bits 8-15) \| who started it (bits 16-23: 1 the access point asked, 2 the station found a clearly stronger one, 3 asked for on the bench console) \| bit 24: its reconnect found no stronger one after all and it stayed \| bit 25: the address and the connections were kept (a channel of 0 = unknown) | RSSI before (bits 0-7) \| after (bits 8-15), each a signed byte in dBm, 0 = unknown \| seconds without an address, with bit 25 without a link (bits 16-30) |
@@ -3118,7 +3118,7 @@ newest first, read backwards through the journal.
 | `complete` | every journal record was looked at (the list holds every connection record the journal keeps) |
 | `time_unix` | `null` without a trusted clock then: `uptime_s` dates it after its boot |
 | `slot`, `slot_name` | caster records: the slot and its name now (`null` without one, and in safe mode); `null` for Wi-Fi |
-| `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a pause, a health restart, the receiver's RTCM stopping, the network going down; a session ended by new settings the user saved has no `caster_down`); `null` otherwise |
+| `class` | `caster_down`: why the session ended (`ntrip_fail_class_t`; `none` = not a caster failure: a health restart, a restart the station started, the receiver's RTCM stopping, the network going down; `paused` = paused for receiver work; a session the user ended, by new settings or a restart they asked for, has no `caster_down`); `null` otherwise |
 | `count` | `caster_down`: shorter sessions not journalled since the slot's previous `caster_down`; `caster_up`: failed attempts since the previous session; `wifi_up`: connect attempts during the outage; `null` for `caster_stop` and `wifi_disconnect` |
 | `duration_s` | `caster_down`: session length; `caster_up`, `wifi_up`: outage length; `null` for `caster_stop` and `wifi_disconnect` |
 | `reason`, `rssi` | `wifi_disconnect`: `wifi_err_reason_t` and the RSSI at the drop in dBm (-127 to -1; `rssi` `null` when unknown, as the journal's `b`); both `null` otherwise |

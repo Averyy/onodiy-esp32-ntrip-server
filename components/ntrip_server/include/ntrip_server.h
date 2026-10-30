@@ -74,9 +74,12 @@
  * Connection history (diag journal): DIAG_EV_CASTER_DOWN when a session that
  * reached STREAMING ends, DIAG_EV_CASTER_UP when the next one starts after a
  * DOWN that was written, failed attempts or a gap (see diag.h for the fields
- * and the flapping limit). New settings the user saved are not an outage:
- * their close is not journalled, nor the reconnect unless an attempt fails
- * (a slot turned back on counts that outage from then). A record the
+ * and the flapping limit). New settings the user saved and a restart they
+ * asked for are not an outage: their close is not journalled, nor the
+ * reconnect unless an attempt fails (a slot turned back on counts that
+ * outage from then). A pause for receiver work that outlasts the idle limit,
+ * or a session still silent from one when it reaches its stall limit after
+ * the resume, is journalled as planned (end class DIAG_CASTER_END_PAUSED). A record the
  * journal's rate limit refuses waits in the slot (a few at most) and is
  * written a moment later. The log says how long each session lasted and,
  * when streaming starts again, how long the outage was and how many

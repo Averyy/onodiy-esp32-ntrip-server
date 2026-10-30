@@ -2857,7 +2857,8 @@ static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caste
             wj_null(w, "slot_name");
         }
         if (e->kind == DIAG_EV_CASTER_DOWN) {
-            wj_str(w, "class", web_ntrip_fail_name((ntrip_fail_class_t)((a >> 8) & 0xFFu)));
+            uint32_t cls = (a >> 8) & 0xFFu;
+            wj_str(w, "class", cls == DIAG_CASTER_END_PAUSED ? "paused" : web_ntrip_fail_name((ntrip_fail_class_t)cls));
         } else {
             wj_null(w, "class");
         }

@@ -2208,13 +2208,13 @@ bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, i
     bool write = false;
     /* A drop that was written always gets its return: at most one per DOWN, so the DOWN limit bounds them. */
     bool listed = h->streamed && h->prev_listed;
-    bool after_gap = h->streamed && !h->prev_settings && (uint32_t)(now_s - h->prev_end_s) >= NTRIP_HIST_UP_GAP_S;
+    bool after_gap = h->streamed && !h->prev_user && (uint32_t)(now_s - h->prev_end_s) >= NTRIP_HIST_UP_GAP_S;
     if (listed || h->fails > 0 || after_gap) {
         uint32_t outage = 0;
         uint32_t fails = 0;
         (void)ntrip_hist_outage(h, now_s, &outage, &fails);
-        /* After new settings an UP needs a failed attempt, so the user's saves bound them, not the flapping limit. */
-        bool limited = !listed && !h->prev_settings && h->streamed && h->prev_short && h->up_written &&
+        /* After the user's end an UP needs a failed attempt, so the user's own actions bound them, not the limit. */
+        bool limited = !listed && !h->prev_user && h->streamed && h->prev_short && h->up_written &&
                        (uint32_t)(now_s - h->up_at_s) < NTRIP_HIST_LIMIT_S;
         if (!limited) {
             write = true;
@@ -2225,7 +2225,7 @@ bool ntrip_hist_up(ntrip_hist_t *h, uint32_t slot, uint32_t now_s, int32_t *a, i
         }
     }
     h->prev_listed = false;   /* one return per drop written */
-    h->prev_settings = false;
+    h->prev_user = false;
     h->in_session = true;
     h->session_start_s = now_s;
     h->fails = 0;
@@ -2254,14 +2254,14 @@ bool ntrip_hist_down(ntrip_hist_t *h, uint32_t slot, uint8_t cls, uint32_t now_s
     h->prev_end_s = now_s;
     h->prev_short = is_short;
     h->prev_listed = write;
-    h->prev_settings = false;
+    h->prev_user = false;
     return write;
 }
 
-void ntrip_hist_new_settings(ntrip_hist_t *h, uint32_t now_s)
+void ntrip_hist_user_end(ntrip_hist_t *h, uint32_t now_s)
 {
     if (!h->in_session) {
-        if (h->prev_settings && h->fails == 0) {
+        if (h->prev_user && h->fails == 0) {
             h->prev_end_s = now_s;   /* saved again (the slot turned back on): the time off is no outage */
         }
         return;
@@ -2271,7 +2271,7 @@ void ntrip_hist_new_settings(ntrip_hist_t *h, uint32_t now_s)
     h->prev_end_s = now_s;
     h->prev_short = (uint32_t)(now_s - h->session_start_s) < NTRIP_HIST_SHORT_S;
     h->prev_listed = false;
-    h->prev_settings = true;
+    h->prev_user = true;
 }
 
 /* ---- Onocoy daily budget ----------------------------------------------------------- */

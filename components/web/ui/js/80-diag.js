@@ -831,9 +831,13 @@ function connRow(e, back) {
   const tries = c => (c ? ', ' + plural(c, 'failed attempt', 'failed attempts') : '');
   switch (e.kind) {
     case 'caster_down': {
+      const more = (back ? tries(back.count) : '') + (e.count ? ', ' + plural(e.count, 'shorter session', 'shorter sessions') + ' not listed' : '');
+      /* Paused for receiver work the user started: planned, so neutral ("Onocoy paused 3min"). */
+      if (e.class === 'paused') {
+        return [name + ' paused' + (back ? ' ' + fmt.dur(back.duration_s) : ''), 'for receiver work, after ' + fmt.dur(e.duration_s) + ' online' + more, ''];
+      }
       const why = e.class && e.class !== 'none' ? ', ' + lbl(L.fail, e.class).toLowerCase() : '';
-      return [back ? offlineEv(name, back.duration_s) : name + ' disconnected', 'after ' + fmt.dur(e.duration_s) + ' online' + why +
-        (back ? tries(back.count) : '') + (e.count ? ', ' + plural(e.count, 'shorter session', 'shorter sessions') + ' not listed' : ''), 'warn'];
+      return [back ? offlineEv(name, back.duration_s) : name + ' disconnected', 'after ' + fmt.dur(e.duration_s) + ' online' + why + more, 'warn'];
     }
     case 'caster_up':
       return [name + ' back', 'after ' + fmt.dur(e.duration_s) + tries(e.count), 'ok'];
@@ -882,7 +886,8 @@ function connOf(e) {
   const a = e.a >>> 0, x = (a >>> 8) & 0xff, wifi = e.kind.indexOf('wifi') === 0;
   return { kind: e.kind, slot: wifi ? null : a & 0xff, duration_s: e.b, reason: a, rssi: e.b,
     count: wifi ? (e.kind === 'wifi_up' ? a : null) : (a >>> 16) & 0x7fff,
-    class: e.kind === 'caster_down' ? J.fail[x] || String(x) : null, stop_reason: e.kind === 'caster_stop' ? J.stop[x] || String(x) : null };
+    class: e.kind === 'caster_down' ? (x === J.paused ? 'paused' : J.fail[x] || String(x)) : null,
+    stop_reason: e.kind === 'caster_stop' ? J.stop[x] || String(x) : null };
 }
 
 /* ---- Console: the log ------------------------------------------------------ */
@@ -1319,7 +1324,9 @@ function journalItems(entries, atStart, kinds, slot) {
         const back = backOf.get(e);
         const c = connRow(connOf(e), back && connOf(back));
         /* A drop with its return is an outage of its own: a key no other row has. */
-        rows.push(Object.assign(when, { k: back ? 'outage ' + e.seq : [e.kind, connKey(e)].join('|'), seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
+        /* A drop without one folds only with drops of its own kind (a pause never with a failure). */
+        rows.push(Object.assign(when, { k: back ? 'outage ' + e.seq : [e.kind, connKey(e), c[2]].join('|'), seq: e.seq, ev: c[0], det: c[1],
+          tone: c[2] }));
       } else if (e.kind === 'rover_connect' || e.kind === 'rover_disconnect') {
         const c = roverEvent(e, roverOf.get(e));
         rows.push(Object.assign(when, { k: e.kind + '|' + c[1], seq: e.seq, ev: c[0], det: c[1], tone: c[2] }));
