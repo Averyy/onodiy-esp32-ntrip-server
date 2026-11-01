@@ -4,6 +4,11 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Hardware: replace the original GNSS splitter files with rev B, update circuit,
+  ordering and computed RF details, and replace its render.
+
 ## v0.1.12
 
 - Logs → History: each caster and Wi-Fi drop shows how long it was offline,

@@ -20,7 +20,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 <td align="center" width="20%"><img src="docs/images/board.png" width="100%" alt="The UM982 + ESP32-S3 board: a black board with two gold SMA antenna sockets on the top edge, the silver Unicore UM982 module, and the ESP32-S3 module near the bottom"></td>
 <td align="center" width="38%"><img src="docs/images/board-um980.png" width="100%" alt="The UM980 + ESP32-S3 board: a green board with an SMA antenna socket on the top edge, the ESP32-S3-WROOM-1 module on the left, the silver Unicore UM980 module on the right and two USB-C ports on the bottom edge"></td>
 <td align="center" width="24%"><img src="docs/images/ntrip-x.png" width="100%" alt="The NTRIP-X: a black metal case with blue corner bumpers, the NTRIP-X logo and three LEDs on the front, a Wi-Fi antenna on the left and a gold SMA GNSS antenna socket on the right"></td>
-<td align="center" width="18%"><img src="docs/images/splitter.png" width="100%" alt="The GNSS splitter: a small blue board with one SMA socket marked ANT on the top edge and two on the bottom edge marked DC-BLOCK and DC-PASS, a splitter chip in the middle"></td>
+<td align="center" width="18%"><img src="docs/images/splitter.png" width="100%" alt="GNSS splitter rev B 3D render: ANT at left, DC-PASS upper right and DC-BLOCK lower right"></td>
 </tr>
 <tr>
 <td align="center"><b>UM982</b></td>
@@ -37,7 +37,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 | **NTRIP-X** (UM980, by GNS Electronics) | WROOM-1U-N8R8 (external Wi-Fi antenna), in a case with LEDs and a button | about US$299 | [GNS Electronics](https://www.gns-electronics.de/product/ntrip-x/) |
 | **Antenna:** Beitian BT-800S | N/A (all the bands the station uses; TNC socket, so a TNC-to-SMA cable) | about US$53 | [AliExpress](https://www.aliexpress.com/item/1005009033251316.html) (variant "BT-800S") |
 | **Antenna cable:** RG58, TNC male to SMA male | N/A (antenna to board; pick the length) | from about US$5, by length | [AliExpress](https://www.aliexpress.com/item/1005005550779000.html) |
-| **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11 assembled (JLCPCB) | [View more](gnss-splitter/README.md) |
+| **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11.60 delivered per board (five-board JLCPCB order, Nov 2026) | [View more](gnss-splitter/README.md) |
 | **Splitter jumpers:** SMA male to SMA male (RG402) | N/A (splitter to each receiver) | from about US$4, by length | [AliExpress](https://www.aliexpress.com/item/1005002380816726.html) |
 
 - **Antenna:** a multi-band GNSS antenna on the SMA socket (`M` on the UM982 board,
@@ -162,7 +162,7 @@ More: [development](docs/development.md).
 | `tools/bench/`, `tools/qemu/`, `tools/ci/` | Board tools, the emulator, CI run locally |
 | `firmware/um982/`, `firmware/um980/` | Unicore receiver firmware |
 | `firmware/ntrip-x/` | The NTRIP-X's stock firmware, for restoring one |
-| `gnss-splitter/` | The antenna splitter (EasyEDA) |
+| `gnss-splitter/` | Rev B antenna splitter (EasyEDA Pro) |
 | `docs/`, `reference/` | Hardware, development, releases; board and antenna notes |
 
 ## License
