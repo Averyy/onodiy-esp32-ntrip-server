@@ -6,6 +6,8 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Docs: rotate the main README splitter render vertically to match the hardware row.
+
 - Docs: give both rev B splitter renders revision-specific image paths.
 
 - Hardware: replace the original GNSS splitter files with rev B, update circuit,
