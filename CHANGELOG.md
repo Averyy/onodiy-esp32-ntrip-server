@@ -6,6 +6,8 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Docs: give both rev B splitter renders revision-specific image paths.
+
 - Hardware: replace the original GNSS splitter files with rev B, update circuit,
   ordering and computed RF details, and replace its render.
 

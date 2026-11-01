@@ -1,6 +1,6 @@
 # GNSS Antenna Splitter — rev B
 
-![GNSS splitter rev B 3D render: ANT at left, DC-PASS upper right, DC-BLOCK lower right](gnss-splitter-3d.png)
+![GNSS splitter rev B 3D render: ANT at left, DC-PASS upper right, DC-BLOCK lower right](gnss-splitter-revb-3d.png)
 
 Passive 1-to-2 GNSS antenna splitter PCB for sharing one active antenna between two receivers. The DC-PASS receiver powers the antenna; the DC-BLOCK receiver gets RF without backfeeding the antenna supply. Designed in EasyEDA Pro, released and ordered 2026-11-01. Rev B replaces the original board; only rev B files are included here.
 
@@ -120,7 +120,7 @@ To feed more than two receivers, connect the second splitter's ANT input to the 
 | [PCB_GNSS-Splitter_revB.pdf](PCB_GNSS-Splitter_revB.pdf) | PCB drawing |
 | [GNSS-Splitter_revB.step](GNSS-Splitter_revB.step) | 3D model |
 | [GNSS-Splitter_revB.ipc](GNSS-Splitter_revB.ipc) | IPC-D-356A netlist; DC-BLOCK / DC-PASS renamed UT1 / UT2 |
-| [gnss-splitter-3d.png](gnss-splitter-3d.png) | Supplied rev B render, cropped and straightened |
+| [gnss-splitter-revb-3d.png](gnss-splitter-revb-3d.png) | Supplied rev B render, cropped and straightened |
 | [gnss-splitter-top.png](gnss-splitter-top.png) | Top routing preview |
 | [gnss-splitter-bottom.png](gnss-splitter-bottom.png) | Bottom routing preview |
 | [computed-rf-revB.txt](computed-rf-revB.txt) | Computed segment loss and return loss by band |
