@@ -4,6 +4,13 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Dialogs: in Safari, confirming one (Install app, Update receiver) no longer
+  scrolls the page down as it closes.
+- Docs: the README lists a DIY build, an ESP32-S3 N16R8 dev board wired to a
+  UM980 or UM982 board's COM1, with its wiring.
+
 ## v0.1.13
 
 - Updates: with more than one receiver build newer than the receiver's, the

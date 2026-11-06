@@ -692,7 +692,9 @@ function dialog(opts) {
       window.removeEventListener('hashchange', onHash);
       clear(root);
       setInert(false);
-      if (prevFocus && prevFocus.focus) prevFocus.focus();
+      /* Back where it was, the page left as it is: Safari gives a pressed button's focus to <main>
+       * (tabindex -1), and focusing that scrolls its top to the window's. */
+      if (prevFocus && prevFocus.focus) prevFocus.focus({ preventScroll: true });
       resolve(result);
     };
     const onHash = () => close(false);   /* the page changed underneath (back button) */

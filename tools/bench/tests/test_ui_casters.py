@@ -630,6 +630,11 @@ async function settingsPageView(c) {
   }
   if (c.press) {
     ids.modal = new El('div');
+    /* The focus when the dialog opens: Safari gives a pressed button's to <main> (tabindex -1). Its focus() calls,
+     * with their options, once the dialog closes. */
+    const main = new El('main'), refocus = [];
+    main.focus = opts => refocus.push(opts === undefined ? null : opts);
+    ctx.document.activeElement = main;
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.press).fire('click');
     await settle();
     const dlg = () => [...visible(ids.modal)];
@@ -647,6 +652,8 @@ async function settingsPageView(c) {
     await settle();
     r.posts = sent.slice(n).filter(x => x.method === 'POST').map(x => [x.path, x.body]);
     r.pressed = Object.assign(pageParts(el), { selects: lists() });
+    r.refocus = refocus;
+    delete ctx.document.activeElement;
   }
   if (c.wire) {
     ids.modal = new El('div');
@@ -3794,6 +3801,20 @@ def test_receiver_update_hides_the_list_its_button_and_why_not_while_it_runs():
     assert ["Receiver R4.10Build7923", "2 newer builds are available."] in ended["settings"]
     assert [name for name, _ in ended["selects"]] == [label] and "Update receiver" in ended["buttons"]
     assert "Not possible right now: the receiver is not streaming." in [t for _, t in ended["msgs"]]
+
+
+def test_a_dialog_gives_the_focus_back_without_scrolling():
+    """Confirming a dialog (Update receiver, Install app) puts the focus back where it was without scrolling: Safari
+    gives a pressed button's focus to <main> (tabindex -1), and a plain focus() brought main's top to the window's,
+    the page jumping down as the dialog closed."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build23980", "running_build": 23980,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "expected_downtime_s": 252, "latest_cross_layout": False, "cross_layout_allowed": True,
+            "offers": [{"version": "R4.10Build25735", "build": 25735, "expected_downtime_s": 252, "cross_layout": False}]}
+    (r,) = run_editor([{"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI,
+                        "update": {**SET_UPDATE, "gnss": gnss}, "press": "Update receiver"}])
+    assert r["posts"] == [["/api/update/gnss", {"build": 25735, "cross_layout_ack": False}]]
+    assert r["refocus"] == [{"preventScroll": True}]
 
 
 def test_a_select_as_wide_as_its_options_shows_them_whole():

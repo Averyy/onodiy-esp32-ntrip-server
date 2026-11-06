@@ -35,6 +35,7 @@ MIT-licensed. An independent project, not affiliated with Onocoy.
 | **UM982** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna), or WROOM-1U (external antenna: the "Um982 Wifi Ipex" option) | about US$140 | [AliExpress](https://www.aliexpress.com/item/1005013018359434.html), [Alt](https://www.aliexpress.com/item/1005013190792289.html) |
 | **UM980** + ESP32-S3 | WROOM-1 N16R8 (built-in antenna); ask the seller for WROOM-1U-N16R8 (external antenna), same price | US$150 | [Alibaba](https://www.alibaba.com/product-detail/Custom-UM980-GNSS-ESP32-S3-WiFi_1601897914814.html) |
 | **NTRIP-X** (UM980, by GNS Electronics) | WROOM-1U-N8R8 (external Wi-Fi antenna), in a case with LEDs and a button | about US$299 | [GNS Electronics](https://www.gns-electronics.de/product/ntrip-x/) |
+| **DIY:** ESP32-S3 dev board + UM980 or UM982 board | N16R8 (16 MB flash, 8 MB octal PSRAM), e.g. an ESP32-S3-DevKitC-1-N16R8; wired to the receiver's COM1 ([wiring](#diy-wiring)) | your choice | your choice |
 | **Antenna:** Beitian BT-800S | N/A (all the bands the station uses; TNC socket, so a TNC-to-SMA cable) | about US$53 | [AliExpress](https://www.aliexpress.com/item/1005009033251316.html) (variant "BT-800S") |
 | **Antenna cable:** RG58, TNC male to SMA male | N/A (antenna to board; pick the length) | from about US$5, by length | [AliExpress](https://www.aliexpress.com/item/1005005550779000.html) |
 | **GNSS splitter** (optional) | N/A (shares one antenna between two receivers) | about US$11.60 delivered per board (five-board JLCPCB order, Nov 2026) | [View more](gnss-splitter/README.md) |
@@ -61,10 +62,26 @@ One firmware for every board; only the install differs.
 | UM982 board (AliExpress) | 16 MB | `onodiy-install-16mb.bin` | Confirmed working |
 | UM980 board (Alibaba) | 16 MB | `onodiy-install-16mb.bin` | Should work, unverified |
 | NTRIP-X | 8 MB | `onodiy-install-um980-ntrx.bin` | Confirmed working; LEDs/buttons follow GNS's defaults |
+| DIY: ESP32-S3 dev board + UM980 or UM982 board | 16 MB | `onodiy-install-16mb.bin` | Should work, unverified |
 
-Another ESP32-S3 board with a Unicore receiver and 16 MB flash: the 16 MB image, then set its
-pins under Settings → Receiver wiring. The NTRIP-X image is for the NTRIP-X only (it drives the
-NTRIP-X's LED pins); boards with 8 MB flash are not supported otherwise.
+The NTRIP-X image is for the NTRIP-X only (it drives the NTRIP-X's LED pins); boards with 8 MB
+flash are not supported otherwise.
+
+### DIY wiring
+
+An ESP32-S3 dev board with an N16R8 (16 MB flash, 8 MB octal PSRAM: the 16 MB image needs both)
+and a UM980 or UM982 board with its COM1 on pins:
+
+| ESP32-S3 | Receiver |
+|---|---|
+| GPIO1 (RX) | COM1 TXD |
+| GPIO2 (TX) | COM1 RXD |
+| GND | GND |
+
+These are the 16 MB image's pins, so there is nothing to set. To use other free GPIOs, choose them
+under Settings → Receiver wiring; they take effect at the next restart. Keep COM1: receiver firmware
+updates run only over COM1. The ESP32-S3's pins take 3.3 V logic, not 5 V or RS-232 levels. The
+station finds the receiver's baud rate and sets the receiver up itself.
 
 ## Install
 
