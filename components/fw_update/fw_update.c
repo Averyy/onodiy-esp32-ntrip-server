@@ -698,12 +698,12 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
     fw_lock();
     const fw_manifest_gnss_t *entry =
         g_fw.have_manifest && !pkg_store_absent()   /* no package partition on this board: nothing to offer */
-            ? fw_policy_gnss_offer(&g_fw.manifest, st->receiver.model, st->receiver.build)
+            ? fw_policy_gnss_offered(&g_fw.manifest, st->receiver.model, st->receiver.build, offered_build)
             : NULL;
     if (block != FW_GNSS_BLOCK_NONE) {
         ESP_LOGW(TAG, "receiver update refused (reason %d)", (int)block);
-    } else if (entry == NULL || entry->build != offered_build) {
-        ESP_LOGW(TAG, "receiver update refused: build %u is not the one offered", (unsigned)offered_build);
+    } else if (entry == NULL) {
+        ESP_LOGW(TAG, "receiver update refused: build %u is not offered", (unsigned)offered_build);
     } else if (pinned) {
         ESP_LOGW(TAG, "receiver update refused: a staged package is pinned by an open session");
     } else {
@@ -830,6 +830,37 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
     fw_unlock();
     free(st);
     return ESP_OK;
+}
+
+_Static_assert(FW_UPDATE_GNSS_OFFERS_MAX == FW_MANIFEST_MAX_GNSS, "the manifest's package count moved: update fw_update.h");
+_Static_assert(sizeof(((fw_update_gnss_offer_t *)0)->version) == sizeof(((fw_manifest_gnss_t *)0)->version),
+               "the offer's version must hold the manifest's");
+
+size_t fw_update_gnss_offers(fw_update_gnss_offer_t *out, size_t cap)
+{
+    if (out == NULL || cap == 0 || g_fw.mtx == NULL) {
+        return 0;
+    }
+    station_status_t *st = malloc(sizeof(*st));
+    if (st == NULL) {
+        return 0;
+    }
+    bool rx = station_get_status(st) == ESP_OK && st->receiver.valid;
+    size_t n = 0;
+    fw_lock();
+    if (rx && g_fw.have_manifest && !pkg_store_absent()) {
+        const fw_manifest_gnss_t *offers[FW_MANIFEST_MAX_GNSS];
+        n = fw_policy_gnss_offers(&g_fw.manifest, st->receiver.model, st->receiver.build, offers,
+                                  cap < FW_MANIFEST_MAX_GNSS ? cap : FW_MANIFEST_MAX_GNSS);
+        for (size_t i = 0; i < n; i++) {
+            strlcpy(out[i].version, offers[i]->version, sizeof(out[i].version));
+            out[i].build = offers[i]->build;
+            out[i].expected_downtime_s = station_expected_flash_downtime_s(offers[i]->file.size);
+        }
+    }
+    fw_unlock();
+    free(st);
+    return n;
 }
 
 esp_err_t fw_update_version_compare(const char *a, const char *b, int *out)

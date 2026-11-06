@@ -1619,7 +1619,11 @@ void web_build_flash(wj_t *w, const station_status_t *st, const web_flash_ctx_t 
         wj_uint(w, "failed_rule", l->failed_rule);
         wj_bool(w, "cross_layout", l->cross_layout);
         wj_bool(w, "check_only", l->check_only);
-        wj_bool(w, "reapply_ok", l->reapply_ok);
+        if (l->reapply_unchecked) {
+            wj_null(w, "reapply_ok");   /* re-applied, nothing to check it against yet (no RTCM) */
+        } else {
+            wj_bool(w, "reapply_ok", l->reapply_ok);
+        }
         wj_str(w, "firmware", l->firmware);
         wj_uint(w, "build", l->build);
         wj_str(w, "reason", l->reason);
@@ -2387,6 +2391,16 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
         wj_null(w, "latest_cross_layout");
     }
     wj_bool(w, "cross_layout_allowed", u->cross_layout_allowed);
+    wj_arr_open(w, "offers");
+    for (size_t i = 0; u->offers != NULL && i < u->offer_count; i++) {
+        wj_obj_open(w, NULL);
+        wj_str(w, "version", u->offers[i].version);
+        wj_uint(w, "build", u->offers[i].build);
+        wj_uint(w, "expected_downtime_s", u->offers[i].expected_downtime_s);
+        wj_bool(w, "cross_layout", u->offer_cross_layout != NULL && u->offer_cross_layout[i]);
+        wj_obj_close(w);
+    }
+    wj_arr_close(w);
     wj_obj_close(w);
     wj_obj_close(w);
 }

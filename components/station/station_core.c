@@ -189,18 +189,19 @@ static bool flash_state(const stn_t *s)
     return s->state == STN_FLASHING || s->state == STN_FLASH_RECOVERY || s->flash_close != 0;
 }
 
-/* Close the journal now (the caller does it on the note). */
-static void flash_close_note(stn_t *s, bool ok)
+/* Close the journal now (the caller does it on the note). Not checked
+ * leaves the attention alert as it was: nothing says the profile is wrong. */
+static void flash_close_note(stn_t *s, stn_flash_close_t how)
 {
     s->flash_close = 0;
     s->flash_close_ms = STN_NEVER;
     s->flash_rtcm_ms = STN_NEVER;
-    if (ok) {
+    if (how == STN_FLASH_CLOSE_OK) {
         s->alerts &= ~STN_ALERT_RECEIVER_ATTENTION;
-    } else {
+    } else if (how == STN_FLASH_CLOSE_FAILED) {
         s->alerts |= STN_ALERT_RECEIVER_ATTENTION;   /* the station profile did not come back: the user looks */
     }
-    note(s, STN_NOTE_FLASH_CLOSE, ok ? 1 : 0, 0);
+    note(s, STN_NOTE_FLASH_CLOSE, (int32_t)how, 0);
 }
 
 static bool config_failed(const stn_t *s)
@@ -673,7 +674,23 @@ static void judge_window(stn_t *s, const stn_in_t *in)
     s->verify_pending = false;
     s->drift_msg = bad;
     if (verify && s->flash_close == 1) {
-        flash_close_note(s, v == STN_OBS_PASS);   /* the post-update re-apply was checked */
+        if (v != STN_OBS_NO_RTCM) {
+            /* The post-update re-apply was checked. */
+            flash_close_note(s, v == STN_OBS_PASS ? STN_FLASH_CLOSE_OK : STN_FLASH_CLOSE_FAILED);
+        } else if (now < s->flash_rtcm_ms) {
+            /* A receiver just updated may take a while to track and send:
+             * the next window checks it, until STN_FLASH_RTCM_MS. */
+            s->verify_pending = true;
+            s->check_pending = check;
+            return;
+        } else {
+            /* No RTCM to check the profile against (no antenna): not a
+             * verdict. The applied check waits for a window with RTCM, as
+             * after a restart; the stall is the health ladder's. */
+            flash_close_note(s, STN_FLASH_CLOSE_UNCHECKED);
+            verify = false;
+            check = true;
+        }
     }
 
     /* Drift needs RTCM that flows and differs; a window without any is a
@@ -870,8 +887,11 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
         s->check_ms = STN_NEVER;
         s->obs_on = true;
         s->obs_rearm = true;
-        s->check_pending = true;
-        s->verify_pending = false;
+        /* After an update the receiver may restart once more after the
+         * re-apply (seen on a UM980): this window is still that re-apply's
+         * check, the one that closes the journal. */
+        s->verify_pending = s->flash_close == 1;
+        s->check_pending = !s->verify_pending;
     }
 
     judge_window(s, in);
@@ -1029,14 +1049,14 @@ static void flash_close_tick(stn_t *s, const stn_in_t *in)
     }
     int64_t now = in->now_ms;
     if (now >= s->flash_close_ms) {
-        flash_close_note(s, false);
+        flash_close_note(s, STN_FLASH_CLOSE_FAILED);
         return;
     }
     if (s->flash_close == 2 && s->state == STN_STREAMING && s->flash_rtcm_ms != STN_NEVER) {
         if (rtcm_since_base(s, in)) {
-            flash_close_note(s, true);
+            flash_close_note(s, STN_FLASH_CLOSE_OK);
         } else if (now >= s->flash_rtcm_ms) {
-            flash_close_note(s, false);
+            flash_close_note(s, STN_FLASH_CLOSE_FAILED);
         }
     }
 }
@@ -1328,14 +1348,16 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         s->last_resort = false;
         fix_rearm(s, now);   /* the profile may be new, the receiver restarted */
         enter_streaming(s, in, ENTER_VERIFY);
-        if (s->job.why == STN_WHY_FLASH && s->flash_close == 2) {
-            s->flash_rtcm_ms = now + STN_FLASH_RTCM_MS;   /* the abort path: RTCM must come back */
+        if (s->job.why == STN_WHY_FLASH && s->flash_close != 0) {
+            /* The abort path: RTCM must come back. An update: its check waits
+             * for RTCM this long, then closes as not checked. */
+            s->flash_rtcm_ms = now + STN_FLASH_RTCM_MS;
         }
         return;
     }
 
     if (s->job.why == STN_WHY_FLASH && s->flash_close != 0) {
-        flash_close_note(s, false);   /* the re-apply after the update failed: closed, the user looks */
+        flash_close_note(s, STN_FLASH_CLOSE_FAILED);   /* the re-apply after the update failed: closed, the user looks */
     }
     if (r->sg_back && !r->nothing_sent) {
         /* A refused signal group: the session rolled back, the profile holds
@@ -1573,7 +1595,7 @@ static void done_flash(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         if (r->supported) {
             want_apply(s, STN_WHY_FLASH, STN_CHANGE_NONE, true);
         } else {
-            flash_close_note(s, false);   /* not a model we configure: nothing to re-apply */
+            flash_close_note(s, STN_FLASH_CLOSE_FAILED);   /* not a model we configure: nothing to re-apply */
         }
         if (in->profile_survey) {
             survey_restarted(s, in);   /* the receiver restarted */

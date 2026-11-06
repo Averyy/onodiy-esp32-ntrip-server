@@ -675,6 +675,23 @@ TEST_CASE("flash view and progress: counters, the last session, and why flashing
     cJSON_Delete(root);
     c.flash_reason = NULL;
 
+    /* After an update: reapply_ok true once checked, null re-applied without RTCM to check it against. */
+    st.flash_last.outcome = STATION_FLASH_OUT_SUCCESS;
+    st.flash_last.reapply_ok = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(at(root, "last"), "reapply_ok")));
+    cJSON_Delete(root);
+    st.flash_last.reapply_ok = false;
+    st.flash_last.reapply_unchecked = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_flash(&w, &st, &c, "");
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_TRUE(cJSON_IsNull(at(at(root, "last"), "reapply_ok")));
+    cJSON_Delete(root);
+    st.flash_last.reapply_unchecked = false;
+
     st.flash_last.outcome = STATION_FLASH_OUT_NONE;
     st.flash.journal_state = 0;
     c.flash_available = true;
@@ -826,6 +843,45 @@ TEST_CASE("GET /api/update says whether the offered receiver build changes the p
     TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "cross_layout")));
     TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "cross_layout_allowed")));
+    cJSON_Delete(root);
+}
+
+TEST_CASE("GET /api/update lists every offered receiver build, newest first", "[web_build]")
+{
+    fixture();
+    web_update_snap_t u = { .fw = &s_snap.fw, .st = &s_snap.st };
+    wj_t w;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    cJSON *root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    /* Nothing offered: an empty list, never null. */
+    TEST_ASSERT_TRUE(cJSON_IsArray(at(at(root, "gnss"), "offers")));
+    TEST_ASSERT_EQUAL(0, cJSON_GetArraySize(at(at(root, "gnss"), "offers")));
+    cJSON_Delete(root);
+
+    const fw_update_gnss_offer_t offers[] = {
+        { .version = "R4.10Build25735", .build = 25735, .expected_downtime_s = 252 },
+        { .version = "R4.10Build23980", .build = 23980, .expected_downtime_s = 251 },
+    };
+    const bool xl[] = { true, false };
+    u.offers = offers;
+    u.offer_count = 2;
+    u.offer_cross_layout = xl;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    const cJSON *list = at(at(root, "gnss"), "offers");
+    TEST_ASSERT_EQUAL(2, cJSON_GetArraySize(list));
+    const cJSON *first = cJSON_GetArrayItem(list, 0), *second = cJSON_GetArrayItem(list, 1);
+    TEST_ASSERT_EQUAL_STRING("R4.10Build25735", cJSON_GetStringValue(at(first, "version")));
+    TEST_ASSERT_EQUAL(25735, (int)cJSON_GetNumberValue(at(first, "build")));
+    TEST_ASSERT_EQUAL(252, (int)cJSON_GetNumberValue(at(first, "expected_downtime_s")));
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(first, "cross_layout")));
+    TEST_ASSERT_EQUAL_STRING("R4.10Build23980", cJSON_GetStringValue(at(second, "version")));
+    TEST_ASSERT_EQUAL(23980, (int)cJSON_GetNumberValue(at(second, "build")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(second, "cross_layout")));
     cJSON_Delete(root);
 }
 

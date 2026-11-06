@@ -604,7 +604,9 @@ body.no-contact .status-page .bands td.on { color: var(--off); }
  * box from these rules, but WebKit replaces a select's min-height, left
  * padding (8 px) and radius (5 px): hence the fixed height, and padding-left
  * plus text-indent, which start the text where an input's starts in Blink
- * (4 px inner padding of its own), Gecko and WebKit alike.
+ * (4 px inner padding of its own), Gecko and WebKit alike. A select as wide
+ * as its options (width: auto) drops the text-indent: WebKit leaves it out
+ * of that width, and the longest option would lose its last letters.
  */
 input[type="text"], input[type="password"], input[type="number"], input[type="search"], select, textarea {
   width: 100%;
@@ -719,6 +721,17 @@ input:disabled, select:disabled { opacity: 0.65; }
   .setting-row > .btn { width: auto; flex: none; }
   .setting-row > .form-actions { flex: none; }
 }
+/*
+ * A row whose actions start with a list (Updates: the receiver build to install): on a phone the list above its
+ * button; from 560 px the two on one line, beside the text while the text keeps 14rem, else under it at the right.
+ */
+.form-actions.pick > select { order: -3; }
+@media (min-width: 560px) {
+  .setting-row:has(> .form-actions.pick) { flex-wrap: wrap; }
+  .setting-row:has(> .form-actions.pick) > :first-child { flex: 1 1 14rem; }
+  .setting-row > .form-actions.pick { flex: 0 1 auto; flex-wrap: nowrap; margin-left: auto; }
+  .form-actions.pick > select { order: 0; flex: none; width: auto; text-indent: 0; }
+}
 /* A card's list of parts (Updates: app, receiver, Install manually; the Danger zone): a line between them. */
 .rows > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid var(--border); }
 .rows > * > * + * { margin-top: 0.6rem; }
@@ -728,7 +741,7 @@ input:disabled, select:disabled { opacity: 0.65; }
 .card-head > .tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
 /* A short title and its tools on one line, also on a phone (Updates: the last check, Check now). */
 .card-head.fit > :first-child { flex-basis: auto; }
-.tools select { width: auto; }
+.tools select { width: auto; text-indent: 0; }
 @media (max-width: 559px) {
   .card-head > .tools.grow { flex: 1 1 100%; }
   .tools.grow select { flex: 1 1 10rem; }
@@ -795,7 +808,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .bar.indet > span { width: 30%; animation: indet 1.2s ease-in-out infinite; }
 @keyframes indet { from { left: -30%; } to { left: 100%; } }
 
+/* A receiver update's numbered steps; space above them when something is (rather than .rows's 0.6rem, which `margin` here would zero). */
 .steps { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; padding: 0; list-style: none; }
+* + .steps { margin-top: 0.75rem; }
 .steps li {
   display: flex;
   align-items: center;

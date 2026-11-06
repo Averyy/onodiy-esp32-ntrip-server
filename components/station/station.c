@@ -2035,6 +2035,8 @@ static void flash_new(gnss_link_lease_t lease, stn_result_t *r)
     s_flash_last.failed_rule = f.failed_rule;
     s_flash_last.cross_layout = f.cross_layout;
     s_flash_last.check_only = false;
+    s_flash_last.reapply_ok = false;          /* this session's re-apply, once flash_close says */
+    s_flash_last.reapply_unchecked = false;
     portEXIT_CRITICAL(&s_lock);
     if (err != ESP_OK) {
         r->flash_end = STN_FLASH_END_NOTHING;
@@ -2182,9 +2184,11 @@ static void job_flash(const stn_job_t *job, stn_result_t *r)
     }
 }
 
-/* STN_NOTE_FLASH_CLOSE: the re-apply was checked (ok) or gave up. */
-static void flash_close(bool reapply_ok)
+/* STN_NOTE_FLASH_CLOSE: the re-apply was checked, gave up, or had no RTCM to be checked against (stn_flash_close_t). */
+static void flash_close(stn_flash_close_t how)
 {
+    bool reapply_ok = how == STN_FLASH_CLOSE_OK;
+    bool unchecked = how == STN_FLASH_CLOSE_UNCHECKED;
     /* The core has finished the re-apply, but the old journal still keeps
      * requests out. Reserve before flash_forget makes it absent, through
      * releasing lifecycle ownership and posting this session's last event. */
@@ -2223,14 +2227,20 @@ static void flash_close(bool reapply_ok)
     }
     portENTER_CRITICAL(&s_lock);
     s_flash_last.reapply_ok = reapply_ok;
+    s_flash_last.reapply_unchecked = unchecked;
     s_flash_last.build = s_after.build;
     snprintf(s_flash_last.firmware, sizeof(s_flash_last.firmware), "%s", s_after.firmware);
     portEXIT_CRITICAL(&s_lock);
     static const char *const k_what[] = { "", "updated", "the old firmware still runs", "an unexpected build runs",
                                           "not done, receiver unchanged" };
-    flash_last_set(outcome, "%s (%s)%s; %s", outcome < sizeof(k_what) / sizeof(k_what[0]) ? k_what[outcome] : "?",
-                   s_after.firmware, reapply_ok ? "" : ", the station profile did not come back: check the receiver",
-                   s_after_reason);
+    /* After a success the session's own reason only repeats the firmware ("receiver application back: ..."). */
+    bool own = outcome != STATION_FLASH_OUT_SUCCESS && s_after_reason[0] != '\0';
+    flash_last_set(outcome, "%s (%s)%s%s%s", outcome < sizeof(k_what) / sizeof(k_what[0]) ? k_what[outcome] : "?",
+                   s_after.firmware,
+                   reapply_ok ? ""
+                   : unchecked ? ", the station profile was re-applied but not checked: no RTCM yet (check the antenna)"
+                               : ", the station profile did not come back: check the receiver",
+                   own ? "; " : "", own ? s_after_reason : "");
     flash_forget(true);   /* releases the lockout last */
     final_progress(outcome == STATION_FLASH_OUT_SUCCESS ? UM98X_FLASH_DONE : UM98X_FLASH_FAILED);
     lockout_unreserve_request();
@@ -2261,6 +2271,8 @@ static void job_pkg_check(stn_result_t *r)
     s_flash_last.failed_rule = f.failed_rule;
     s_flash_last.cross_layout = f.cross_layout;
     s_flash_last.check_only = true;
+    s_flash_last.reapply_ok = false;
+    s_flash_last.reapply_unchecked = false;
     s_flash_last.build = 0;
     s_flash_last.firmware[0] = '\0';
     portEXIT_CRITICAL(&s_lock);
@@ -2825,7 +2837,7 @@ static void handle_notes(const stn_note_t *n, unsigned count)
                      STN_SKY_OFF_TRIES);
             break;
         case STN_NOTE_FLASH_CLOSE:
-            flash_close(x->a != 0);
+            flash_close((stn_flash_close_t)x->a);
             break;
         case STN_NOTE_FIXED_FAR:
             ESP_LOGW(TAG, "the fixed position is %d m from the receiver's own solution horizontally and %+d m in "

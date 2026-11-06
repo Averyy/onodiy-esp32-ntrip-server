@@ -63,22 +63,55 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered)
     return semver_compare(&off, &run) > 0;
 }
 
-const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build)
+size_t fw_policy_gnss_offers(const fw_manifest_t *m, const char *model, uint32_t current_build,
+                             const fw_manifest_gnss_t **out, size_t cap)
 {
-    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0) {
-        return NULL;
+    if (m == NULL || model == NULL || model[0] == '\0' || current_build == 0 || out == NULL) {
+        return 0;
     }
-    const fw_manifest_gnss_t *best = NULL;
+    size_t n = 0;
     for (size_t i = 0; i < m->gnss_count && i < FW_MANIFEST_MAX_GNSS; i++) {
         const fw_manifest_gnss_t *g = &m->gnss[i];
         if (strcmp(g->model, model) != 0 || g->build <= current_build) {
             continue;
         }
-        if (best == NULL || g->build > best->build) {
-            best = g;
+        /* Its place in the list (newest first); a build already there keeps its first entry. */
+        size_t at = 0;
+        while (at < n && out[at]->build > g->build) {
+            at++;
+        }
+        if ((at < n && out[at]->build == g->build) || at >= cap) {
+            continue;
+        }
+        /* Shift the older ones down; when the list is full the oldest drops out. */
+        for (size_t k = n < cap ? n : cap - 1; k > at; k--) {
+            out[k] = out[k - 1];
+        }
+        out[at] = g;
+        if (n < cap) {
+            n++;
         }
     }
-    return best;
+    return n;
+}
+
+const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build)
+{
+    const fw_manifest_gnss_t *best = NULL;
+    return fw_policy_gnss_offers(m, model, current_build, &best, 1) == 1 ? best : NULL;
+}
+
+const fw_manifest_gnss_t *fw_policy_gnss_offered(const fw_manifest_t *m, const char *model, uint32_t current_build,
+                                                 uint32_t build)
+{
+    const fw_manifest_gnss_t *offers[FW_MANIFEST_MAX_GNSS];
+    size_t n = fw_policy_gnss_offers(m, model, current_build, offers, FW_MANIFEST_MAX_GNSS);
+    for (size_t i = 0; i < n; i++) {
+        if (offers[i]->build == build) {
+            return offers[i];
+        }
+    }
+    return NULL;
 }
 
 const fw_manifest_gnss_t *fw_policy_gnss_release(const fw_manifest_t *m, const char *model)

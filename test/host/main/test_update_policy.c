@@ -130,6 +130,67 @@ TEST_CASE("receiver offer: exact model, higher build only", "[update_policy]")
     TEST_ASSERT_NULL(fw_policy_gnss_offer(NULL, "UM982", 1));
 }
 
+TEST_CASE("receiver offers: every higher build of the model, newest first", "[update_policy]")
+{
+    fw_manifest_t m;
+    memset(&m, 0, sizeof(m));
+    add_gnss(&m, "UM980", 23980);
+    add_gnss(&m, "UM982", 23575);
+    add_gnss(&m, "UM980", 25735);
+    add_gnss(&m, "UM980", 11833);
+
+    const fw_manifest_gnss_t *o[FW_MANIFEST_MAX_GNSS];
+    TEST_ASSERT_EQUAL(3, fw_policy_gnss_offers(&m, "UM980", 7923, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL_UINT32(25735, o[0]->build);
+    TEST_ASSERT_EQUAL_UINT32(23980, o[1]->build);
+    TEST_ASSERT_EQUAL_UINT32(11833, o[2]->build);
+    TEST_ASSERT_EQUAL_PTR(fw_policy_gnss_offer(&m, "UM980", 7923), o[0]);   /* the banner's is the newest */
+
+    /* Only the builds above the receiver's. */
+    TEST_ASSERT_EQUAL(2, fw_policy_gnss_offers(&m, "UM980", 11833, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL_UINT32(25735, o[0]->build);
+    TEST_ASSERT_EQUAL_UINT32(23980, o[1]->build);
+    TEST_ASSERT_EQUAL(1, fw_policy_gnss_offers(&m, "UM980", 23980, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "UM980", 25735, o, FW_MANIFEST_MAX_GNSS));
+
+    /* A short list keeps the newest. */
+    TEST_ASSERT_EQUAL(2, fw_policy_gnss_offers(&m, "UM980", 7923, o, 2));
+    TEST_ASSERT_EQUAL_UINT32(25735, o[0]->build);
+    TEST_ASSERT_EQUAL_UINT32(23980, o[1]->build);
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "UM980", 7923, o, 0));
+
+    /* Same conditions as the single offer. */
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "UM980", 0, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "", 1, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "um980", 1, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(NULL, "UM980", 1, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL(0, fw_policy_gnss_offers(&m, "UM980", 1, NULL, FW_MANIFEST_MAX_GNSS));
+
+    /* Any offered build may be installed; nothing else. */
+    TEST_ASSERT_EQUAL_PTR(&m.gnss[0], fw_policy_gnss_offered(&m, "UM980", 7923, 23980));
+    TEST_ASSERT_NOT_NULL(fw_policy_gnss_offered(&m, "UM980", 7923, 25735));
+    TEST_ASSERT_NOT_NULL(fw_policy_gnss_offered(&m, "UM980", 7923, 11833));
+    TEST_ASSERT_NULL(fw_policy_gnss_offered(&m, "UM980", 23980, 11833));      /* older than the receiver's */
+    TEST_ASSERT_NULL(fw_policy_gnss_offered(&m, "UM980", 23980, 23980));      /* the same build */
+    TEST_ASSERT_NULL(fw_policy_gnss_offered(&m, "UM980", 7923, 23575));       /* another model's */
+    TEST_ASSERT_NULL(fw_policy_gnss_offered(&m, "UM980", 7923, 30000));       /* not in the release */
+}
+
+TEST_CASE("receiver offers: a build listed twice is offered once, its first entry", "[update_policy]")
+{
+    fw_manifest_t m;
+    memset(&m, 0, sizeof(m));
+    add_gnss(&m, "UM980", 23980);
+    add_gnss(&m, "UM980", 25735);
+    add_gnss(&m, "UM980", 23980);
+
+    const fw_manifest_gnss_t *o[FW_MANIFEST_MAX_GNSS];
+    TEST_ASSERT_EQUAL(2, fw_policy_gnss_offers(&m, "UM980", 7923, o, FW_MANIFEST_MAX_GNSS));
+    TEST_ASSERT_EQUAL_PTR(&m.gnss[1], o[0]);
+    TEST_ASSERT_EQUAL_PTR(&m.gnss[0], o[1]);
+    TEST_ASSERT_EQUAL_PTR(&m.gnss[0], fw_policy_gnss_offered(&m, "UM980", 7923, 23980));
+}
+
 TEST_CASE("receiver release: the release's package for the model, offered or not", "[update_policy]")
 {
     fw_manifest_t m;

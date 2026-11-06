@@ -472,9 +472,10 @@ typedef struct {
     bool cross_layout;               /**< the package's partition layout differs from the receiver's */
     bool check_only;                 /**< only checked: this build does not flash */
     bool reapply_ok;                 /**< the profile was re-applied and checked (RTCM / the observed set came back) */
+    bool reapply_unchecked;          /**< re-applied, but no RTCM came to check it against (no antenna): reapply_ok false */
     char firmware[48];               /**< the receiver's firmware afterwards ("" unknown) */
     uint32_t build;
-    char reason[96];                 /**< what happened, in words */
+    char reason[192];                /**< what happened, in words */
     int64_t ended_unix;              /**< 0 without a trusted clock */
     uint32_t ended_age_s;            /**< since it ended (UINT32_MAX = none this boot) */
 } station_flash_last_t;

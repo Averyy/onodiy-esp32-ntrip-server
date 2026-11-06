@@ -938,10 +938,18 @@ void hl_tick(hl_t *l, const hl_in_t *in)
     }
 }
 
+/* A receiver update has the receiver: its session (in the loader the
+ * receiver is silent by design) or a journal waiting in FLASH_RECOVERY.
+ * The update says what happens, not the receiver's evidence. */
+static bool update_has_receiver(const hl_in_t *in)
+{
+    return in != NULL && (in->stn_state == HL_STN_FLASHING || in->stn_state == HL_STN_FLASH_RECOVERY);
+}
+
 /* Why the receiver path is down, from the evidence at hand (see the header). */
 static uint8_t why_of(const hl_t *l, const hl_in_t *in, bool fresh)
 {
-    if (in == NULL || fresh) {
+    if (in == NULL || fresh || update_has_receiver(in)) {
         return HL_WHY_NONE;
     }
     if (l->held_wait) {
@@ -1009,7 +1017,8 @@ void hl_get_status(const hl_t *l, const hl_in_t *in, hl_status_t *out)
         out->doing = HL_CODE_REBOOT;
         break;
     case HL_PH_FAILED:
-        out->level = fresh ? HL_LEVEL_DEGRADED : HL_LEVEL_FAILED;
+        /* While an update has the receiver: no reason, so never FAILED. */
+        out->level = fresh || update_has_receiver(in) ? HL_LEVEL_DEGRADED : HL_LEVEL_FAILED;
         out->rung = l->power_alert ? HL_CODE_POWER_ALERT : HL_CODE_FAILED;
         if (!l->hold_no_rx && l->mode != HL_MODE_ALERTS) {   /* ALERTS: the pass only journals, nothing is attempted */
             int64_t left = l->retry_at - l->active_ms;

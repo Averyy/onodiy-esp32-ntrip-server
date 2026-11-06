@@ -1054,6 +1054,41 @@ TEST_CASE("ladder: an open flash journal suspends it in every state, and the sta
     TEST_ASSERT_TRUE(w.rec[2].at - closed <= 12 * SEC);
 }
 
+TEST_CASE("ladder: while a receiver update has the receiver, no reason and never FAILED", "[health_ladder]")
+{
+    /* In FAILED, silent (no antenna and nothing answers would be NO_RTCM; this is the harder case): an update then
+     * puts the receiver in its loader, silent by design. "Power-cycle the station" (SILENT) must not show meanwhile
+     * (seen in a transfer, 2026-11-06), nor a bare FAILED level. */
+    sim_t w;
+    sim_init(&w);
+    w.rtcm = true;
+    sim_run(&w, 20 * SEC);
+    w.rtcm = false;
+    w.lines = true;
+    w.silence_after = 5;
+    w.in.reboot_allowed = false;
+    w.in.reconfigure_refused = true;
+    TEST_ASSERT_TRUE(sim_until_rec(&w, 5, 10 * MIN));
+    hl_status_t s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+    const uint8_t states[] = { HL_STN_FLASHING, HL_STN_FLASH_RECOVERY };
+    for (unsigned i = 0; i < sizeof(states); i++) {
+        w.in.stn_state = states[i];
+        sim_run(&w, MIN);
+        s = st_of(&w);
+        TEST_ASSERT_EQUAL_UINT8(HL_PH_FAILED, s.phase);
+        TEST_ASSERT_EQUAL_UINT8(HL_WHY_NONE, s.why);
+        TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_DEGRADED, s.level);
+    }
+    /* The update over (its re-apply and check run streaming): the receiver's evidence again. */
+    w.in.stn_state = HL_STN_STREAMING;
+    s = st_of(&w);
+    TEST_ASSERT_EQUAL_UINT8(HL_WHY_SILENT, s.why);
+    TEST_ASSERT_EQUAL_UINT8(HL_LEVEL_FAILED, s.level);
+}
+
 TEST_CASE("ladder: safe mode suspends it and is never FAILED", "[health_ladder]")
 {
     sim_t w;

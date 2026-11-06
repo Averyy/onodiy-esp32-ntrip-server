@@ -18,8 +18,8 @@ confirms.
 Verify with `shasum -a 256 -c SHA256SUMS`. Build 23575 passes every check the flasher
 runs (below) for a receiver on 18975 or 23575, with the same partition layout as 18975;
 it has not been flashed on hardware. Build 18975 stays here because the host tests
-check the flasher against it; a release lists both, and a station is offered the
-highest build above its own.
+check the flasher against it; a release lists both, and a station is offered every
+build above its own, newest first.
 
 **Boards ship with newer firmware.** The UM982 + ESP32-S3 board this project targets
 arrived (October 2026) with **R4.10 Build 25164**, compiled 2026-05-21, which is newer

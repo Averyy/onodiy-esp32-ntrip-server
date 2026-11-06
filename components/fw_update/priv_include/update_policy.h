@@ -38,6 +38,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "manifest.h"
@@ -82,6 +83,20 @@ bool fw_policy_app_install_allowed(const char *running, const char *offered);
  * no part: the receiver's firmware is newer or it is not.
  */
 const fw_manifest_gnss_t *fw_policy_gnss_offer(const fw_manifest_t *m, const char *model, uint32_t current_build);
+
+/**
+ * Every manifest entry the user may install on the receiver, newest first:
+ * exact model match, build higher than `current_build`, one per build (the
+ * first entry of a build). The first is fw_policy_gnss_offer()'s; nothing
+ * under the same conditions. Writes at most `cap` (the newest ones) to `out`
+ * and returns how many it wrote.
+ */
+size_t fw_policy_gnss_offers(const fw_manifest_t *m, const char *model, uint32_t current_build,
+                             const fw_manifest_gnss_t **out, size_t cap);
+
+/** The offered entry (fw_policy_gnss_offers) with build `build`; NULL when that build is not offered. */
+const fw_manifest_gnss_t *fw_policy_gnss_offered(const fw_manifest_t *m, const char *model, uint32_t current_build,
+                                                 uint32_t build);
 
 /** The release's package for this receiver model, offered or not (the highest build if several); NULL if none or the model is "". */
 const fw_manifest_gnss_t *fw_policy_gnss_release(const fw_manifest_t *m, const char *model);

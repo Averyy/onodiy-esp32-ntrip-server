@@ -6,6 +6,37 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Updates: when a release has more than one receiver build newer than the
+  receiver's, the receiver row lists them newest first and installs the one
+  chosen; `GET /api/update` adds `gnss.offers`, and `POST /api/update/gnss`
+  takes any build offered.
+
+- Updates: while a receiver update runs, the receiver row shows its steps
+  without what is available or Update receiver, and no longer flashes "Not
+  possible right now: the receiver is not streaming" as the station starts
+  the session. The steps start at the download (confirming is the
+  dialog's), are numbered, and keep a gap from the row above them.
+
+- Receiver updates: a receiver restart just after the post-update re-apply
+  no longer keeps the session open for 10 minutes and ends it with "The
+  station profile did not come back". Without RTCM (no antenna) the check
+  waits up to 2 minutes, then the update ends as applied but not checked yet,
+  without the receiver-attention alert; `reapply_ok` in
+  `GET /api/gnss/flash` is then `null`. The result text no longer ends in a
+  cut-off "; receiver".
+
+- Health: while a receiver update has the receiver (its transfer, or a
+  session waiting for you), no "power-cycle the station" or other receiver
+  alert and no `failed` level: the receiver is silent in its loader by
+  design, and the update says what happens.
+
+- Logs → History: in Safari the Events filter list no longer cuts the end
+  off its longest choice ("Starts and restarts").
+
+- Docs: the UM980 firmware notes list the updates run on the UM980 board
+  (7923 to 23980 to 25735); both receiver firmware notes say a station is
+  offered every newer build.
+
 - Docs: rotate the main README splitter render vertically to match the hardware row.
 
 - Docs: give both rev B splitter renders revision-specific image paths.

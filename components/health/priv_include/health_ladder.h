@@ -184,7 +184,10 @@
  *   SILENT    nothing usable and no answer.
  * While the ladder is in 7 or (ALERTS mode) in a journalled or only
  * watched step's grace, never in NO_RECEIVER (the station's own alert says
- * that). NO_RTCM and NO_SKY also while a step is in progress (above), as
+ * that), and never while a receiver update has the receiver (the station
+ * FLASHING or in FLASH_RECOVERY: in its loader the receiver is silent by
+ * design, and the update says what happens; a ladder in 7 shows DEGRADED
+ * then, so FAILED still never comes without a reason). NO_RTCM and NO_SKY also while a step is in progress (above), as
  * soon as the receiver answers by that rule (text lines or replies): the
  * antenna is the likely cause, and the hint comes with the recovery, not
  * after it. The level stays RECOVERING then. Line and reply times are exact

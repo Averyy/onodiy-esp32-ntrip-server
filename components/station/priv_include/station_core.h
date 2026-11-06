@@ -72,7 +72,10 @@
  *     answers -> re-apply the profile (STN_WHY_FLASH, whatever gnss/autocfg
  *     says), then STN_NOTE_FLASH_CLOSE after the re-apply's observed-set
  *     window (or RTCM within STN_FLASH_RTCM_MS after the abort path), at the
- *     latest STN_FLASH_CLOSE_MAX_MS after the session; a journal waiting
+ *     latest STN_FLASH_CLOSE_MAX_MS after the session. A receiver restart
+ *     before that window was judged moves the check after the restart, still
+ *     the re-apply's; with no RTCM by STN_FLASH_RTCM_MS it closes as not
+ *     checked (STN_FLASH_CLOSE_UNCHECKED); a journal waiting
  *     for the user -> FLASH_RECOVERY; nothing changed -> STREAMING.
  *   FLASH_RECOVERY: a receiver-flash journal is open (or its state is
  *     unknown): nothing is decided here until it is cleared, or until the
@@ -369,13 +372,25 @@ typedef enum {
 /** How a STN_JOB_FLASH ended (the caller's mapping of the session). */
 typedef enum {
     STN_FLASH_END_NOTHING = 0,  /**< nothing changed on the receiver and no journal is open: stream on */
-    STN_FLASH_END_REAPPLY,      /**< the application answers after a transfer: re-apply, check the observed set, close */
+    STN_FLASH_END_REAPPLY,      /**< the application answers after a transfer: re-apply, check the observed set (a window
+                                     with RTCM within STN_FLASH_RTCM_MS), close */
     STN_FLASH_END_REAPPLY_RTCM, /**< ended before the point of no return: re-apply, RTCM within STN_FLASH_RTCM_MS, close */
     STN_FLASH_END_NEEDS_USER,   /**< the journal waits for the user: FLASH_RECOVERY, nothing sent */
 } stn_flash_end_t;
 
-#define STN_FLASH_RTCM_MS      120000    /**< after the abort path's re-apply: RTCM within this */
+#define STN_FLASH_RTCM_MS      120000    /**< after a session's re-apply: RTCM within this (the abort path's check; an
+                                              update's observed-set check closes as not checked without it) */
 #define STN_FLASH_CLOSE_MAX_MS 600000    /**< the journal closes at the latest this long after the session (re-apply and check included) */
+
+/** How the re-apply after a session ended (STN_NOTE_FLASH_CLOSE's a). */
+typedef enum {
+    STN_FLASH_CLOSE_FAILED = 0,    /**< the re-apply failed, its check saw other RTCM, no RTCM came back after the abort
+                                        path, or nothing decided it by STN_FLASH_CLOSE_MAX_MS: RECEIVER_ATTENTION raised */
+    STN_FLASH_CLOSE_OK = 1,        /**< checked: the observed set came back (after the abort path: RTCM) */
+    STN_FLASH_CLOSE_UNCHECKED = 2, /**< after an update: re-applied, but no RTCM within STN_FLASH_RTCM_MS to check it
+                                        against (no antenna); the applied check waits for RTCM, the stall is the
+                                        health ladder's */
+} stn_flash_close_t;
 
 /** Profile change an apply carries out first. */
 typedef enum {
@@ -564,7 +579,7 @@ typedef enum {
     STN_NOTE_SKY_ON,         /**< a = lease length (ms), b = stn_err_t of the job */
     STN_NOTE_SKY_OFF,        /**< as SKY_ON */
     STN_NOTE_SKY_LEFT_ON,    /**< turning it off failed STN_SKY_OFF_TRIES times: left on until the receiver restarts */
-    STN_NOTE_FLASH_CLOSE,    /**< close the receiver-flash journal now: a = 1 the re-apply's check passed, 0 it did not (RECEIVER_ATTENTION raised) */
+    STN_NOTE_FLASH_CLOSE,    /**< close the receiver-flash journal now: a = stn_flash_close_t */
     STN_NOTE_APPLY_FAILED,   /**< an apply that sent something failed (CONFIG_FAILED raised): a = the station's own retry
                                   in s, 0 = none (automatic configuration off: only the user's apply), b = 1 the
                                   receiver was lost (detection follows) */
@@ -715,7 +730,8 @@ typedef struct {
     uint16_t query_seq;        /**< counts accepted requests: tells the caller which one a drop is about */
     uint8_t flash_close;       /**< 0 none, 1 after the re-apply's window, 2 after RTCM within STN_FLASH_RTCM_MS */
     int64_t flash_close_ms;    /**< the journal closes by then whatever happens */
-    int64_t flash_rtcm_ms;     /**< close kind 2: RTCM is required by then */
+    int64_t flash_rtcm_ms;     /**< from the re-apply: kind 2 requires RTCM by then; kind 1 waits for a window with
+                                    RTCM until then, then closes as not checked */
 
     /* fixed-position check */
     bool fix_on;               /**< a fixed profile is checked (armed) */

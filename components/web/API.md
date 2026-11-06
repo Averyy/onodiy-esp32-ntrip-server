@@ -404,7 +404,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | GET | `/api/update` | adm | Versions, trial, banner detail | fw_update |
 | POST | `/api/update/check` | adm | Check now (never installs) | `fw_update_check` |
 | POST | `/api/update/app` | adm | Install the offered app | `fw_update_install_app` |
-| POST | `/api/update/gnss` | adm | Receiver update from the offered build | `fw_update_install_gnss` |
+| POST | `/api/update/gnss` | adm | Receiver update to an offered build | `fw_update_install_gnss` |
 | POST | `/api/update/rollback` | adm | Back to the previous app | `fw_update_rollback` |
 | POST | `/api/update/accept` | adm | End a new app's first checks now | `fw_update_trial_accept` |
 | POST | `/api/upload/app` | adm | Manual app image | `fw_update_upload_app_*` |
@@ -603,7 +603,7 @@ object as sections (section 7), so the UI keeps one model. Admin form:
 | `local_caster` | The local server in short (section 10a): `enabled` as its config says (`false` in safe mode, where it has none), `state` (`local_caster_state_t`; `off` in safe mode), `clients` (rovers streaming now). No times or byte counts (`GET /api/local-caster` has them), so the section changes only when one of the three does; admin form only |
 | `alerts[]` | health's alerts (`source: "health"`, `health_alert_t`) and the station's (`source: "station"`, `station_alert_t`). A `failed` health level always comes with the alert that says why (below); `config_failed` carries `retry_in_s` and `auto_retry` (as `config_retry_in_s` and `config_auto_retry` in `GET /api/gnss`); `no_receiver` (the station found no receiver: raised in `no_receiver`, not with `receiver_in_loader` or in receiver maintenance, cleared when the state ends) carries `saw_bytes` (the last detection pass received bytes it could not read: wiring or port speed rather than power) and `next_detect_in_s` (as `receiver.next_detect_in_s`); `fixed_far` (the fixed base position looks wrong: more than 50 m from the receiver's own solution, horizontally or in height, or its height is the receiver's height above sea level: section 8, `fixed_check`) carries `horizontal_m`, `vertical_m`, `distance_m`, `height_only` and `sea_level` as `fixed_check` does, in whole metres |
 | `availability.budget_left_s` | protected slot's data-rate-adjusted `budget_left_s`, else `ledger_protected_budget_left_s()`; `null` without an enabled protected slot that is set up (`onocoy_ready`), or without a trusted clock. Information only, never a gate |
-| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, a step whose grace waits while a session of the station's own runs, or between two of its steps), as soon as the receiver answered after its last RTCM frame within the last 90 s (as `receiver.responding` reads it), so the antenna hint comes with the recovery; a session of the station's own (an apply, the applied check's, one after a receiver restart) never drops the level or the reason meanwhile: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is `receiver.antenna` and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna; only while its last answer is at most 90 s old: older, it is `receiver_silent` in the last step and in `alerts_only`, and no reason while a step runs), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only); the same after a receiver reset that brought RTCM back only briefly (the stall within 60 s of it) when the receiver answers |
+| health alerts that say why there is no RTCM | set from the GNSS ladder's evidence while it is in its last step (`failed`), or while a stall is only reported (`alerts_only`, `degraded`; also the grace of a step the station ran before the user chose `alerts_only`); `no_satellites` and `no_rtcm` also while the recovery runs (`recovering`: a step in progress, a step whose grace waits while a session of the station's own runs, or between two of its steps), as soon as the receiver answered after its last RTCM frame within the last 90 s (as `receiver.responding` reads it), so the antenna hint comes with the recovery; a session of the station's own (an apply, the applied check's, one after a receiver restart) never drops the level or the reason meanwhile: `receiver_power` (bytes but no answer after the receiver reset: power-cycle the station), `receiver_silent` (nothing usable from the receiver and no answer to commands: power-cycle the station), `no_satellites` (the receiver answers, and its own position sentence says no fix with no satellites used: check that the antenna is `receiver.antenna` and sees the sky), `no_rtcm` (the receiver answers, by text lines or replies to the station, but sends no RTCM: most often the antenna; only while its last answer is at most 90 s old: older, it is `receiver_silent` in the last step and in `alerts_only`, and no reason while a step runs), `rx_held` (the first configuration is held, `first_apply_held`, and the receiver answers: no RTCM is expected yet; level `degraded`, never `failed`, and the ladder declares no stall for it). None of them while the station finds no receiver: its own `no_receiver` alert says that; none while a receiver update has the receiver (`receiver.state` `flashing` or `flash_recovery`: in its loader the receiver is silent by design, the update says what happens), and the level is then `degraded` rather than `failed`. With `no_satellites` or `no_rtcm` the ladder does not reset the receiver again on its 10-min retry pass (a silent receiver gets the link restart and the rescan only); the same after a receiver reset that brought RTCM back only briefly (the stall within 60 s of it) when the receiver answers |
 | `health.step`, `health.step_phase` | what the GNSS recovery does now (`health_step_t`, `health_step_phase_t`): `step` is the step that is due or that the station runs (`step_phase` `running`), or the one it ran and whose grace runs, the station waiting for RTCM (`waiting`; also while a session of the station's own runs meanwhile: the grace waits for it with the time it had left, and the step is never run again for it, `ladder_suspended` `true` meanwhile); `reboot` while the station restarts itself for the receiver. `none` (both) outside a step, in the ladder's last step (`failed`), and in `alerts_only`, where nothing is fixed (a step the station ran before the user chose it is only watched: `none`, level `degraded`). `last_step` keeps the last step started; admin form only |
 | `health.factory_reset_refused` | a BOOT-button factory reset was refused within the last 10 min because a receiver update was running (the UI shows a notice); admin form only |
 | `health.recovery_mode` | automatic receiver recovery in effect (`gnss/recovery`, `health_recovery_mode_t`): `full`, `no_reboot` (everything but the ESP32 reboot), `alerts_only` (nothing is sent to the receiver: a stall is only reported and journalled, level `degraded`, `failed` once the ladder gives up); admin form only |
@@ -737,7 +737,7 @@ waits 300 ms for the rest and reloads, or warns, once.
 | `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows (without flashing in the build: `not_available_yet`, and a `gnss_check` job follows) |
 | `gnss_check` | builds without receiver flashing: `checking`, then the final message with `result` `ok` (the package passes every rule; nothing was sent) or `package_rejected` (`failed_rule`, `reason`) |
 | `gnss_upload` | `receiving` → `inspecting` |
-| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check; the journal closes after that. `failed` with `"done": false` is a transfer that failed after the point of no return while the session goes on (back to the loader, the same package again within the caps, or a stop for the user's decision); only the final message ends the job |
+| `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check (a window with RTCM, waited for up to 120 s after the re-apply); the journal closes after that. `failed` with `"done": false` is a transfer that failed after the point of no return while the session goes on (back to the loader, the same package again within the caps, or a stop for the user's decision); only the final message ends the job |
 
 The final message has `"done": true` and `"result"`: `ok` or a result code
 (section 12), plus `message` (the `esp_err_t` name) on failure. For
@@ -1494,7 +1494,13 @@ report existing job state; they do not change admission or retry behavior.
 (`station_flash_last_t`; `null` when there was none): `outcome`
 (`station_flash_outcome_t`), `failed_rule` for `rejected`, `firmware` and
 `build` the receiver reported afterwards, `reapply_ok` whether the station
-profile came back after it. `check_running`: a package check runs (builds
+profile came back after it: `true` once an observation window after the
+re-apply saw the profile's RTCM (a receiver restart before that window moves
+the check after the restart; it still closes the journal), `false` when the
+re-apply failed or the window saw other RTCM, `null` when it was applied again
+but no RTCM came within 120 s of the re-apply to check it against (no
+antenna): the journal closes then, without the receiver-attention alert, and
+the applied check (`profile_applied`) waits for RTCM. `check_running`: a package check runs (builds
 without flashing). `flash_available` is `station_flash_available()`: `false`
 in builds without receiver flashing (`CONFIG_UM98X_FLASH_ENABLE` off), then
 `flash_reason` is `not_enabled_in_build` and the UI says that receiver
@@ -2265,7 +2271,9 @@ until a newer version appears; the server keeps no "later" state.
            "release": "R4.10Build19152", "release_build": 19152, "available": true,
            "blocked": "none", "blocked_left_s": 0,
            "expected_downtime_s": 252, "budget_left_s": 469, "flash_available": false,
-           "flash_reason": "not_enabled_in_build"}
+           "flash_reason": "not_enabled_in_build", "latest_cross_layout": false, "cross_layout_allowed": true,
+           "offers": [{"version": "R4.10Build19152", "build": 19152, "expected_downtime_s": 252,
+                       "cross_layout": false}]}
 }
 ```
 
@@ -2292,7 +2300,8 @@ describe the last recorded outcomes and must not be assumed to belong to a
 new request just because a job is no longer active.
 | `app.latest` | the latest release's version, `null` before a check found one; the last check's manifest is kept over a restart (`ota/manifest`), so a restart does not forget it |
 | `app.trial.stage` | `none`, `confirming`, `verifying`, `watching`; `left_s` is the stage's time left, `ends_in_s` the whole trial's (to the crash watch's end; both 0 without a trial) |
-| `gnss.latest`, `gnss.latest_build` | the package offered (a higher build for this model), else `null` |
+| `gnss.latest`, `gnss.latest_build` | the newest package offered (the highest build above the receiver's for this model), else `null` |
+| `gnss.offers` | every build offered, newest first (`fw_update_gnss_offers()`): the latest release's packages for this model with a higher build than the receiver's, one per build, at most 4. Each: `version`, `build`, `expected_downtime_s` (as `gnss.expected_downtime_s`, for that package), `cross_layout` (as `gnss.latest_cross_layout`, for that build). The first is `gnss.latest`. `[]` when nothing is offered. With more than one, the UI lists them (newest chosen) and installs the one chosen |
 | `gnss.release`, `gnss.release_build` | the latest release's package for this receiver model, offered or not (`null` without one, or before a check found a release): the card says "up to date" when the receiver runs it or a newer build |
 | `app.rollback_version` | the version `POST /api/update/rollback` would start (the other app slot's image), `null` without a rollback or when its description cannot be read |
 | `app.latest_rolled_back` | the latest release is one that was rolled back here: not offered, installable with a warning |
@@ -2352,7 +2361,9 @@ use, or the saved one keeps the link off) refuses the update with `409 busy`
 (`reason` `wiring_pending`) here and in `POST /api/upload/gnss/confirm`:
 an interrupted update must finish over the pins it began on.
 
-`{"build": 19152, "cross_layout_ack": false}`. One click runs the chain:
+`{"build": 19152, "cross_layout_ack": false}`: `build` is one of
+`gnss.offers` (any build offered, not only the newest; never one at or
+below the receiver's). One click runs the chain:
 download the manifest's package for the detected model into the package
 slot (size and SHA-256 from the release manifest, checked on the stream and
 on the stored copy), then start the session on the station. `202
@@ -2369,8 +2380,8 @@ the receiver. `last_result` says `not_available_yet`; the UI shows
 not enabled in this build yet. The station now checks the package against
 every rule; nothing is sent to the receiver."
 
-Errors (all before anything is downloaded): `409 not_offered` (the build
-changed or nothing is offered; dev builds are offered nothing), `409
+Errors (all before anything is downloaded): `409 not_offered` (that build
+is not, or no longer, offered, or nothing is), `409
 receiver_maintenance`, `409 app_trial` (`retry_in_s` = time left), `409
 app_update`, `409 journal_open`, `409 receiver_not_streaming`, `409
 unsupported_model`, `409 safe_mode`, `409 package_pinned`, `409 busy`.

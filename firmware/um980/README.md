@@ -4,11 +4,16 @@ Unicore UM980 receiver firmware packages. The station checks them by the same ru
 the UM982's, with the UM980's own marks, and takes one only for a UM980 receiver. Tested
 on hardware (the NTRIP-X, 2026-10-22, bench builds): 11833 installed again over 11833,
 then 11833 to 23980, the first update with another partition layout (the type-4 backup
-address). 23980 reports itself as `R4.10Build23980M`; the station compares the build
-number. Receiver updates are on in releases since v0.1.6. Releases carry 23980 and 25735
+address); and on the UM980 board (Alibaba, 2026-11-06, a dev build, no antenna): 7923
+to 23980, a build whose layout the station does not know and so takes as another, then
+23980 to 25735, each transfer without a retry. 25735 took the station's whole profile,
+`RTCM1230` included. 23980 reports itself as `R4.10Build23980M`, 25735 as
+`R4.10Build25735`; the station compares the build number. Receiver updates are on in
+releases since v0.1.6. Releases carry 23980 and 25735
 ([`firmware/release-packages.txt`](../release-packages.txt)). An update never goes down
-a build. The update banner offers the highest build above the receiver's; a
-cross-layout update (11833 or 10110 to 23980 or 25735) needs its own tick in the dialog
+a build. Settings, Updates offers every build above the receiver's, newest first, the
+newest chosen; a cross-layout update (10110, 11833 or a build of unknown layout such as
+7923, to 23980 or 25735) needs its own tick in the dialog
 (`CONFIG_UM98X_FLASH_CROSS_LAYOUT`, on by default).
 
 | Build | Built (the package's block date stamps) | SHA-256 |
@@ -46,4 +51,5 @@ build that lacks it; the web UI names the build that adds it.
 Builds between 11833 and 23980 are unknown and count as lacking both. Every UM982 build
 seen (18975, 23575, 25164) takes both.
 
-**Still to do:** the UM980 board (Alibaba) once it arrives.
+**Still to do:** the UM980 board (Alibaba) with an antenna: its updates above ran
+without one, so the check of the re-applied profile against the stream is still open.

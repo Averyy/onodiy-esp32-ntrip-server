@@ -61,7 +61,9 @@ function outcomeText(m) {
   const why = m.reason ? ' (' + m.reason + ')' : '';
   switch (m.outcome) {
     case 'success':
-      return 'Updated: the receiver runs ' + fw + '.' + (m.reapply_ok === false ? ' The station profile did not come back; check the Receiver page.' : '');
+      /* reapply_ok null: the profile was applied again, with no corrections yet to check it against (no antenna). */
+      return 'Updated: the receiver runs ' + fw + '.' + (m.reapply_ok === false ? ' The station profile did not come back; check the Receiver page.' :
+        m.reapply_ok === null ? ' Its station settings are applied again and get checked once corrections flow; none arrive yet, so check that the antenna is connected.' : '');
     case 'checked':
       return 'The package passes every rule. ' + notEnabled() + ' It was released; nothing was sent to the receiver.';
     case 'rejected':
@@ -163,20 +165,24 @@ function progressWidget() {
 }
 
 /**
- * Steps of a receiver update. state: confirm, download, failed (at the
- * second step), install or check (the third step runs), refused (the third
- * step failed), installed or checked (all done). upload: the manual-upload
- * wording. checkOnly: builds without receiver flashing, whose third step
- * checks the package instead of installing it.
+ * Steps of a receiver update, from the user's confirmation on (that is no
+ * step: the dialog asked). state: download (the first step runs), failed
+ * (the first step failed), ready (an uploaded package waits for its
+ * confirmation: the first step done, the second not started), install or
+ * check (the second step runs), refused (the second step failed), installed
+ * or checked (all done). upload: the manual-upload wording. checkOnly: builds
+ * without receiver flashing, whose second step checks the package instead of
+ * installing it. Each step says its number ("1. Download and verify"), a done
+ * one ends in a tick.
  */
 function receiverSteps(state, upload, checkOnly) {
-  const at = { confirm: 0, download: 1, failed: 1, install: 2, check: 2, refused: 2, installed: 3, checked: 3 }[state] || 0;
-  const names = upload ? ['Upload and check', 'Confirm'] : ['Confirm', 'Download and verify'];
-  names.push(checkOnly ? 'Check every rule (installing is not enabled in this build)' : 'Install on the receiver');
+  const at = { download: 0, failed: 0, ready: 1, install: 1, check: 1, refused: 1, installed: 2, checked: 2 }[state] || 0;
+  const names = [upload ? 'Upload and check' : 'Download and verify',
+    checkOnly ? 'Check every rule (installing is not enabled in this build)' : 'Install on the receiver'];
   return h('ol', { class: 'steps' }, names.map((text, i) => {
-    let cls = i < at ? 'done' : i === at ? 'now' : '';
+    let cls = i < at ? 'done' : i === at && state !== 'ready' ? 'now' : '';
     if (i === at && (state === 'failed' || state === 'refused')) cls = 'na';
-    return h('li', { class: cls }, (cls === 'done' ? '✓ ' : '') + text);
+    return h('li', { class: cls }, (i + 1) + '. ' + text + (cls === 'done' ? ' ✓' : ''));
   }));
 }
 
@@ -337,6 +343,8 @@ const updatesPart = {
     let u = null, staged = null, flash = null;
     let flashFresh = false, flashReadError = '';
     let rflow = null;          /* receiver flow: {state, text, tone} */
+    let gnssPick = 0;          /* receiver build chosen in the list of offered builds (0: the newest) */
+    let gnssChoose = null;     /* that list, while one shows */
     let gone = false, revision = 0, mutations = 0, reading = null, readAgain = false;
     let progressPhase = '', receiverProgress = 0;
     let attempt = null;
@@ -536,22 +544,30 @@ const updatesPart = {
       rolledBox.hidden = !rolledBox.firstChild;
     }
 
-    /* ---- Receiver (offered package) ---- */
-    async function updateReceiver(button) {
+    /* ---- Receiver (offered packages) ---- */
+    /* The receiver builds offered, newest first; a snapshot without the list offers its one latest build. */
+    function gnssOffers(g) {
+      if (!g.available) return [];
+      if (Array.isArray(g.offers) && g.offers.length) return g.offers;
+      return g.latest_build ? [{ version: g.latest, build: g.latest_build, expected_downtime_s: g.expected_downtime_s,
+        cross_layout: !!g.latest_cross_layout }] : [];
+    }
+
+    async function updateReceiver(button, o) {
       const g = u.gnss || {};
-      const xl = !!g.latest_cross_layout;
+      const xl = !!o.cross_layout;
       const ok = await dialog({
         title: 'Update the receiver firmware?',
         ok: g.flash_available ? 'Update receiver' : 'Download and verify',
         check: xl ? XL_CHECK : undefined,
-        body: [h('p', null, 'Install ' + g.latest + ' (build ' + g.latest_build + ') on the ' + (g.model || 'receiver') + ' (now ' + (g.running || 'unknown') + ').'),
+        body: [h('p', null, 'Install ' + o.version + ' (build ' + o.build + ') on the ' + (g.model || 'receiver') + ' (now ' + (g.running || 'unknown') + ').'),
           xl ? crossLayoutMsg(true) : null,
-          downtimeRows(g.expected_downtime_s, g.budget_left_s), receiverWarnings(g.flash_available, g.flash_reason)],
+          downtimeRows(o.expected_downtime_s, g.budget_left_s), receiverWarnings(g.flash_available, g.flash_reason)],
       });
       if (!ok) return;
       gnssErr.hidden = true;
       try {
-        await busy(button, () => receiverAction(() => api('POST', '/api/update/gnss', { build: g.latest_build, cross_layout_ack: xl }), (r, current) => {
+        await busy(button, () => receiverAction(() => api('POST', '/api/update/gnss', { build: o.build, cross_layout_ack: xl }), (r, current) => {
           if (!current) return;
           rflow = { state: 'download' };
           P.gnss_update.set({ job: 'gnss_update', phase: 'downloading', done: false });
@@ -563,26 +579,48 @@ const updatesPart = {
       }
     }
 
-    /* "Receiver R4.10Build18975: up to date" or the offered build with its button; the downtime against the Onocoy budget is in the dialog. */
+    /*
+     * "Receiver R4.10Build18975: up to date" or the offered build with its button; with several builds offered, a list
+     * of them (newest first, the newest chosen) beside the button. The downtime against the Onocoy budget is in the dialog.
+     * While an update runs, none of it (what is available, the list, the button): its steps and progress say what happens.
+     */
     function renderGnss() {
       const g = u.gnss || {};
       let fin = null;
       const blocked = g.blocked && g.blocked !== 'none';
       /* The open session is this update itself while it runs: the steps below say so. */
       const running = g.blocked === 'journal_open' && !!(rflow || (flash && flash.journal === 'running'));
+      const offers = gnssOffers(g);
+      /* The build chosen in the list, kept over refreshes while it is offered; else the newest. */
+      const pick = offers.find(o => o.build === gnssPick) || offers[0] || null;
       /* Another partition layout that this app refuses (rule 12): no button, the reason instead. */
-      const xlRefused = g.available && g.latest_cross_layout && !g.cross_layout_allowed;
-      const upd = g.available && !xlRefused ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd), appMain ? '' : 'primary',
-        { disabled: blocked || (rflow && rflow.state === 'download') }) : null;
+      const xlRefused = !!pick && !!pick.cross_layout && !g.cross_layout_allowed;
+      const held = blocked || (rflow && rflow.state === 'download');
+      /* An update downloading, installing or checking its package: its steps show instead of the list and the button. */
+      const updating = (!!rflow && ['download', 'install', 'check'].includes(rflow.state)) || !!(flash && flash.journal === 'running');
+      const upd = pick && !xlRefused && !updating ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd, pick), appMain ? '' : 'primary',
+        { disabled: held }) : null;
+      const choose = offers.length > 1 && !updating ? selectInput(offers.map(o => [o.build, fwText(o.version, o.build)]), pick.build,
+        { 'aria-label': 'Receiver firmware to install', disabled: held }) : null;
+      if (choose) {
+        choose.addEventListener('change', () => {
+          gnssPick = Number(choose.value);
+          renderGnss();
+          if (gnssChoose) gnssChoose.focus();
+        });
+      }
+      gnssChoose = choose;
       const lr = u.last_result;
       const last = flash && flash.last;
       mainShown = appMain || !!upd;
       mount(gnssBox,
         settingRow('Receiver ' + (g.running ? fwText(g.running, g.running_build) : ''),
+          updating ? null :   /* what is offered: not while one of them installs */
+          offers.length > 1 ? offers.length + ' newer builds are available.' + (g.flash_available ? '' : ' This build can only download and check them.') :
           g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
             !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
-            gnssReleaseText(g, u.app || {}), upd),
-        xlRefused ? crossLayoutMsg(false) : null,
+            gnssReleaseText(g, u.app || {}), choose ? h('div', { class: 'form-actions pick' }, choose, upd) : upd),
+        xlRefused && !updating ? crossLayoutMsg(false) : null,
         blocked && !running && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.'),
           g.blocked === 'app_trial' && firstChecks((u.app || {}).trial) ?
@@ -899,7 +937,7 @@ const updatesPart = {
       }, err), 'danger');
       mount(stagedBox,
         h('h3', { class: 'section-title' }, 'Uploaded package'),
-        receiverSteps('download', true),
+        receiverSteps('ready', true),
         kv([
           ['Size', fmt.bytes(s.size) + ' (' + fmt.num(s.size) + ' bytes)'],
           ['SHA-256', h('code', null, s.sha256)],

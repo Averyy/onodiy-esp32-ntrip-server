@@ -1930,6 +1930,12 @@ static esp_err_t h_update_get(web_req_t *r)
     portEXIT_CRITICAL(&s_res_lock);
     static char rolled_back[FW_UPDATE_ROLLED_BACK_MAX][32];   /* server task only */
     size_t n_rolled_back = fw_update_get_rolled_back(rolled_back, FW_UPDATE_ROLLED_BACK_MAX);
+    static fw_update_gnss_offer_t offers[FW_UPDATE_GNSS_OFFERS_MAX];   /* server task only */
+    static bool offer_xl[FW_UPDATE_GNSS_OFFERS_MAX];
+    size_t n_offers = fw_update_gnss_offers(offers, FW_UPDATE_GNSS_OFFERS_MAX);
+    for (size_t i = 0; i < n_offers; i++) {
+        offer_xl[i] = um98x_flash_build_cross_layout(offers[i].build, s_st.receiver.valid ? s_st.receiver.build : 0);
+    }
     const esp_partition_t *slot = esp_ota_get_next_update_partition(NULL);
     web_update_snap_t u = {
         .app_max_bytes = slot != NULL ? slot->size : 0,
@@ -1947,6 +1953,9 @@ static esp_err_t h_update_get(web_req_t *r)
         .cross_layout_allowed = um98x_flash_cross_layout_allowed(),
         .latest_cross_layout = s_fw.gnss_latest_build != 0 &&
                                um98x_flash_build_cross_layout(s_fw.gnss_latest_build, s_st.receiver.valid ? s_st.receiver.build : 0),
+        .offers = offers,
+        .offer_count = n_offers,
+        .offer_cross_layout = offer_xl,
         .rolled_back = (const char (*)[32])rolled_back,
         .rolled_back_count = n_rolled_back,
     };
@@ -2078,6 +2087,19 @@ static bool flash_waits_for_wiring(void)
     return WEB_FLASH_AVAILABLE && station_wiring_pending();
 }
 
+/* The user may pick any receiver build offered (newer than the receiver's), not only the newest. */
+static bool gnss_build_offered(uint32_t build)
+{
+    static fw_update_gnss_offer_t offers[FW_UPDATE_GNSS_OFFERS_MAX];   /* server task only */
+    size_t n = fw_update_gnss_offers(offers, FW_UPDATE_GNSS_OFFERS_MAX);
+    for (size_t i = 0; i < n; i++) {
+        if (offers[i].build == build) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static esp_err_t h_update_gnss(web_req_t *r)
 {
     uint32_t build = 0;
@@ -2095,7 +2117,7 @@ static esp_err_t h_update_gnss(web_req_t *r)
     if (fw_update_get_status(&s_fw) != ESP_OK) {
         return web_send_internal(r->req, ESP_FAIL);
     }
-    if (!s_fw.gnss_update_available || s_fw.gnss_latest_build != build) {
+    if (!s_fw.gnss_update_available || !gnss_build_offered(build)) {
         return web_send_err(r->req, WEB_ERR_NOT_OFFERED);
     }
     uint32_t retry = UINT32_MAX;

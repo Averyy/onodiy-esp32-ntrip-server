@@ -329,13 +329,33 @@ void fw_update_upload_app_abort(fw_update_upload_t u);
  */
 bool fw_update_same_as_running(const uint8_t elf_sha256[32]);
 
+/** Most receiver builds fw_update_gnss_offers() returns (one per package a manifest may list). */
+#define FW_UPDATE_GNSS_OFFERS_MAX 4
+
+/** A receiver build the user may install. */
+typedef struct {
+    char version[48];              /**< firmware string the receiver reports after the update */
+    uint32_t build;
+    uint32_t expected_downtime_s;  /**< station_expected_flash_downtime_s() for its package (never a gate) */
+} fw_update_gnss_offer_t;
+
+/**
+ * Every receiver build offered now, newest first: the last check's packages
+ * for the detected model with a higher build than the receiver's, one per
+ * build. The first is fw_update_status_t.gnss_latest. None without a known
+ * release, a detected receiver or a package partition.
+ * @return how many were written to `out` (at most `cap`, the newest ones).
+ */
+size_t fw_update_gnss_offers(fw_update_gnss_offer_t *out, size_t cap);
+
 /**
  * The user confirmed the receiver update: download the package for the
  * detected model into pkg_store and hand it to the station (async). The
  * package slot is released when the session ends. Refused
  * (ESP_ERR_INVALID_STATE) for every fw_update_gnss_block_t reason.
- * @param offered_build    the build the banner showed; refused if it changed
- *        or if nothing is offered (a dev build is offered nothing).
+ * @param offered_build    the build the user chose, one of
+ *        fw_update_gnss_offers(); refused if it is no longer offered or
+ *        nothing is.
  * @param cross_layout_ack the user confirmed a package with a different
  *        partition layout (still refused until bench-tested).
  */

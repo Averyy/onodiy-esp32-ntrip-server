@@ -454,6 +454,7 @@ function pageParts(el) {
     pres: v.filter(e => e.tagName === 'PRE').map(e => e.textContent),
     trs: v.filter(e => e.tagName === 'TR').map(tr => tr.kids.map(k => k.textContent).join(' | ')),
     lis: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').length,
+    steps: v.filter(e => e.tagName === 'LI' && e.parent.tagName === 'OL').map(e => e.textContent),
     /* The checkboxes by their label; the notes beside a button (why it waits); the correction messages' list. */
     checks: v.filter(e => e.tagName === 'LABEL' && e.className === 'check').map(e => e.kids[1].kids[0].textContent),
     notes: v.filter(e => e.tagName === 'SPAN' && (e.className || '').indexOf('note') === 0).map(e => e.textContent),
@@ -589,7 +590,8 @@ const WIRING = { rx_gpio: 1, tx_gpio: 2, port: 1, saved: null, default: { rx_gpi
  * receiver wiring's dialog: what it shows (wire.dialog, its lists as [option, greyed out, chosen]), then with
  * c.wire.pick ([rx, tx, port]) chosen and saved (the answer c.wire.answer), the PUTs that went out and the page after.
  * With c.press, the dialog that button opens (dialog, with ok_disabled before and after its checkbox is ticked), then
- * confirmed: the POSTs that went out. */
+ * confirmed: the POSTs that went out and the page then (pressed). The page's lists (selects: [label, [[option, chosen]]]); with c.choose, the list
+ * holding that option set to it first (chosen: the page then). */
 async function settingsPageView(c) {
   const settle = async () => {
     for (let i = 0; i < 60; i++) await new Promise(r => setImmediate(r));
@@ -612,6 +614,16 @@ async function settingsPageView(c) {
   const view = ui.settingsPage(el, '');
   await settle();
   const r = pageParts(el);
+  const lists = () => [...visible(el)].filter(e => e.tagName === 'SELECT')
+    .map(s => [s.attrs['aria-label'] || null, s.options.map(o => [o.textContent, !!o.selected])]);
+  r.selects = lists();
+  if (c.choose !== undefined) {
+    const sel = [...visible(el)].find(e => e.tagName === 'SELECT' && e.options.some(o => o.v === String(c.choose)));
+    sel.value = String(c.choose);
+    sel.fire('change');
+    await settle();
+    r.chosen = Object.assign(pageParts(el), { selects: lists() });
+  }
   if (c.click) {
     [...visible(el)].find(e => e.tagName === 'BUTTON' && e.textContent === c.click).fire('click');
     r.after = pageParts(el);
@@ -634,6 +646,7 @@ async function settingsPageView(c) {
     dlg().find(e => e.tagName === 'FORM').fire('submit');
     await settle();
     r.posts = sent.slice(n).filter(x => x.method === 'POST').map(x => [x.path, x.body]);
+    r.pressed = Object.assign(pageParts(el), { selects: lists() });
   }
   if (c.wire) {
     ids.modal = new El('div');
@@ -3702,6 +3715,115 @@ def test_receiver_update_that_changes_the_partition_layout_needs_its_own_tick():
     assert plain["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": False}]]
 
 
+def test_receiver_update_lists_the_offered_builds_newest_first():
+    """Settings, Updates: with more than one newer receiver build offered, the receiver row says how many and lists them
+    newest first, the newest chosen; Update receiver installs the build chosen (its dialog, its downtime, its layout
+    tick). One build offered: no list, as before."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build7923", "running_build": 7923,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "expected_downtime_s": 252, "latest_cross_layout": True, "cross_layout_allowed": True,
+            "offers": [{"version": "R4.10Build25735", "build": 25735, "expected_downtime_s": 252, "cross_layout": True},
+                       {"version": "R4.10Build23980", "build": 23980, "expected_downtime_s": 251, "cross_layout": True}]}
+    one = {**gnss, "running": "R4.10Build23980", "running_build": 23980, "latest_cross_layout": False,
+           "offers": [{"version": "R4.10Build25735", "build": 25735, "expected_downtime_s": 252, "cross_layout": False}]}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    newest, older, single = run_editor([
+        {**base, "update": {**SET_UPDATE, "gnss": gnss}, "press": "Update receiver"},
+        {**base, "update": {**SET_UPDATE, "gnss": gnss}, "choose": 23980, "press": "Update receiver"},
+        {**base, "update": {**SET_UPDATE, "gnss": one}, "press": "Update receiver"}])
+    label = "Receiver firmware to install"
+    listed = lambda r: [opts for name, opts in r["selects"] if name == label]
+    assert ["Receiver R4.10Build7923", "2 newer builds are available."] in newest["settings"]
+    assert listed(newest) == [[["R4.10Build25735", True], ["R4.10Build23980", False]]]
+    assert "Install R4.10Build25735 (build 25735) on the UM980 (now R4.10Build7923)." in newest["dialog"]["lines"]
+    assert newest["posts"] == [["/api/update/gnss", {"build": 25735, "cross_layout_ack": True}]]
+    # The older build chosen: the list keeps it, and the dialog and the request are that build's.
+    assert listed(older["chosen"]) == [[["R4.10Build25735", False], ["R4.10Build23980", True]]]
+    assert "Install R4.10Build23980 (build 23980) on the UM980 (now R4.10Build7923)." in older["dialog"]["lines"]
+    assert older["dialog"]["ok_disabled"] and not older["dialog"]["ok_disabled_ticked"]
+    assert older["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": True}]]
+    # One build offered: no list.
+    assert listed(single) == []
+    assert ["Receiver R4.10Build23980", "R4.10Build25735 is available."] in single["settings"]
+    assert single["posts"] == [["/api/update/gnss", {"build": 25735, "cross_layout_ack": False}]]
+
+
+def test_receiver_update_hides_the_list_its_button_and_why_not_while_it_runs():
+    """Settings, Updates: while a receiver update runs (from Update receiver pressed, through the download, the session
+    accepted before its journal exists, to the journal's close) the receiver row shows its steps without what is
+    available, the list of builds, Update receiver or "Not possible right now": the station leaves streaming before the journal opens, which
+    flashed "the receiver is not streaming" mid-update."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build7923", "running_build": 7923,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "expected_downtime_s": 252, "latest_cross_layout": True, "cross_layout_allowed": True,
+            "offers": [{"version": "R4.10Build25735", "build": 25735, "expected_downtime_s": 252, "cross_layout": True},
+                       {"version": "R4.10Build23980", "build": 23980, "expected_downtime_s": 251, "cross_layout": True}]}
+    idle = {"journal": "none", "session_running": False, "check_running": False, "flash_available": True}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    pressed, downloading, accepted, closing, ended = run_editor([
+        {**base, "update": {**SET_UPDATE, "gnss": gnss}, "flash": idle, "choose": 23980, "press": "Update receiver"},
+        {**base, "update": {**SET_UPDATE, "gnss": gnss, "state": "downloading_gnss", "progress_pct": 16,
+                            "gnss_job_active": True}, "flash": idle},
+        {**base, "update": {**SET_UPDATE, "gnss": {**gnss, "blocked": "receiver_not_streaming"}, "gnss_job_active": False},
+         "flash": {**idle, "session_running": True}},
+        {**base, "update": {**SET_UPDATE, "gnss": {**gnss, "blocked": "journal_open"}, "gnss_job_active": False},
+         "flash": {**idle, "journal": "running"}},
+        {**base, "update": {**SET_UPDATE, "gnss": {**gnss, "blocked": "receiver_not_streaming"}, "gnss_job_active": False},
+         "flash": idle}])
+    label = "Receiver firmware to install"
+    assert pressed["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": True}]]
+    for r in (pressed["pressed"], downloading, accepted, closing):
+        assert ["Receiver R4.10Build7923", ""] in r["settings"]   # not what is available while one installs
+        assert [name for name, _ in r["selects"]] == [] and "Update receiver" not in r["buttons"]
+        assert not [t for _, t in r["msgs"] if t.startswith("Not possible right now")], r["msgs"]
+        assert r["lis"] == 2   # the steps
+    # Numbered from the download (the confirmation is the dialog's, no step), a done one ticked: pressed, the download
+    # is the step running; then the receiver's.
+    assert pressed["pressed"]["steps"] == ["1. Download and verify", "2. Install on the receiver"]
+    assert accepted["steps"] == ["1. Download and verify \u2713", "2. Install on the receiver"]
+    # An uploaded package waiting for its confirmation: uploaded and checked, the install not started.
+    staged = {"staged": {"size": 2998352, "sha256": "ab" * 32, "model": "UM980", "layout": 2, "layout_build": 23980,
+                         "expires_in_s": 900},
+              "receiver": {"model": "UM980", "firmware": "R4.10Build7923", "build": 7923}, "flash_available": True}
+    (up,) = run_editor([{**base, "update": {**SET_UPDATE, "gnss": gnss}, "flash": idle, "staged": staged}])
+    assert "Uploaded package" in up["subs"] and up["steps"] == ["1. Upload and check \u2713", "2. Install on the receiver"]
+    css = (UI_JS.parent / "app.css").read_text()
+    assert "* + .steps { margin-top: 0.75rem; }" in css   # space between the row and its steps
+    # Not running (a page opened after it, the receiver not streaming yet): what is available, the list and the button,
+    # and why it waits.
+    assert ["Receiver R4.10Build7923", "2 newer builds are available."] in ended["settings"]
+    assert [name for name, _ in ended["selects"]] == [label] and "Update receiver" in ended["buttons"]
+    assert "Not possible right now: the receiver is not streaming." in [t for _, t in ended["msgs"]]
+
+
+def test_a_select_as_wide_as_its_options_shows_them_whole():
+    """A select sized to its options (width: auto: the receiver build list, the Events filter) drops the text-indent
+    every select has: WebKit leaves the indent out of that width, so the longest option lost its last letters."""
+    css = re.sub(r"/\*.*?\*/", "", (UI_JS.parent / "app.css").read_text(), flags=re.S)
+    auto = [(sel.strip(), decl) for sel, decl in re.findall(r"([^{}]*)\{([^{}]*)\}", css)
+            if "select" in sel and re.search(r"(^|;)\s*width:\s*auto\s*(;|$)", decl.strip())]
+    assert {sel for sel, _ in auto} >= {".form-actions.pick > select", ".tools select"}
+    for sel, decl in auto:
+        assert re.search(r"(^|;)\s*text-indent:\s*0\s*(;|$)", decl.strip()), sel
+
+
+def test_receiver_update_list_refuses_only_the_build_this_app_cannot_install():
+    """Settings, Updates: in the list of offered receiver builds, one with another partition layout that this app cannot
+    install shows why instead of Update receiver while it is chosen; choosing a build it can install brings the button
+    back, and the request carries no layout acknowledgement."""
+    gnss = {**SET_UPDATE["gnss"], "model": "UM980", "running": "R4.10Build11833", "running_build": 11833,
+            "latest": "R4.10Build25735", "latest_build": 25735, "available": True, "flash_available": True,
+            "expected_downtime_s": 252, "latest_cross_layout": True, "cross_layout_allowed": False,
+            "offers": [{"version": "R4.10Build25735", "build": 25735, "expected_downtime_s": 252, "cross_layout": True},
+                       {"version": "R4.10Build23980", "build": 23980, "expected_downtime_s": 251, "cross_layout": False}]}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": {**SET_UPDATE, "gnss": gnss}}
+    r, = run_editor([{**base, "choose": 23980, "press": "Update receiver"}])
+    refused = "This build changes the receiver's partition layout, which this app version cannot install."
+    assert "Update receiver" not in r["buttons"] and refused in [t for _, t in r["msgs"]]
+    assert "Update receiver" in r["chosen"]["buttons"] and refused not in [t for _, t in r["chosen"]["msgs"]]
+    assert r["posts"] == [["/api/update/gnss", {"build": 23980, "cross_layout_ack": False}]]
+
+
 def test_new_app_first_checks_can_be_finished_early():
     """Settings, Updates: while a new app version's first checks hold receiver updates back, "Finish checks now"
     (beside the app line and the receiver's "Not possible right now") asks, then ends them; never "trial" in the text.
@@ -3762,6 +3884,23 @@ def test_last_receiver_update_message_can_be_dismissed():
     said = [t for _, t in shown["msgs"]]
     assert "Updated: the receiver runs R4.10Build11833.×" in said
     assert not any(t.startswith("Updated:") for _, t in shown["after"]["msgs"])
+
+
+def test_last_receiver_update_says_how_the_profile_came_back():
+    """Settings, Updates: after an update, the profile checked says nothing more; not back, check the Receiver page;
+    applied again without corrections to check it against (no antenna: reapply_ok null), that it is checked once they
+    flow and to check the antenna, never that it did not come back."""
+    base = {"outcome": "success", "failed_rule": 0, "cross_layout": True, "check_only": False,
+            "firmware": "R4.10Build23980M", "build": 23980, "reason": "updated", "ended_unix": 1792678804, "ended_age_s": 4}
+    views = run_editor([{"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI, "update": SET_UPDATE,
+                         "flash": {"journal": "none", "flash_available": True, "actions": {}, "last": {**base, "reapply_ok": v}}}
+                        for v in (True, False, None)])
+    said = [[t for _, t in r["msgs"] if t.startswith("Updated:")] for r in views]
+    assert said[0] == ["Updated: the receiver runs R4.10Build23980M.\u00d7"]
+    assert said[1] == ["Updated: the receiver runs R4.10Build23980M. The station profile did not come back; check the "
+                       "Receiver page.\u00d7"]
+    assert said[2] == ["Updated: the receiver runs R4.10Build23980M. Its station settings are applied again and get "
+                       "checked once corrections flow; none arrive yet, so check that the antenna is connected.\u00d7"]
 
 
 def test_onocoy_statistics_are_an_explicit_opt_in():

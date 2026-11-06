@@ -3698,6 +3698,92 @@ TEST_CASE("station core: a failed re-apply after an update closes the journal wi
     TEST_ASSERT_TRUE(w.s.alerts & STN_ALERT_CONFIG_FAILED);
 }
 
+/* Run until the journal closes or max_s seconds pass; *secs: the seconds run. The station's questions and the
+ * position monitor's requests go unanswered; any other job fails the test. */
+static bool until_flash_close(sim_t *w, int max_s, stn_note_t *n, int *secs)
+{
+    for (*secs = 0; *secs < max_s;) {
+        sim_tick(w);
+        (*secs)++;
+        stn_job_t j = sim_next(w);
+        if (j.kind == STN_JOB_ASK || j.kind == STN_JOB_OWN_FIX) {
+            sim_done(w, &(stn_result_t){ .err = STN_E_TIMEOUT });
+        } else if (j.kind != STN_JOB_NONE) {
+            TEST_FAIL_MESSAGE("a job other than a question while the journal waits for its check");
+        }
+        if (has_note(w, STN_NOTE_FLASH_CLOSE, n)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* An update that ends with the application answering, its re-apply done. */
+static void updated_and_reapplied(sim_t *w, bool rtcm)
+{
+    sim_init(w, false);
+    boot_applied(w);
+    TEST_ASSERT_EQUAL(STN_OK, stn_request_flash(&w->s, STN_FLASH_NEW));
+    TEST_ASSERT_EQUAL(STN_JOB_FLASH, sim_next(w).kind);
+    stn_result_t r = flash_end(STN_FLASH_END_REAPPLY, true);
+    sim_done(w, &r);
+    w->rtcm_on = rtcm;
+    stn_job_t j = sim_next(w);
+    TEST_ASSERT_EQUAL(STN_JOB_APPLY, j.kind);
+    TEST_ASSERT_EQUAL(STN_WHY_FLASH, j.why);
+    sim_done(w, &(stn_result_t){ .err = STN_OK });
+}
+
+TEST_CASE("station core: a receiver restart just after an update's re-apply moves its check, which still closes", "[station]")
+{
+    sim_t w;
+    updated_and_reapplied(&w, true);
+    /* 7 s after the re-apply the receiver restarts once more (a UM980 just updated, 2026-11-06). */
+    stn_note_t n;
+    int secs = 0;
+    TEST_ASSERT_FALSE(until_flash_close(&w, 7, &n, &secs));
+    stn_restart_seen(&w.s);
+    stn_job_t j = sim_next(&w);
+    TEST_ASSERT_EQUAL(STN_JOB_IDENTIFY, j.kind);
+    TEST_ASSERT_TRUE(j.after_restart);
+    identity_done(&w, true, true);
+    /* The check STN_RESTART_CHECK_MS after the restart is still the re-apply's: its window closes the journal, not
+     * STN_FLASH_CLOSE_MAX_MS. */
+    TEST_ASSERT_TRUE(until_flash_close(&w, 120, &n, &secs));
+    TEST_ASSERT_EQUAL_INT32(STN_FLASH_CLOSE_OK, n.a);
+    TEST_ASSERT_TRUE(secs >= 60 && secs <= 62);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_RECEIVER_ATTENTION);
+    TEST_ASSERT_TRUE(w.s.profile_applied);
+}
+
+TEST_CASE("station core: an update's check waits for RTCM up to 120 s, then closes as not checked", "[station]")
+{
+    /* No antenna: nothing to check the re-applied profile against. Not checked, no attention; the applied check
+     * waits for RTCM and runs once it flows. */
+    sim_t w;
+    updated_and_reapplied(&w, false);
+    stn_note_t n;
+    int secs = 0;
+    TEST_ASSERT_TRUE(until_flash_close(&w, 300, &n, &secs));
+    TEST_ASSERT_EQUAL_INT32(STN_FLASH_CLOSE_UNCHECKED, n.a);
+    TEST_ASSERT_TRUE(secs >= 120 && secs <= 124);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_RECEIVER_ATTENTION);
+    TEST_ASSERT_FALSE(w.s.drift_blocked);
+    TEST_ASSERT_TRUE(w.s.check_pending);
+    TEST_ASSERT_FALSE(w.s.profile_applied);
+    w.rtcm_on = true;   /* the antenna connected */
+    TEST_ASSERT_EQUAL(STN_JOB_NONE, sim_until_job_asked(&w, 70, NULL).kind);
+    TEST_ASSERT_TRUE(w.s.profile_applied);
+
+    /* RTCM from 45 s on (a receiver slow to track after its update): the check waits for it and passes. */
+    updated_and_reapplied(&w, false);
+    TEST_ASSERT_FALSE(until_flash_close(&w, 45, &n, &secs));
+    w.rtcm_on = true;
+    TEST_ASSERT_TRUE(until_flash_close(&w, 120, &n, &secs));
+    TEST_ASSERT_EQUAL_INT32(STN_FLASH_CLOSE_OK, n.a);
+    TEST_ASSERT_FALSE(w.s.alerts & STN_ALERT_RECEIVER_ATTENTION);
+}
+
 TEST_CASE("station core: a session waiting for the user, then the user's retry and restart", "[station]")
 {
     sim_t w;
