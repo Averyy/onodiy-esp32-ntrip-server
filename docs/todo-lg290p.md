@@ -31,6 +31,22 @@ photos:
 Not known: whether the receiver's UART1 is wired to the ESP32 on the board or the
 UART3 cable is the only link, and whether the ESP32 can drive the receiver's RESET_N.
 
+Clues, both pointing the same way:
+
+- Our UM982 board ([photo](images/board.png)) has the same layout: receiver at the
+  top with a 6-pin connector beside it, a USB-C for the receiver's second port, a
+  USB-C for the ESP32, BOT and RST buttons, and the same two pin-header rows. On it the
+  receiver's COM1 is on GPIO1 (ESP32 RX) and GPIO2 (TX); our board table has no
+  receiver reset pin for it (`components/board/board_table.c`).
+- The manual of Mozihao's ESP32-S3 + LC29H board, as quoted on the
+  [Quectel forum](https://forums.quectel.com/t/mozihao-esp32-s3-lc29hx-all-in-one-schematic-1pps-reset-to-esp32/61236)
+  (2026-09), also puts the receiver on GPIO1 (ESP32 RX) and GPIO2 (TX); the same
+  thread asks whether reset reaches the ESP32 and gets no answer.
+
+So the likely wiring is the receiver's UART1 on GPIO1/GPIO2, still to be confirmed.
+Mozihao also sells the board on Taobao (shop 合肥墨子号物联网硬件) and has a video of
+it ("EPS32S3-RTK LG290P", bilibili BV1HLMy6JEwB).
+
 A different design, the
 [7Semi LG290P RTK with ESP32-S3](https://7semi.com/7semi-lg290p-rtk-with-esp32-s3-development-module/)
 (US$187), prints its wiring on the back: receiver UART2 to IO12/IO13 and RESET to IO14.
@@ -90,10 +106,11 @@ v1.1 and the R02A02S release notes (inside the
 - **MSM.** `PQTMCFGRTCM` sets one MSM level (3 to 7) for every constellation, an
   elevation threshold and the ephemeris mode. MSM rates use per-constellation names
   (`RTCM3-107X` … `RTCM3-113X`) and share one rate. There is no SBAS MSM.
-- **Other messages.** `RTCM3-1005`, `-1006`, `-1033` (added in R01A04S), `-1230`
-  (added in R02A01S, changed to the standard format in R02A02S) and ephemeris `-1019`,
-  `-1020`, `-1041`, `-1042`, `-1044`, `-1046`, set with `PQTMCFGMSGRATE`. There is no
-  1045.
+- **Other messages.** `RTCM3-1005`, `-1006`, `-1033` (added in R01A04S, on by default
+  in base mode), `-1230` (added in R02A01S, changed to the standard format in R02A02S;
+  its default is not documented) and ephemeris `-1019`, `-1020`, `-1041`, `-1042`,
+  `-1044`, `-1046`, set with `PQTMCFGMSGRATE`. There is no 1045. In base mode the fix
+  rate is fixed at 1 Hz, so a rate of N means every N seconds.
 - **1033 and IDs.** `PQTMCFGANTINF` fills the antenna fields of 1033;
   `PQTMCFGRSID` sets the station ID (0 to 4095).
 - **Movement.** `PQTMENV` (added in R01A06S) reports `MovedFlag` (moved since or
@@ -102,7 +119,13 @@ v1.1 and the R02A02S release notes (inside the
 - **Replies.** `$PQTMxxx,OK[,…]`, or `$PQTMxxx,ERROR,<code>` with 1 invalid
   parameters, 2 failed, 3 unsupported. Standard NMEA XOR checksums. The module prints
   `$PQTMVER` at every start.
-- **Saving.** Settings need `PQTMSAVEPAR` and a restart to take effect.
+- **Saving.** Settings need `PQTMSAVEPAR` and a restart to take effect. No duration is
+  documented for the save or the restart; the module prints `$PQTMVER` first at every
+  start.
+- **Read-back.** Every setting we use has an `R` form whose reply repeats the values.
+  `PQTMCFGMSGRATE` reads one message at a time.
+- **Baud.** UART1 to UART3 take 9600, 115200, 230400, 460800 and 921600 baud; 460800 is
+  the default. When a `PQTMCFGUART` change takes effect is not documented.
 
 Reported:
 
@@ -116,18 +139,55 @@ Reported:
   `PQTMRESTOREPAR`, `PQTMGNSSSTOP`, rates, `PQTMCFGRTCM` last, save, restart
   ([forum](https://forums.quectel.com/t/lg290p-03-pqtmcfgrtcm-msm-type-7-accepted-but-rtcm-output-stays-msm4-1074-1084-enabling-rtcm3-107x-resets-msm-type-to-4/59370),
   2026, R02A01S). `RTCM3-1077`-style names return `ERROR,1`.
-- Survey-in can stall for hours ([rtkbase PR #557](https://github.com/Stefal/rtkbase/pull/557)).
+- Survey-in can stall for hours ([rtkbase PR #557](https://github.com/Stefal/rtkbase/pull/557),
+  R01A06S, with a 1.2 m accuracy limit). Every stall report found used an accuracy
+  limit or old firmware. With no limit (`PQTMCFGSVIN,W,1,60,0,0,0,0`) a survey finished
+  on R02A01S: Valid 2, mean accuracy 0.19 m
+  ([satpulse](https://github.com/jclark/satpulse) capture `survey.jsonl`, 2026-09).
+- No independent position in fixed mode. In the same captures `PQTMPVT` and RMC follow
+  the live position during survey-in, then freeze at the surveyed point once it is
+  valid. In fixed mode GGA reports quality 7 with the held position
+  ([forum](https://forums.quectel.com/t/lg290p-03-pqtmcfgrtcm-msm-type-7-accepted-but-rtcm-output-stays-msm4-1074-1084-enabling-rtcm3-107x-resets-msm-type-to-4/59370),
+  R02A01S). `PQTMENV` is the only lead for movement, and no capture with a non-zero
+  `PosDiff` has been published.
+- On R02A01S, base mode sent 1005, 1033 and MSM4 for all six constellations, and no
+  1230, by default (satpulse). Switching to base mode puts the MSM level back to 4;
+  MSM7 set after the switch, then saved and restarted, gave 1077, 1087, 1097, 1127
+  (satpulse `quectel-config.md`).
+- The MSM level can read back as 7 while MSM4 is on the wire (forum thread above), so
+  the read-back alone proves nothing.
+- `PQTMGNSSSTOP` and `PQTMGNSSSTART` can hang the receiver; a hung LG290P needs a power
+  cycle, and a reset command does not bring it back. Echoing the receiver's own output
+  back into it made it swallow later commands (satpulse `quectel-config.md`, R02A01S).
+- Message rate changes take effect at once; the MSM level, the ephemeris mode, the fix
+  rate and the mode change need a save and restart. `PQTMCLRMSG` turns off every
+  output on the port (satpulse).
+- In default mode RTCM works too: MSM for all six constellations, 1005, 1033 and 1230
+  at the fix rate, MSM7 after a save and restart (satpulse).
+- The LG290P rejects `PQTMANTENNASTATUS` (the spec lists it for other modules), so
+  there is no antenna status (satpulse).
+- On R01A04S, `PQTMCFGRTCM` refused an elevation of `-90.0` and took `-90`
+  ([forum](https://forums.quectel.com/t/latest-firmware-for-lg290p/58183)).
 
 ## Receiver firmware updates
 
-Quectel publishes the protocol: the
-[LG290P(03) Firmware Upgrade Guide](https://docs.sparkfun.com/SparkFun_RTK_Postcard/assets/component_documentation/Quectel_LG290P%2803%29_Firmware_Upgrade_Guide_V1.0.pdf)
-V1.0.
+Quectel publishes the protocol: the LG290P(03)&LGx80P(03) Firmware Upgrade Guide
+[V1.1](https://raw.githubusercontent.com/sparkfun/SparkFun_GNSS_LG580P/main/docs/assets/component_documentation/quectel_lg290p03lgx80p03_firmware_upgrade_guide_v1-1.pdf)
+(2025-07-22; [V1.0](https://docs.sparkfun.com/SparkFun_RTK_Postcard/assets/component_documentation/Quectel_LG290P%2803%29_Firmware_Upgrade_Guide_V1.0.pdf)
+2024-07-15).
 
-- **Entry.** At power-up the boot loader listens for 500 ms for a sync word, sent every
-  20 ms, at 460800 baud.
-- **Transfer.** Framed packets with a CRC32: firmware info, erase, 4 KB data blocks,
-  reset.
+- **Entry.** "Within 500 ms from power up" the boot loader answers a sync word, sent
+  every 20 ms, at 460800 baud. UART1, UART2 and UART3 all support the upgrade. The guide
+  does not say whether a RESET_N pulse or `PQTMSRR` opens the window again; for its PC
+  tool it asks for a manual reset.
+- **Transfer.** Framed packets with a CRC32: firmware info, erase (up to 15 s), 4 KB
+  data blocks (500 ms per reply), up to 40 s for the check after the last block (V1.0
+  said 15 s), reset. V1.1's example data frame has the length `0x1004`.
+- **RESET_N** ([Hardware Design](https://docs.sparkfun.com/SparkFun_LG290P_Quadband_GNSS_RTK_Breakout/assets/component_documentation/quectel_lg290p03_hardware_design_v1-1.pdf)
+  V1.1, 2024-12-30): module pin 8, active low, internal 20 kΩ pull-up (no external
+  pull-up allowed), held low for at least 100 ms, driven open-collector. Quectel asks
+  board makers to bring it out so a stuck module can be reset. The time from release
+  to a working UART is not given.
 - **Interruption.** If the process fails or stops, no backup firmware runs; the fix is
   to reset and upgrade again.
 - **Packages.** One `.pkg` of about 2.7 MB per version, with release notes. The newest
@@ -206,23 +266,30 @@ each stage names the ones it waits for.
 Before any firmware, with a serial terminal on the receiver's USB-C ("LG290P UART2")
 and a small `uv run` bench script:
 
-1. Board: read the ESP32 module marking; trace receiver UART1 and UART3 and the
-   receiver's RESET_N (from its RST button) to ESP32 GPIOs; find which USB-C is which;
-   try a USB-C-to-C cable.
+1. Board: read the ESP32 module marking; check that receiver UART1 reaches GPIO1/GPIO2
+   (the likely wiring), trace UART3 and the receiver's RESET_N (from its RST button)
+   to ESP32 GPIOs; find which USB-C is which; try a USB-C-to-C cable.
 2. Receiver as delivered: `$PQTMVERNO`, `PQTMCFGUART,R,<1..3>`, `PQTMCFGRCVRMODE,R`,
    and a minute of output per port.
 3. Bring the receiver to R02A02S with Quectel's QGNSS on a PC; time each phase. Then,
-   from the bench script on the ESP32's UART: does `PQTMSRR` reach the boot loader,
-   and does it answer on that UART?
-4. Base mode: restore, base mode, save, restart; then rates, `PQTMCFGRTCM` last, save,
-   restart. Check the message numbers with `tools/bench/rtcm_inspect.py` (1077, not
-   1074), and the default rates of 1005, 1033 and 1230.
+   from the bench script on the ESP32's UART: does `PQTMSRR` (and RESET_N, if wired)
+   open the boot loader's 500 ms window?
+4. Base mode: base mode, save, restart; then rates, `PQTMCFGRTCM` last, save, restart,
+   without `PQTMGNSSSTOP`. Check the message numbers with
+   `tools/bench/rtcm_inspect.py` (1077, not 1074), and the default rates of 1005, 1033
+   and 1230. Time `PQTMSAVEPAR` and `PQTMSRR` until `$PQTMVER`.
 5. Fixed position with `PQTMENV` at 1 Hz: move the antenna 0.5, 1, 2 and 5 m and
    record `MovedFlag`, `MovingFlag` and `PosDiff` (to find its unit); log GGA,
    `PQTMEPE` and `PQTMPVT`.
-6. Survey-in: does it finish, and how fast; does it stall?
-7. `PQTMCFGUART`: when does the receiver switch baud?
-8. Default mode with MSM7, for the fallback: does MSM7 come out?
+6. Survey-in with no accuracy limit for 600 s: does it finish, and how good is the
+   mean?
+7. `PQTMCFGUART`: when does the receiver switch baud? Only needed if we ever leave
+   460800.
+8. Default mode with MSM7, for the fallback: does MSM7 come out, and what position
+   does its 1005 carry?
+9. If the ESP32 can't drive RESET_N: the time from power-on to the ESP32's first UART
+   write, to see whether it can catch the boot loader's 500 ms window after a power
+   cycle.
 
 ### Stage 1: a receiver layer (no LG290P code yet)
 
@@ -256,15 +323,21 @@ and a small `uv run` bench script:
 - Apply, in two phases:
   - A (first setup or an explicit restore): `PQTMRESTOREPAR`, `PQTMCFGRCVRMODE,W,2`,
     `PQTMSAVEPAR`, `PQTMSRR`, identify again.
-  - B: `PQTMCFGSVIN` (fixed position or survey), `PQTMCFGRSID`, `PQTMCFGANTINF` (the
-    antenna name, into 1033), GSV and status outputs, RTCM rates, `PQTMCFGRTCM` last,
-    `PQTMSAVEPAR`, `PQTMSRR`, then read everything back. One repeat of phase B on a
-    mismatch, then fail without recording the profile as applied.
+  - B: `PQTMCLRMSG` (all outputs off on our port), `PQTMCFGSVIN` (fixed position or
+    survey), `PQTMCFGRSID`, `PQTMCFGANTINF` (the antenna name, into 1033), GSV and
+    status outputs, RTCM rates, `PQTMCFGRTCM` last (elevation written `-90`, not
+    `-90.0`), `PQTMSAVEPAR`, `PQTMSRR`, then read everything back. One repeat of phase
+    B on a mismatch, then fail without recording the profile as applied.
+- Never `PQTMGNSSSTOP` or `PQTMGNSSSTART` in normal setup: they are reported to hang
+  the receiver until a power cycle.
+- The receiver stays at its default 460800 baud; the station never sends
+  `PQTMCFGUART`. A receiver found at another baud by the scan is used at that baud.
+- The link never echoes the receiver's output back to it.
 - Deadlines, to be tuned on the bench: 3 s quiet after a restart, 3 s per reply, 5 s
   for a save, at most 3 attempts, 20 s for the receiver to come back. `PQTMSRR` has
   no documented reply, so a restart is confirmed by `$PQTMVER` or a `$PQTMVERNO`
   answer within the window. A reset is never sent twice blindly.
-- Waits for questions 4, 6, 7 and 10.
+- Waits for questions 4, 6 and 10.
 
 ### Stage 3: profile and settings
 
@@ -313,9 +386,11 @@ and a small `uv run` bench script:
 - The recovery ladder (`health_ladder.c`) keeps its order and the Unicore timings.
   The LG290P feeds it reply ages and restart evidence; its uptime is unknown, never
   guessed.
-- LG290P reset: `PQTMSRR`, then identify and apply again; RESET_N once its GPIO,
-  polarity and pulse are known (question 2). No recovery while an update owns the
-  link.
+- LG290P reset: `PQTMSRR`, then identify and apply again. RESET_N if the board wires
+  it to the ESP32 (question 2): low for at least 100 ms, open-collector, per the
+  hardware design. A hung receiver is reported not to answer `PQTMSRR`; without
+  RESET_N the station can only report it and ask for a power cycle. No recovery while
+  an update owns the link.
 - Waits for questions 2 and 21.
 
 ### Stage 7: board and install image
@@ -345,14 +420,15 @@ and a small `uv run` bench script:
 - New component (`lg_proto.c`, `lg_session.c`, `lg_pkg.c`), separate from
   `um98x_flash`. It shares `pkg_store`, the RAW lease from `gnss_link`, the station's
   update lockouts and the update rows in the web UI.
-- Steps: check the package, record the job, `PQTMGNSSSTOP`, reset (RESET_N; `PQTMSRR`
-  only if the bench shows it works), sync, firmware info, erase, 4 KB blocks, reset
+- Steps: check the package, record the job, reset (RESET_N; `PQTMSRR` only if the
+  bench shows it opens the window), sync, firmware info, erase, 4 KB blocks, reset
   message, then `$PQTMVERNO`. The running version must equal the package's, or it is
-  not a success. Then apply the whole profile again.
+  not a success. Then apply the whole profile again. No `PQTMGNSSSTOP` first: it is
+  reported to hang the receiver, and a hung receiver ignores `PQTMSRR`.
 - Frames: 4 KB of firmware with the payload length counting the sequence number
-  (`0x1004`), the last frame shorter (question 24).
-- Deadlines from the guide: 500 ms per reply, 15 s for the erase and for the check
-  after the last block. A block is resent, unchanged, only after an error reply, a
+  (`0x1004`, as in the V1.1 guide's example), the last frame shorter.
+- Deadlines from the V1.1 guide: 500 ms per reply, 15 s for the erase, 40 s for the
+  check after the last block. A block is resent, unchanged, only after an error reply, a
   few times at most. After no reply the whole attempt starts again rather than
   resending a block.
 - On the bench: send one block twice on purpose and confirm the receiver's check after
@@ -411,10 +487,11 @@ and a small `uv run` bench script:
 The board (needs one in hand or the schematic):
 
 1. Is the receiver's UART1 (or any UART) wired to the ESP32 on the PCB, and on which
-   GPIOs? Or is the UART3 cable the only link?
+   GPIOs? Or is the UART3 cable the only link? Likely UART1 on GPIO1/GPIO2 (see The
+   board).
 2. Can the ESP32 drive the receiver's RESET_N? Without it, a failed update can only be
    recovered by power-cycling the board or pressing the receiver's RST button, and the
-   ESP32 would have to catch the 500 ms window.
+   ESP32 would have to catch the 500 ms window. No clue either way yet.
 3. ESP32 module marking (N16R8?), which USB-C goes to which bridge or to the native
    USB, and whether USB-C-to-C cables work (our UM982 board has no CC resistors).
 4. Receiver firmware version as delivered, and its settings (mode, baud, messages).
@@ -422,23 +499,27 @@ The board (needs one in hand or the schematic):
 The receiver (bench tests):
 
 5. In fixed-base mode, does `PQTMENV` come out at 1 Hz? What unit is `PosDiff`, and
-   do `MovedFlag` and `PosDiff` respond to moving the antenna by 0.5 to 5 m? Are GGA,
-   `PQTMEPE`, `PQTMPVT` empty or populated?
+   do `MovedFlag` and `PosDiff` respond to moving the antenna by 0.5 to 5 m? Captures
+   so far show no independent position in fixed mode (see Base mode), so `PQTMENV` is
+   the only lead.
 6. Does MSM7 stay after the reported order (rates, then `PQTMCFGRTCM` last, save,
-   restart), in base mode and in default mode? Check the message numbers on the wire
-   (1077, not 1074). Are 1033 and 1230 on by default after switching to base mode,
-   and at what rate?
+   restart) on R02A02S, without `PQTMGNSSSTOP`? Check the message numbers on the wire
+   (1077, not 1074). 1033 is on by default in base mode (release notes); is 1230, and
+   at what rate? Reported on R02A01S: MSM7 sticks when set after the mode switch,
+   1230 is off by default.
 7. After `PQTMCFGUART`, does the link change baud at once or after save and restart?
-8. Does `PQTMSRR` reliably enter the boot loader on the delivered firmware, does the
-   boot loader answer on the UART the ESP32 uses (UART3, if the cable is the only
-   link), and how long does each update phase take over the ESP32-S3 UART?
+   Only matters if we ever leave 460800; the plan doesn't.
+8. Does `PQTMSRR` (or RESET_N) open the boot loader's 500 ms window on the delivered
+   firmware, and how long does each update phase take over the ESP32-S3 UART? All
+   three receiver UARTs support updates (guide V1.1).
 
 Questions 9 to 14, about how another product drives the LG290P, were answered from
 that product's integration; the details stay outside this repository. What they mean
 for this port, all still to be confirmed on the bench:
 
 9. **Updates.** Plan on a hardware reset: hold RESET_N low, release it and start
-   sending the sync word at once, with `PQTMGNSSSTOP` before. This makes board
+   sending the sync word at once. (`PQTMGNSSSTOP` was sent first there; we leave it
+   out, as it is reported to hang the receiver.) This makes board
    question 2 decide whether receiver updates are possible on this board. After a
    failed update, put the UART baud and the line parser back.
 10. **Configuring.** Allow about 3 s after a reset before the first command. Writes
@@ -448,7 +529,8 @@ for this port, all still to be confirmed on the bench:
     limit, no ephemeris) is sent in default mode, but before the MSM rates, the order
     users report puts back to MSM4, and the output is never checked. So it does not
     show that MSM7 works in default mode; question 6 covers it. Nothing shows whether
-    1230 or ephemeris work.
+    1230 or ephemeris work. (Public captures since show MSM7, 1005, 1033 and 1230 in
+    default mode after a save and restart; see Base mode.)
 12. **Movement.** No use of `PQTMENV`, `PQTMEPE` or `PQTMPVT` was found, so question 5
     stays a bench test.
 13. **Baud.** 460800 is kept as the working rate. When the receiver switches after
@@ -480,14 +562,15 @@ Questions 17 to 23 were answered the same way:
     signals, SBAS and masks stay at their defaults. It has no base mode or survey-in, so every
     base-mode step in this file is still ours to prove on the bench.
 23. **Status.** Only GGA fix quality and RMC are read; other `$PQTM…` lines are passed
-    through unread. Antenna and jamming status, `PQTMENV` and the PPS and EVENT pins
-    have no example to follow: work from the specification and bench captures.
+    through unread. Jamming status, `PQTMENV` and the PPS and EVENT pins have no
+    example to follow: work from the specification and bench captures. The LG290P
+    rejects `PQTMANTENNASTATUS`, so there is no antenna status to show.
 
 Questions 24 and 25 came up while planning the updater and were answered the same way:
 
 24. **Data frame length.** The payload length counts the 4-byte sequence number, so a
-    full 4 KB frame says `0x1004`; the guide's example showing `0x1000` is the
-    inconsistent part. Frames of 5 KB (`0x1404`) were also accepted, so the receiver
+    full 4 KB frame says `0x1004`; the V1.0 guide's example showing `0x1000` is the
+    inconsistent part, and the V1.1 guide's example shows `0x1004`. Frames of 5 KB (`0x1404`) were also accepted, so the receiver
     reads the length field rather than assuming 4 KB. We send 4 KB frames as the guide
     says.
 25. **Resending a block.** An identical frame (same sequence number, data and CRC) is
@@ -498,6 +581,7 @@ Questions 24 and 25 came up while planning the updater and were answered the sam
 
 For Quectel or the seller:
 
-15. The board's schematic.
+15. The board's schematic or manual: ask Mozihao (its AliExpress store or the Taobao
+    shop), since its ESP32-S3 + LC29H board's manual has a GPIO table.
 16. Publishing LG290P packages: decided 2026-11-07, we publish them as SparkFun does.
     They go into `firmware/release-packages.txt` once the station supports the LG290P.
