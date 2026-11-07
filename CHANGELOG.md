@@ -4,24 +4,23 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.14
 
 - Position: a confirmed antenna move no longer stops the RTCM. Onocoy, the other
   servers and local rovers keep receiving it while the station surveys and checks
   the new location; only the two receiver applies pause the casters, about 4 s each
-  on a UM980, as for any apply. Before, every output got nothing for about 11 minutes.
+  on a UM980. Before, every output got nothing for about 11 minutes.
 - Position: movement is judged on the median of the last 20 minutes of the
-  receiver's own fixes (at least 40): moved when it is more than both 3 m and three
-  times their reported deviation from the reference (about 3.6 m with a typical
-  1.2 m), and three quarters of the fixes agree on the new place. One noisy fix no longer restarts the check, so a
-  real move confirms in about 20 minutes instead of possibly hours, and a new
-  reference gets a full window before it can be judged.
-- Position: a relocation also ends when the new reference's 1005 does not match it
-  (the position mismatch warning stays) or none comes to compare within 5 minutes.
-  Before, it stayed pending until a restart, which then surveyed once more. A
-  receiver restart after the new reference is locked no longer surveys again; a
-  position the user sets during a relocation becomes its new reference; turning
-  automatic setup off drops a relocation.
+  receiver's own fixes: moved when that is more than both 3 m and three times their
+  reported deviation from the position (about 3.6 m with a typical 1.2 m), and three
+  quarters of the fixes agree on the new place. One noisy fix no longer restarts the
+  check, so a real move confirms in about 20 minutes instead of possibly hours, and a
+  newly locked position gets 15 minutes of fixes before it is judged.
+- Position: a relocation ends once its new position has been compared with the
+  receiver's 1005, matched or not (a mismatch keeps its warning), or after 5 minutes
+  without a 1005 to compare. Before, it stayed pending until a restart, which then
+  surveyed once more. A position set by hand during a relocation becomes its new
+  position; turning automatic setup off drops the relocation.
 - Dialogs: in Safari, confirming one (Install app, Update receiver) no longer
   scrolls the page down as it closes.
 - Docs: the README lists a DIY build, an ESP32-S3 N16R8 dev board wired to a
