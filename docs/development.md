@@ -5,6 +5,7 @@ Back to the [README](../README.md).
 
 Network latency work and validation: [firmware latency TODO](todo-network-latency.md).
 Shipped-feature findings and follow-ups: [review TODO](todo-shipped-feature-review.md).
+A possible Quectel LG290P board: [LG290P TODO](todo-lg290p.md).
 
 ## Building
 
