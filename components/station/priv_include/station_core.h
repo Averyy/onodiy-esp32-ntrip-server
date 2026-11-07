@@ -235,10 +235,23 @@
  * the next check runs STN_FIX_RECHECK_MS later with manual setup. Automatic
  * setup instead continues every STN_FIX_PERIOD_MS, also while surveying,
  * and exposes only usable measured positions (never FIXEDPOS echoes).
- * Consistent horizontal displacement beyond both 3 m and four reported
- * standard deviations for five minutes queues STN_CHANGE_RESURVEY. Missing
- * fixes, gaps over 40 s, and inconsistent positions restart observation. The caller holds
- * the RTCM hub and casters while relocating, until CHECK_POSITION succeeds.
+ * Movement: the usable fixes of the last STN_MOVE_WINDOW_MS (at least
+ * STN_MOVE_MIN_SAMPLES over STN_MOVE_MIN_SPAN_MS) are kept as east/north
+ * offsets from the reference; when their median position is farther than
+ * both 3 m and three times their median reported horizontal deviation (the
+ * upper middle one for an even count), and at least 75 % of them lie within
+ * max(3 m, twice that deviation) of the median (they agree on one new place),
+ * it queues STN_CHANGE_RESURVEY. A single fix neither triggers nor resets it;
+ * fixes that are missing or unusable only leave the window short. A new
+ * reference, a receiver restart, an apply or update, maintenance, manual
+ * setup or a relocation empties it; so does an answer about a reference
+ * replaced while it was asked.
+ * Relocating never holds the RTCM: the casters only wait out the applies,
+ * as for any apply, and the survey streams like one the user starts. The
+ * relocation's reference is any fixed position applied after the move but
+ * the one it was found against (reloc_old); its 1005 check ends it, matched
+ * or not. The old one in place with nothing queued owes a survey again;
+ * manual setup drops the relocation.
  * A far verdict, or a fixed
  * height that is the receiver's height above sea level, raises
  * STN_ALERT_FIXED_FAR (the warning alone does not hold streaming), a near one
@@ -300,9 +313,14 @@ extern "C" {
 #define STN_FIX_FIRST_MS       60000         /**< fixed-position check: first query after it was armed (a fix after a restart: under 30 s) */
 #define STN_FIX_PERIOD_MS      20000         /**< ... between the queries of one check */
 #define STN_FIX_TRIES          15            /**< ... queries without a decision before the check gives up */
-#define STN_MOVE_CONFIRM_MS  300000        /**< five minutes of consistent displacement */
-#define STN_MOVE_MAX_GAP_MS   40000         /**< longer gaps restart movement observation */
-#define STN_MOVE_FLOOR_M      3.0           /**< guard against optimistic standalone uncertainty */
+#define STN_MOVE_WINDOW_MS     1200000       /**< movement: the median of the usable fixes of the last 20 minutes decides */
+#define STN_MOVE_MIN_SAMPLES   40            /**< ... at least this many in the window (a fix about every 21 s on a UM980 gives 57: 30 % may be lost) */
+#define STN_MOVE_MIN_SPAN_MS   900000        /**< ... spanning at least 15 minutes */
+#define STN_MOVE_SAMPLES_MAX   64            /**< ... kept (one per STN_FIX_PERIOD_MS fills 60) */
+#define STN_MOVE_FLOOR_M       3.0           /**< ... the median position must be farther than this from the reference */
+#define STN_MOVE_SIGMAS        3.0           /**< ... and farther than this many times the window's median reported deviation */
+#define STN_MOVE_AGREE_PCT     75            /**< ... with at least this share of its fixes near the median position: */
+#define STN_MOVE_AGREE_SIGMAS  2.0           /**< ... within max(STN_MOVE_FLOOR_M, this many median deviations) of it */
 #define STN_FIX_BASEPOS_TRIES  3             /**< ... base-position answers without a usable solution, then the single-point log */
 #define STN_FIX_RECHECK_MS     3600000       /**< ... the next check after one ended */
 #define STN_FIX_BUSY_MS        5000          /**< ... nothing was sent (the command layer was busy) or the other log is asked: again after this */
@@ -600,6 +618,23 @@ typedef struct {
     int32_t b;
 } stn_note_t;
 
+/** How the last relocation ended (stn_t.relocation_end, for the caller's log). */
+typedef enum {
+    STN_RELOC_END_NONE = 0,
+    STN_RELOC_END_CHECKED,     /**< the new reference's 1005 matched */
+    STN_RELOC_END_MISMATCH,    /**< it did not (STN_ALERT_POSITION_MISMATCH stands) */
+    STN_RELOC_END_UNCHECKED,   /**< no 1005 to compare within STN_POS_CHECK_TRIES */
+    STN_RELOC_END_MANUAL,      /**< automatic setup was turned off: no relocation in manual setup */
+} stn_reloc_end_t;
+
+/** One usable fix of the movement window: its offset from the reference and its reported deviation. */
+typedef struct {
+    int32_t east_cm;         /**< never clamped in practice (+-10 000 km): far fixes keep their spread */
+    int32_t north_cm;
+    uint16_t t_s;            /**< station seconds, modulo 65536 (the window holds well under that) */
+    uint16_t sigma_cm;       /**< hypot(sd_lat, sd_lon); a usable fix reports at most about 7 m */
+} stn_move_sample_t;
+
 typedef struct {
     stn_state_t state;
     uint32_t alerts;
@@ -737,12 +772,15 @@ typedef struct {
     bool fix_on;               /**< a fixed profile is checked (armed) */
     bool fix_reference;        /**< fixed reference available (else live GNSS monitoring during survey) */
     bool fix_continuous;       /**< automatic setup: continue measuring and detect relocation */
-    bool relocating;           /**< corrections held until the new survey is locked and its 1005 checked */
-    bool relocation_ready;    /**< new fixed reference applied; only its check may release the hold */
-    uint8_t move_samples;      /**< nonzero while observing a candidate relocation */
-    int64_t move_started_ms;
-    int64_t move_last_ms;
-    um98x_own_fix_t move_anchor; /**< first displaced fix; later fixes must stay near it */
+    bool relocating;           /**< a confirmed move: surveying until the new reference is locked and its 1005 checked */
+    bool relocation_ready;    /**< new fixed reference applied; its check ends the relocation, matched or not */
+    uint8_t relocation_end;    /**< stn_reloc_end_t: how the last one ended */
+    double reloc_ref[3];       /**< the reference the relocation locked (relocation_ready): only its check ends it */
+    double reloc_old[3];       /**< the reference the move was found against: never the relocation's own */
+    bool reloc_old_known;      /**< reloc_old is set (else restored at boot with no fixed profile to take it from) */
+    uint8_t move_n;            /**< usable fixes in move[], oldest first */
+    int64_t move_last_ms;      /**< when the newest was added */
+    stn_move_sample_t move[STN_MOVE_SAMPLES_MAX]; /**< the movement window (STN_MOVE_WINDOW_MS) */
     um98x_own_fix_t own_fix;    /**< latest usable measured position, never a FIXEDPOS echo */
     int64_t own_fix_ms;
     double fix_ref[3];         /**< the fixed position the check and its verdict are about */
@@ -826,6 +864,14 @@ void stn_profile_changed(stn_t *s);
  * without an antenna sends none).
  */
 bool stn_profile_acknowledged(const stn_t *s);
+
+/**
+ * True while the caller holds the RTCM hub and pauses the casters: only for
+ * work that owns the receiver's port (an apply, a flash session, the other
+ * leased jobs). A relocation never holds it: the survey streams, the stream
+ * stays up. The caller must not add anything to it.
+ */
+bool stn_rtcm_held(const stn_t *s);
 
 /** Lock the current position (user). */
 void stn_request_lock(stn_t *s);

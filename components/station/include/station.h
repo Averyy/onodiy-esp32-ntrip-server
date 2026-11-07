@@ -141,13 +141,16 @@
  * that is the receiver's height above sea level instead of its ellipsoidal
  * height (more than 10 m off, within 5 m of the sea-level height:
  * fix_sea_level); within the limits again (40 m, and not that height)
- * clears it. Automatic relocation requires five minutes of consistent horizontal
- * displacement beyond max(3 m, 4 * hypot(sd_lat, sd_lon)), with no gaps over
- * 40 s or unusable fixes. This heuristic cannot guarantee small-move detection.
- * It holds all RTCM
- * consumers until a new survey is locked and its 1005 matches. A persisted
- * relocation flag retains that hold across resets. No relocation in manual
- * setup, receiver maintenance or after a configuration failure.
+ * clears it. Automatic relocation requires the median position of the usable
+ * fixes of the last 20 minutes (at least 40, spanning 15 minutes or more) to
+ * be farther than max(3 m, 3 * their median hypot(sd_lat, sd_lon)) from the
+ * reference, with at least 75 % of them within max(3 m, twice that deviation)
+ * of the median; one fix neither triggers nor resets it. This cannot detect moves
+ * smaller than the standalone solution's own wander. RTCM keeps flowing while
+ * it relocates: the survey streams like one the user starts, and the casters
+ * only wait out the applies. A persisted relocation flag resumes an unfinished
+ * relocation after a reset. No relocation in manual setup, receiver
+ * maintenance or after a configuration failure.
  *
  * Receiver settings read back: every apply session reads the receiver's
  * configuration dump; the station keeps (in RAM, with the time of the

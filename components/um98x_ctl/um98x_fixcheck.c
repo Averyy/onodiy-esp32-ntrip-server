@@ -175,6 +175,8 @@ bool um98x_fix_offset(double fixed_lat_deg, double fixed_lon_deg, double fixed_h
     double north = -sin(lat) * cos(lon) * dx - sin(lat) * sin(lon) * dy + cos(lat) * dz;
     /* Vertical: against the receiver's ellipsoidal height (see the header). */
     out->horizontal_m = sqrt(east * east + north * north);
+    out->east_m = east;
+    out->north_m = north;
     out->up_m = fixed_height_m - (f->msl_height_m + f->separation_m);
     out->distance_m = sqrt(out->horizontal_m * out->horizontal_m + out->up_m * out->up_m);
     out->up_msl_m = fixed_height_m - f->msl_height_m;
@@ -263,7 +265,7 @@ uint8_t um98x_fixchk_feed(um98x_fixchk_t *c, const um98x_fix_offset_t *o)
     if (v == UM98X_FIX_NONE) {
         return UM98X_FIX_NONE;
     }
-    um98x_fix_offset_t m;
+    um98x_fix_offset_t m = {0};   /* east_m, north_m: not medianed (0) */
     m.horizontal_m = median3(c->run[0].horizontal_m, c->run[1].horizontal_m, c->run[2].horizontal_m);
     m.up_m = median3(c->run[0].up_m, c->run[1].up_m, c->run[2].up_m);
     m.distance_m = sqrt(m.horizontal_m * m.horizontal_m + m.up_m * m.up_m);

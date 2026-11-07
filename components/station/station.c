@@ -239,6 +239,7 @@ static volatile bool s_known_profile_gone;     /* the user stored another profil
 static bool s_known_on;
 static uint32_t s_known_alerts;
 static stn_t s_known_core;   /* sync_maintenance's snapshot of the core (station task; too large for its stack) */
+static stn_t s_pub_core;     /* publish_status's snapshot of the core (station task only; too large for its stack) */
 static volatile bool s_factory_reset;    /* the settings were erased for a factory reset: no record from here on */
 /* The first-apply hold for this boot only: due, but it could not be stored
  * (settings unusable, or the write failed). Set at init, with automatic
@@ -2593,28 +2594,28 @@ static void known_now(const stn_t *core, int64_t now, stn_maint_known_t *k)
 
 static void publish_status(const stn_in_t *in)
 {
-    stn_t core;
+    stn_t *const pub = &s_pub_core;
     portENTER_CRITICAL(&s_lock);
-    core = s_core;
+    *pub = s_core;
     portEXIT_CRITICAL(&s_lock);
 
     station_status_t *o = &s_pub;
     memset(o, 0, sizeof(*o));
-    o->state = (station_state_t)core.state;
+    o->state = (station_state_t)pub->state;
     if (um98x_ctl_get_info(&o->receiver) != ESP_OK) {
         o->receiver = s_stored_info;   /* last persisted; valid stays false */
     }
-    o->identity_confirmed = core.identity_ok;
-    o->alerts = stn_alerts(&core);
-    o->profile_applied = core.profile_applied;
-    o->profile_acknowledged = stn_profile_acknowledged(&core);
-    o->rtcm_differs = core.rtcm_differs;
+    o->identity_confirmed = pub->identity_ok;
+    o->alerts = stn_alerts(pub);
+    o->profile_applied = pub->profile_applied;
+    o->profile_acknowledged = stn_profile_acknowledged(pub);
+    o->rtcm_differs = pub->rtcm_differs;
     o->rtcm1230_supported = in->rtcm1230_ok;
     o->rtcm1230_known = rtcm1230_state() >= 0;
-    o->config_failed = (core.alerts & STN_ALERT_CONFIG_FAILED) != 0;
-    o->config_retry_in_s = stn_config_retry_in_s(&core, in->autocfg, in->now_ms);
-    o->config_auto_retry = stn_config_auto_retry(&core, in->autocfg);
-    o->reconfigure_refused = stn_reconfigure_refused(&core, in->autocfg);
+    o->config_failed = (pub->alerts & STN_ALERT_CONFIG_FAILED) != 0;
+    o->config_retry_in_s = stn_config_retry_in_s(pub, in->autocfg, in->now_ms);
+    o->config_auto_retry = stn_config_auto_retry(pub, in->autocfg);
+    o->reconfigure_refused = stn_reconfigure_refused(pub, in->autocfg);
     o->position_locked = (s_profile.base_mode == UM98X_BASE_FIXED);
     bool have_pos = false;
     if (o->position_locked) {
@@ -2626,14 +2627,14 @@ static void publish_status(const stn_in_t *in)
     if (!have_pos && um98x_ctl_get_base_position(&o->position) != ESP_OK) {
         memset(&o->position, 0, sizeof(o->position));
     }
-    o->surveying = stn_surveying(&core, in->now_ms);
-    o->survey_window_left_s = stn_survey_left_s(&core, in->now_ms);
-    o->survey_unfinished = stn_survey_unfinished(&core, in->now_ms);
+    o->surveying = stn_surveying(pub, in->now_ms);
+    o->survey_window_left_s = stn_survey_left_s(pub, in->now_ms);
+    o->survey_unfinished = stn_survey_unfinished(pub, in->now_ms);
     o->lease_held = s_lease != NULL || s_hold_lease != NULL || s_boot_lease != NULL;
-    o->detect_failures = core.detect_failures;
-    o->detect_saw_bytes = core.detect_saw_bytes;
-    o->detect_passes = core.detect_passes;
-    o->next_detect_in_s = stn_next_detect_in_s(&core, in->now_ms);
+    o->detect_failures = pub->detect_failures;
+    o->detect_saw_bytes = pub->detect_saw_bytes;
+    o->detect_passes = pub->detect_passes;
+    o->next_detect_in_s = stn_next_detect_in_s(pub, in->now_ms);
     um98x_flash_get_progress(&o->flash);
 
     o->rx_settings_valid = s_rx_valid;
@@ -2673,7 +2674,7 @@ static void publish_status(const stn_in_t *in)
     xSemaphoreGive(s_sgt_mx);
 
     stn_fix_status_t fx;
-    stn_fix_status(&core, in->now_ms, &fx);
+    stn_fix_status(pub, in->now_ms, &fx);
     o->fix_state = fx.state;
     o->fix_horizontal_m = fx.offset.horizontal_m;
     o->fix_up_m = fx.offset.up_m;
@@ -2687,15 +2688,15 @@ static void publish_status(const stn_in_t *in)
     o->own_height_m = fx.own.msl_height_m + fx.own.separation_m;
     o->own_horizontal_sigma_m = hypot(fx.own.sd_lat_m, fx.own.sd_lon_m);
     o->own_position_age_s = fx.own_age_s;
-    o->relocating = core.relocating;
+    o->relocating = pub->relocating;
 
-    o->first_apply_held = core.first_apply_held;
-    o->rx_maintenance = core.maint;
-    o->maintenance_left_s = stn_maint_left_s(&core, in->now_ms);
-    o->maintenance_chosen_s = core.maint ? core.maint_chosen_s : 0;
+    o->first_apply_held = pub->first_apply_held;
+    o->rx_maintenance = pub->maint;
+    o->maintenance_left_s = stn_maint_left_s(pub, in->now_ms);
+    o->maintenance_chosen_s = pub->maint ? pub->maint_chosen_s : 0;
 
     stn_live_status_t lv;
-    stn_live_status(&core, in, &lv);
+    stn_live_status(pub, in, &lv);
     o->live.open = lv.open;
     o->live.left_s = lv.left_s;
     o->live.idle_left_s = lv.idle_left_s;
@@ -2710,7 +2711,7 @@ static void publish_status(const stn_in_t *in)
     }
 
     uint32_t known_alerts = 0;
-    if (!core.maint) {
+    if (!pub->maint) {
         s_known_on = false;   /* ended: the stream-first path checks the receiver as at boot */
     } else if (s_known_on) {
         known_alerts = known_overlay(o);
@@ -3062,6 +3063,7 @@ static void after_step(const stn_in_t *in)
 {
     bool paused;
     bool relocating;
+    stn_reloc_end_t reloc_end;
     bool sky_on;
     station_state_t st;
     stn_note_t notes[STN_NOTES];
@@ -3071,8 +3073,9 @@ static void after_step(const stn_in_t *in)
         stn_obs_arm(&s_obs, s_profile.rtcm, s_profile.rtcm_count, in->now_ms);
         s_core.obs_rearm = false;
     }
-    paused = s_core.paused || s_core.relocating;
+    paused = stn_rtcm_held(&s_core);   /* a relocation never holds the RTCM: only its applies pause */
     relocating = s_core.relocating;
+    reloc_end = (stn_reloc_end_t)s_core.relocation_end;
     st = (station_state_t)s_core.state;
     sky_on = s_core.sky_on;
     n_notes = stn_take_notes(&s_core, notes, STN_NOTES);
@@ -3104,8 +3107,13 @@ static void after_step(const stn_in_t *in)
         if (err == ESP_OK) {
             s_relocation_retry_ms = 0;
             s_relocation_stored = relocating;
-            ESP_LOGI(TAG, "%s", relocating ? "movement confirmed: corrections held for a new survey" :
-                         "new reference position checked: corrections resumed");
+            ESP_LOGI(TAG, "%s", relocating ? "movement confirmed: surveying the new location, RTCM keeps flowing" :
+                         reloc_end == STN_RELOC_END_MISMATCH ?
+                             "relocation done: the receiver's 1005 does not match the new reference (alert raised)" :
+                         reloc_end == STN_RELOC_END_UNCHECKED ?
+                             "relocation done: no 1005 came to check the new reference against" :
+                         reloc_end == STN_RELOC_END_MANUAL ? "relocation dropped: automatic setup is off" :
+                             "new reference position checked: relocation done");
         } else {
             s_relocation_retry_ms = in->now_ms + 10000;
             ESP_LOGW(TAG, "relocation state not persisted: %s", esp_err_to_name(err));

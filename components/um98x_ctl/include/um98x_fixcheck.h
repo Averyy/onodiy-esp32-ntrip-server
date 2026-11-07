@@ -163,6 +163,8 @@ bool um98x_own_fix_usable(const um98x_own_fix_t *f);
 /** Where the fixed position is, seen from the receiver's own solution. */
 typedef struct {
     double horizontal_m;       /**< >= 0 */
+    double east_m;             /**< the solution's offset from the fixed position, east (horizontal_m's parts; 0 in shown) */
+    double north_m;            /**< ... north */
     double up_m;               /**< fixed height minus the receiver's: > 0 the fixed position is above it */
     double distance_m;         /**< 3-D */
     double up_msl_m;           /**< fixed height minus the receiver's height above sea level (as printed) */

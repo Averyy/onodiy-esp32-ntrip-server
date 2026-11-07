@@ -365,7 +365,15 @@ TEST_CASE("fixcheck: horizontal and vertical distances from the receiver's own s
     f = own_at(120.0, 35.0, 0, GEOID);
     o = offset_of(&f);
     TEST_ASSERT_DOUBLE_WITHIN(0.5, sqrt(120.0 * 120.0 + 35.0 * 35.0), o.horizontal_m);
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 120.0, o.north_m);   /* its parts, signed */
+    TEST_ASSERT_DOUBLE_WITHIN(0.5, 35.0, o.east_m);
     TEST_ASSERT_DOUBLE_WITHIN(0.01, 0.0, o.up_m);
+    f = own_at(-4.0, -7.0, 0, GEOID);
+    o = offset_of(&f);
+    TEST_ASSERT_DOUBLE_WITHIN(0.05, -4.0, o.north_m);
+    TEST_ASSERT_DOUBLE_WITHIN(0.05, -7.0, o.east_m);
+    f = own_at(120.0, 35.0, 0, GEOID);
+    o = offset_of(&f);
     TEST_ASSERT_DOUBLE_WITHIN(0.5, o.horizontal_m, o.distance_m);
     TEST_ASSERT_TRUE(um98x_fix_beyond(&o, UM98X_FIX_LIMIT_M));
     TEST_ASSERT_FALSE(um98x_fix_height_only(&o));

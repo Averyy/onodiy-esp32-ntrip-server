@@ -253,14 +253,26 @@ static void set_identity(stn_t *s, bool supported, bool static_ok)
     }
 }
 
+static bool same_llh(const double a[3], const double b[3])
+{
+    return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
+/* While relocating: the fixed profile is still the reference the move was
+ * found against, so a new one is still owed (a survey). */
+static bool reloc_on_old(const stn_t *s, const stn_in_t *in)
+{
+    return in->fixed_valid && s->reloc_old_known && same_llh(in->fixed_llh, s->reloc_old);
+}
+
 /* After a fresh identity: what the static part of the applied check says. */
 static void after_identity(stn_t *s, const stn_in_t *in)
 {
     if (!s->supported) {
         return;   /* stream only: nothing is configured, nothing is flashed */
     }
-    if (s->relocating && in->fixed_valid && auto_apply_allowed(s, in)) {
-        want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
+    if (s->relocating && !s->relocation_ready && reloc_on_old(s, in) && auto_apply_allowed(s, in)) {
+        want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);   /* a new reference only: then its 1005 check */
     }
     if (!s->static_ok) {
         s->profile_applied = false;
@@ -362,6 +374,99 @@ static int32_t round_m(double m)
     return (int32_t)(m < 0.0 ? m - 0.5 : m + 0.5);
 }
 
+/* The movement window empties (a new reference, manual setup, maintenance, a relocation). */
+static void move_reset(stn_t *s)
+{
+    s->move_n = 0;
+    s->move_last_ms = STN_NEVER;
+}
+
+/* Finite metres to centimetres; the clamp (10 000 km) is beyond any offset on Earth. */
+static int32_t move_cm(double m)
+{
+    double cm = m * 100.0;
+    if (cm <= -1e9) {
+        return -1000000000;
+    }
+    return cm >= 1e9 ? 1000000000 : (int32_t)lrint(cm);
+}
+
+/* The median of n values (n >= 1), sorted in place; with an even n the mean
+ * of the middle two, or the upper one when upper (the cautious deviation). */
+static double move_median(int32_t *v, unsigned n, bool upper)
+{
+    for (unsigned i = 1; i < n; i++) {
+        int32_t x = v[i];
+        unsigned j = i;
+        for (; j > 0 && v[j - 1] > x; j--) {
+            v[j] = v[j - 1];
+        }
+        v[j] = x;
+    }
+    return ((n & 1u) || upper) ? (double)v[n / 2] : ((double)v[n / 2 - 1] + (double)v[n / 2]) / 2.0;
+}
+
+/* A usable fix joins the movement window (fixes older than STN_MOVE_WINDOW_MS
+ * leave it). @return true when the window's median position is beyond
+ * max(STN_MOVE_FLOOR_M, STN_MOVE_SIGMAS * its median deviation) and at least
+ * STN_MOVE_AGREE_PCT of its fixes are within max(STN_MOVE_FLOOR_M,
+ * STN_MOVE_AGREE_SIGMAS * that deviation) of the median: moved.
+ * One fix neither decides nor resets it; correlated single-point fixes are
+ * never averaged into a smaller uncertainty, the reported one stands. */
+static bool move_add(stn_t *s, int64_t now, const um98x_fix_offset_t *o, double sigma_m)
+{
+    if (!isfinite(o->east_m) || !isfinite(o->north_m) || !(sigma_m >= 0.0) || !isfinite(sigma_m)) {
+        return false;   /* not a fix to judge by (usable fixes never get here like this) */
+    }
+    if (s->move_n > 0 && (s->move_last_ms == STN_NEVER || now - s->move_last_ms > STN_MOVE_WINDOW_MS ||
+                          now < s->move_last_ms)) {
+        move_reset(s);   /* everything kept is older than the window (keeps the 16-bit ages exact) */
+    }
+    uint16_t now_s = (uint16_t)(now / 1000);
+    unsigned keep = 0;
+    for (unsigned i = 0; i < s->move_n; i++) {
+        if ((uint32_t)(uint16_t)(now_s - s->move[i].t_s) * 1000u < (uint32_t)STN_MOVE_WINDOW_MS) {
+            s->move[keep++] = s->move[i];
+        }
+    }
+    if (keep == STN_MOVE_SAMPLES_MAX) {
+        memmove(&s->move[0], &s->move[1], (STN_MOVE_SAMPLES_MAX - 1) * sizeof(s->move[0]));
+        keep--;
+    }
+    stn_move_sample_t *m = &s->move[keep++];
+    m->t_s = now_s;
+    m->east_cm = move_cm(o->east_m);
+    m->north_cm = move_cm(o->north_m);
+    double sg = sigma_m * 100.0;
+    m->sigma_cm = sg >= 65535.0 ? UINT16_MAX : (uint16_t)lrint(sg);
+    s->move_n = (uint8_t)keep;
+    s->move_last_ms = now;
+    if (keep < STN_MOVE_MIN_SAMPLES ||
+        (uint32_t)(uint16_t)(now_s - s->move[0].t_s) * 1000u < (uint32_t)STN_MOVE_MIN_SPAN_MS) {
+        return false;
+    }
+    int32_t v[STN_MOVE_SAMPLES_MAX];
+    for (unsigned i = 0; i < keep; i++) v[i] = s->move[i].east_cm;
+    double east = move_median(v, keep, false);
+    for (unsigned i = 0; i < keep; i++) v[i] = s->move[i].north_cm;
+    double north = move_median(v, keep, false);
+    for (unsigned i = 0; i < keep; i++) v[i] = s->move[i].sigma_cm;
+    double sigma = move_median(v, keep, true);
+    double limit_cm = fmax(STN_MOVE_FLOOR_M * 100.0, STN_MOVE_SIGMAS * sigma);
+    if (!(hypot(east, north) > limit_cm)) {
+        return false;
+    }
+    /* The fixes must agree on where the antenna is now: scatter on both
+     * sides of the reference, or two groups of fixes, can put a per-axis
+     * median far from it. */
+    double agree_cm = fmax(STN_MOVE_FLOOR_M * 100.0, STN_MOVE_AGREE_SIGMAS * sigma);
+    unsigned near = 0;
+    for (unsigned i = 0; i < keep; i++) {
+        if (hypot(s->move[i].east_cm - east, s->move[i].north_cm - north) <= agree_cm) near++;
+    }
+    return near * 100u >= keep * (unsigned)STN_MOVE_AGREE_PCT;
+}
+
 /* A new check STN_FIX_FIRST_MS from now (the receiver may need a fix first);
  * the verdict stays until that check decides. */
 static void fix_rearm(stn_t *s, int64_t now)
@@ -371,8 +476,8 @@ static void fix_rearm(stn_t *s, int64_t now)
     }
     s->fix_due_ms = now + (s->fix_continuous ? STN_FIX_PERIOD_MS : STN_FIX_FIRST_MS);
     s->fix_running = false;
-    s->move_samples = 0;
     s->fix_sppnav = false;
+    move_reset(s);   /* a restart, an apply or an update may shift the receiver's own solution */
 }
 
 /* No check any more: verdict, alert and schedule go (noted when the alert
@@ -386,7 +491,7 @@ static void fix_drop(stn_t *s, bool changed)
         }
     }
     s->fix_on = false;
-    s->move_samples = 0;
+    move_reset(s);
     s->fix_due_ms = STN_NEVER;
     s->fix_running = false;
     s->fix_tries = 0;
@@ -401,11 +506,15 @@ static void fix_drop(stn_t *s, bool changed)
 static void fix_track(stn_t *s, const stn_in_t *in)
 {
     bool enabled = !s->fix_continuous && in->autocfg;
-    if (s->fix_continuous != in->autocfg) s->move_samples = 0;
+    if (s->fix_continuous != in->autocfg) move_reset(s);
+    if (s->relocating && !in->autocfg) {
+        s->relocating = false;   /* no relocation in manual setup (a survey it already queued still runs) */
+        s->relocation_ready = false;
+        s->relocation_end = (uint8_t)STN_RELOC_END_MANUAL;
+    }
     s->fix_continuous = in->autocfg;
     if (enabled && s->fix_on && !s->fix_running && s->fix_due_ms > in->now_ms + STN_FIX_PERIOD_MS) {
         s->fix_due_ms = in->now_ms + STN_FIX_PERIOD_MS;
-        s->move_samples = 0;
     }
     if ((!in->fixed_valid && !(in->autocfg && in->profile_survey)) || (s->identity_ok && !s->supported)) {
         if (s->fix_on) {
@@ -569,6 +678,10 @@ static bool ask_due(const stn_t *s, const stn_in_t *in)
 
 void stn_start(stn_t *s, const stn_in_t *in)
 {
+    if (s->relocating && !s->reloc_old_known && in->fixed_valid) {
+        memcpy(s->reloc_old, in->fixed_llh, sizeof(s->reloc_old));   /* restored: the survey had not begun */
+        s->reloc_old_known = true;
+    }
     s->started = true;
     if (s->state != STN_IDLE) {
         return;
@@ -825,6 +938,14 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
         return j;
     }
 
+    /* A relocation with the old reference in place and nothing queued (its
+     * survey's apply was dropped, or the old position was put back): it still
+     * owes a new reference. */
+    if (s->relocating && !s->relocation_ready && !s->apply_wanted && !s->maint && reloc_on_old(s, in) &&
+        auto_apply_allowed(s, in)) {
+        want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
+    }
+
     if (s->apply_wanted) {
         if (s->identity_ok && !s->supported) {
             s->apply_wanted = false;   /* not a model we configure: nothing to apply */
@@ -836,7 +957,7 @@ static stn_job_t next_streaming(stn_t *s, const stn_in_t *in)
     if (config_failed(s) && s->apply_retry_ms != STN_NEVER && now >= s->apply_retry_ms) {
         if (stn_config_auto_retry(s, in->autocfg)) {
             return start_apply(s, STN_WHY_RETRY,
-                s->relocating && !s->relocation_ready && in->fixed_valid && !s->survey.active ?
+                s->relocating && !s->relocation_ready && reloc_on_old(s, in) && !s->survey.active ?
                 STN_CHANGE_RESURVEY : STN_CHANGE_NONE, false);
         }
         /* The user configures the receiver meanwhile: look again later. */
@@ -1330,10 +1451,18 @@ static void done_apply(stn_t *s, const stn_result_t *r, const stn_in_t *in)
             s->pos_check_ms = STN_NEVER;
             s->alerts &= ~(STN_ALERT_ANTENNA_MOVED | STN_ALERT_POSITION_MISMATCH);
         }
-        if (s->relocating && in->fixed_valid && (s->job.change == STN_CHANGE_LOCK || s->survey.active)) {
-            s->relocation_ready = true;
-            s->pos_check_ms = now + STN_POS_CHECK_MS;
-            s->pos_check_tries = 0;
+        /* The relocation's reference: any fixed position applied but the one
+         * the move was found against (its lock, one the user sets, a re-apply);
+         * the old one again leaves a new one owed. */
+        if (s->relocating && in->fixed_valid) {
+            if (reloc_on_old(s, in)) {
+                s->relocation_ready = false;
+            } else {
+                s->relocation_ready = true;
+                memcpy(s->reloc_ref, in->fixed_llh, sizeof(s->reloc_ref));   /* only this one's check ends it */
+                s->pos_check_ms = now + STN_POS_CHECK_MS;
+                s->pos_check_tries = 0;
+            }
         }
         if (!in->profile_survey) {
             memset(&s->survey, 0, sizeof(s->survey));
@@ -1461,25 +1590,41 @@ static void done_sky(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     s->sky_retry_ms = in->now_ms + STN_SKY_RETRY_MS;
 }
 
+/* The new reference's check is over: the relocation ends, matched or not
+ * (a mismatch keeps its alert), so movement is watched again and a restart
+ * does not survey once more. Only while that reference is still the fixed
+ * profile: a check of an older one, or one the user replaced meanwhile
+ * (a survey stored, perhaps not yet applied), ends nothing. */
+static void relocation_end(stn_t *s, const stn_in_t *in, stn_reloc_end_t why)
+{
+    if (s->relocating && s->relocation_ready && in->fixed_valid && in->fixed_llh[0] == s->reloc_ref[0] &&
+        in->fixed_llh[1] == s->reloc_ref[1] && in->fixed_llh[2] == s->reloc_ref[2]) {
+        s->relocating = false;
+        s->relocation_ready = false;
+        s->relocation_end = (uint8_t)why;
+    }
+}
+
 static void done_position(stn_t *s, const stn_result_t *r, const stn_in_t *in)
 {
     switch (r->err) {
     case STN_OK:
         s->alerts &= ~STN_ALERT_POSITION_MISMATCH;
-        if (s->relocating && !s->relocation_ready) {
-            s->pos_check_ms = STN_NEVER;   /* an old reference check cannot release relocation */
-            break;
-        }
-        s->relocating = false;
-        s->relocation_ready = false;
         s->pos_check_ms = STN_NEVER;
+        relocation_end(s, in, STN_RELOC_END_CHECKED);
         break;
     case STN_E_MISMATCH:
         s->alerts |= STN_ALERT_POSITION_MISMATCH;
         s->pos_check_ms = STN_NEVER;
+        relocation_end(s, in, STN_RELOC_END_MISMATCH);
         break;
     default:
-        s->pos_check_ms = (++s->pos_check_tries < STN_POS_CHECK_TRIES) ? in->now_ms + STN_POS_CHECK_MS : STN_NEVER;
+        if (++s->pos_check_tries < STN_POS_CHECK_TRIES) {
+            s->pos_check_ms = in->now_ms + STN_POS_CHECK_MS;
+        } else {
+            s->pos_check_ms = STN_NEVER;
+            relocation_end(s, in, STN_RELOC_END_UNCHECKED);
+        }
         break;
     }
 }
@@ -1490,7 +1635,6 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
     if (!s->fix_on || !s->fix_running) {
         return;   /* dropped or re-armed meanwhile: the answer belongs to no check */
     }
-    if (r->err != STN_OK || !um98x_own_fix_usable(&r->own)) s->move_samples = 0;
     switch (r->err) {
     case STN_E_STATE:
         s->fix_due_ms = now + STN_FIX_BUSY_MS;   /* nothing was sent: not a try */
@@ -1519,33 +1663,22 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         if (um98x_fix_offset(s->fix_ref[0], s->fix_ref[1], s->fix_ref[2], &r->own, &o)) {
             s->fix_usable_seen = true;
             s->fix_sample_ms = now;
-            /* Do not reduce uncertainty by averaging correlated single-point fixes.
-             * A candidate must stay displaced and near its original location for
-             * five minutes. Missing fixes and long gaps break the observation. */
-            double sigma = hypot(r->own.sd_lat_m, r->own.sd_lon_m);
-            double limit = fmax(STN_MOVE_FLOOR_M, 4.0 * sigma);
-            if (o.horizontal_m > limit && auto_apply_allowed(s, in) && !s->maint && !s->relocating) {
-                um98x_fix_offset_t drift;
-                double anchor_sigma = hypot(s->move_anchor.sd_lat_m, s->move_anchor.sd_lon_m);
-                bool consistent = s->move_samples && now - s->move_last_ms <= STN_MOVE_MAX_GAP_MS &&
-                    um98x_fix_offset(s->move_anchor.lat_deg, s->move_anchor.lon_deg,
-                                    s->move_anchor.msl_height_m + s->move_anchor.separation_m, &r->own, &drift) &&
-                    drift.horizontal_m <= fmax(STN_MOVE_FLOOR_M, 2.0 * hypot(sigma, anchor_sigma));
-                if (!consistent) {
-                    s->move_anchor = r->own;
-                    s->move_started_ms = now;
-                    s->move_samples = 1;
-                }
-                s->move_last_ms = now;
-                if (now - s->move_started_ms >= STN_MOVE_CONFIRM_MS) {
-                    s->move_samples = 0;
+            bool same_ref = in->fixed_llh[0] == s->fix_ref[0] && in->fixed_llh[1] == s->fix_ref[1] &&
+                            in->fixed_llh[2] == s->fix_ref[2];   /* else asked about a reference since replaced */
+            if (!same_ref) {
+                move_reset(s);   /* the next step drops the check for the new reference */
+            } else if (auto_apply_allowed(s, in) && !s->maint && !s->relocating) {
+                if (move_add(s, now, &o, hypot(r->own.sd_lat_m, r->own.sd_lon_m))) {
+                    move_reset(s);
                     s->relocating = true;
                     s->relocation_ready = false;
+                    memcpy(s->reloc_old, s->fix_ref, sizeof(s->reloc_old));
+                    s->reloc_old_known = true;
                     s->pos_check_ms = STN_NEVER;
                     want_apply(s, STN_WHY_RESURVEY, STN_CHANGE_RESURVEY, true);
                 }
             } else {
-                s->move_samples = 0;
+                move_reset(s);
             }
             uint8_t before = s->fix.verdict;
             uint8_t v = um98x_fixchk_feed(&s->fix, &o);
@@ -1558,7 +1691,6 @@ static void done_own_fix(stn_t *s, const stn_result_t *r, const stn_in_t *in)
         break;
     }
     default:
-        s->move_samples = 0;
         break;   /* no log, or one this firmware does not read */
     }
     if (++s->fix_tries >= STN_FIX_TRIES) {
@@ -2203,6 +2335,7 @@ int stn_maint_enter(stn_t *s, uint32_t dur_s, bool lease_held, int64_t now_ms)
         return STN_MAINT_SKY_OUTPUT;
     }
     s->maint = true;
+    move_reset(s);   /* the user may change the receiver meanwhile: movement is judged afresh */
     s->maint_start_ms = now_ms;
     s->maint_until_ms = now_ms + (int64_t)dur_s * 1000;
     s->maint_chosen_s = dur_s;
@@ -2740,6 +2873,11 @@ void stn_live_status(const stn_t *s, const stn_in_t *in, stn_live_status_t *out)
                        ? STN_SKY_BLOCKED
                        : STN_SKY_PENDING;
     }
+}
+
+bool stn_rtcm_held(const stn_t *s)
+{
+    return s->paused;   /* never s->relocating */
 }
 
 unsigned stn_take_notes(stn_t *s, stn_note_t *out, unsigned cap)

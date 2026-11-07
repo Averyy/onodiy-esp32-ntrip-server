@@ -186,7 +186,7 @@ function positionLine(g, delivering) {
   const sv = g.survey || {};
   const prof = g.profile || {};
   const have = (pos.source && pos.source !== 'none') || !!(g.arp || {}).valid;
-  if (g.relocating) return 'Movement confirmed. Corrections are paused while the receiver surveys and checks its new location.';
+  if (g.relocating) return 'Movement confirmed. Surveying the new location; corrections keep flowing meanwhile.';
   if (prof.base_mode === 'fixed' && prof.fixed && !(pos.locked && have)) return 'Fixed (typed in). Sent at the next configuration.';
   if (pos.locked) return g.autocfg ? 'Set. Updates automatically after a confirmed move.' : 'Locked. This position is kept across restarts.';
   if (surveyRuns(g)) {

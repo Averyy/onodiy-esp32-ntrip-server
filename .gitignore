@@ -42,3 +42,5 @@ bench-logs/
 /logs/
 # Python bytecode (tools/qemu/e2e.py imports smoke.py and the bench tools)
 __pycache__/
+# codex-dobby run artifacts (reviews and other delegated runs)
+.codex-dobby/
