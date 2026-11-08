@@ -6,127 +6,80 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
-- Docs: the core dump download is the raw flash format, not a bare ELF.
-
-- Reuse: `network` options for a product: open the setup AP only when asked, and
-  Wi-Fi modem sleep; the station's defaults are unchanged. `diag` builds without
-  a warning when PSRAM has no no-init segment. Pending: host tests and builds
-  only, not yet on hardware.
-
-- Reuse: add an external HTTP-shell product example, isolated builds and runtime
-  smoke checks, product commissioning steps and metadata-based shared UI nouns.
-  A product route with no access level is refused at registration.
-  Pending: the web split (this and the two entries below) is tested in QEMU, on
-  the host and in a browser against QEMU; not yet on hardware, including the
-  example's BOOT recovery.
-
-- Reuse: select browser modules/assets with an ordered product manifest; share
-  the UI bundler, shell, registry and app controls while retaining station
-  navigation, setup, status text and browser storage keys.
-
-- Reuse: move the HTTP server, authentication, WebSocket transport and worker
-  into `web_shell`, with bounded station route, status and service adapters.
-
-- Reuse: move product-neutral web cores into the layer-3 `web_shell`
-  component; station API adapters and server code stay in `web`.
-
-- Firmware: add LG290P receiver packages 01.06 and 02.02 with SHA-256 checksums;
-  not yet validated on hardware.
-
 - Updates: an app or receiver package download can be cancelled until its last
   byte is in; the row's button turns into Cancel while it downloads. Nothing is
   installed or sent to the receiver. Once the download is complete the install
   runs to its end. New `POST /api/update/cancel`, `cancellable` in
-  `GET /api/update`, result `cancelled`. Pending: tested in QEMU only (app
-  download cancelled while queued, at 10 % and refused at 100 %), not yet
-  tested on hardware; the receiver package cancel not yet tested at all.
+  `GET /api/update`, result `cancelled`.
 - Updates: while an app download, upload or restart runs, the app row no longer
-  offers Update (the station refused it as busy) or shows the attempt before
-  as "Last attempt". Pending: not yet tested on hardware.
-- Reuse: the receiver components (board, settings, gnss_types, gnss_framing,
-  gnss_link, gnss_obs, um98x_ctl) are documented for use by another ESP-IDF
-  application in `docs/component-reuse.md`: SDK settings, partition tables,
-  start-up order, callbacks and the shared NVS keys. A new CI job,
-  `external-app`, builds `examples/external-receiver` outside the tree with
-  only those components, for the 16 MB and 8 MB layouts, and runs the framing
-  code with a plain host compiler. A release needs it.
-- Receiver link: `gnss_link_write_ex()` says what a write did on the wire:
-  nothing sent, TX done, or uncertain (a timeout after the bytes reached the
-  UART). `gnss_link.h` now documents writing complete RTCM correction frames
-  without a lease while streaming. `gnss_link_acquire()` waits up to 500 ms
-  for bytes of an earlier timed-out write to leave the UART before it grants.
-  New `gnss_link_prompt_seen()`: the loader prompt hit stays latched for the
-  rest of its lease.
-- Receiver commands: once the armed loader prompt detector fires under a
-  lease, no later call under that lease sends anything: no resend, no session
-  CR LF, no rollback RESET. These calls return the new result
-  `ESP_ERR_NOT_ALLOWED`. Detection still reports the prompt as before, now
-  also for a prompt seen earlier under the same lease, and its probe stops
-  at the prompt instead of waiting out its reply window. The loader's
-  restart key still goes out. The station arms the detector only for
-  detection, so its other sessions are unchanged.
-- Receiver commands: a restart that shows both its banner (or its "resetting"
-  answer) and an unasked version log within 20 s now counts as one restart,
-  not two.
-- Receiver commands: `um98x_ctl_query_mode()` is documented as the general
-  mode read-back. Rover modes come back as the receiver sends them, e.g.
-  `MODE ROVER SURVEY,` with its trailing comma (host-tested with the public
-  sample).
-- Observations: `gnss_obs_get_solution()` gives the receiver's latest
-  position (GGA) and error-statistics (GST) sentences field by field: UTC
-  time, position, HDOP, altitude, geoidal separation, the receiver's age of
-  differential data and its reference station, and the GST deviations, each
-  with its own validity, in fixed-point units, with arrival time and age, and
-  whether both describe the same epoch. An empty field is never reported as
-  zero; a no-fix sentence reports no position. `gnss_obs_reset()` clears it;
-  `gnss_obs_get_fix()` is unchanged. Tested against pynmeagps on three
-  public captures (two new fixtures from gpsd: a Trimble RTK stream and a
-  u-blox ZED-F9P stream with GST).
-- Framing: every unit the framer emits carries the stream offset of its first
-  byte (`gnss_frame_t.start`), and `gnss_framer_held()` reports the input it
-  holds and since which byte. New `gnss_rtcm_scan.h`: an RTCM3-only scanner
-  for input from an untrusted source. It finds the same frames as the framer
-  on every public capture at any feed size, at a bounded cost per byte
-  whatever the input (it never rescans: each candidate is checked once from
-  the running CRC), and it reports the input it holds. New
-  `gnss_rtcm3_crc24q_update()`. The station still frames its receiver link
-  with the framer as before.
-- Receiver updates: `um98x_flash_recover()` and `um98x_flash_race()` now
-  refuse (`ESP_ERR_NOT_SUPPORTED`) in a build without
-  `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS`, touching neither the receiver nor the
-  staged package nor the journal; the session core refuses as well. Before,
-  only the station's caller checked the option. Station behaviour unchanged
-  (it calls them only with the option on).
-- Settings: `settings_ns_is_station()` names the station's own namespaces,
-  and `settings_erase_product_namespace()` resets another product's
-  namespace but refuses the station's, so such a reset keeps the shared
-  device state. `docs/component-reuse.md` says which keys are shared and who
-  migrates them. The station's own factory reset is unchanged.
-- LEDs: `leds_set_pattern()` lets another product show its own feedback on
-  the board's LEDs (one looping pattern per LED, `leds_pattern.h`) with the
-  same driver, pins and dimming; `leds_set()` and the station's codes are
-  unchanged. `leds` joins the components another app may use, in the
-  external build.
-- Receiver updates: another app can link the updater (`um98x_flash`, `diag`,
-  `pkg_store`); CI builds it in a third external variant, and
-  `docs/component-reuse.md` lists what to do for each journal state. `diag`
-  now declares its `vfs` dependency and builds without core dumps.
-- Updates: `fw_update` no longer links the station, the casters or the hub.
-  What it needs from them now comes through `fw_update_set_product()`: health
-  for the app trial and the receiver's state and jobs. The station's side is
-  the new `fw_update_station` component, and its behaviour is unchanged. CI
-  builds the updater in a fourth external variant, for a product with no
-  casters that is offline.
-- Docs: the command layer's and the flasher's headers no longer say that only
-  the UM982 is flashed; UM980 packages are accepted too.
-- API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,
-  `gnss_link_prompt_seen`, `gnss_obs_get_solution` and the types of
-  `gnss_obs_nmea.h`, `gnss_frame_t.start`, `gnss_framer_held`,
-  `gnss_rtcm3_crc24q_update` and `gnss_rtcm_scan.h`). Callers of `um98x_ctl` that arm the loader
-  prompt detector can now get `ESP_ERR_NOT_ALLOWED` from calls other than
-  detection.
-- Pending: host tests, the station build and the external app build only;
-  not yet tested on hardware.
+  offers Update (the station refused it as busy) or shows the attempt before as
+  "Last attempt".
+- Receiver: a restart that shows both its banner (or its "resetting" answer) and
+  an unasked version log within 20 s now counts as one restart, not two.
+- Firmware: LG290P receiver packages 01.06 and 02.02 added, with SHA-256 checksums;
+  not yet validated on hardware.
+- Web: the server, login, WebSocket, page shell and UI bundler moved to a shared
+  component, `web_shell`, with `web` as the station's adapter. The station's API,
+  settings, pages and browser storage are unchanged.
+- Docs: the core dump download is the raw flash format, not a bare ELF. The command
+  layer's and flasher's headers no longer say only the UM982 is flashed; UM980
+  packages are accepted too.
+
+For other applications built on these components ([`docs/component-reuse.md`](docs/component-reuse.md)):
+
+- Reuse: supported sets are the receiver components (`board`, `settings`,
+  `gnss_types`, `gnss_framing`, `gnss_link`, `gnss_obs`, `um98x_ctl`), `leds`, the
+  updaters (`um98x_flash`, `fw_update`) and `web_shell`, with SDK settings, start-up
+  order, callbacks and shared NVS keys documented. CI jobs `external-app` and
+  `external-web` build `examples/external-receiver` and `examples/external-web`
+  outside the tree; a release needs both.
+- Web: a product registers its routes, status sections and UI modules with
+  `web_shell`, selects assets through a manifest and supplies its own navigation,
+  status classification, first-run steps and name. A route with no access level is
+  refused at registration.
+- Updates: `fw_update` no longer links the station, the casters or the hub; it takes
+  what it needs through `fw_update_set_product()`. The station's side is the new
+  `fw_update_station` component.
+- Receiver link: `gnss_link_write_ex()` reports what a write did on the wire: nothing
+  sent, TX done, or uncertain. `gnss_link_acquire()` waits up to 500 ms for an earlier
+  timed-out write to leave the UART. New `gnss_link_prompt_seen()`.
+- Receiver commands: once the armed loader prompt detector fires under a lease, later
+  calls under it send nothing and return `ESP_ERR_NOT_ALLOWED`; detection reports the
+  prompt as before. The station arms it only for detection, so its sessions are
+  unchanged. `um98x_ctl_query_mode()` is documented as the general mode read-back.
+- Observations: `gnss_obs_get_solution()` gives the latest GGA and GST field by field,
+  each with its own validity, arrival time and age; an empty field is never reported
+  as zero.
+- Framing: `gnss_frame_t.start`, `gnss_framer_held()` and `gnss_rtcm3_crc24q_update()`.
+  New `gnss_rtcm_scan.h`, an RTCM3-only scanner for untrusted input at a bounded cost
+  per byte.
+- Receiver updates: `um98x_flash_recover()` and `um98x_flash_race()` refuse with
+  `ESP_ERR_NOT_SUPPORTED` without `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS`, touching
+  neither the receiver, the staged package nor the journal.
+- Settings: `settings_ns_is_station()` and `settings_erase_product_namespace()`, which
+  refuses the station's namespaces. The station's factory reset is unchanged.
+- LEDs: `leds_set_pattern()` shows a product's own looping patterns with the same
+  driver, pins and dimming.
+- Network: `CONFIG_NETWORK_SETUP_AP_ON_REQUEST_ONLY` opens the setup AP only when the
+  product asks, and `CONFIG_NETWORK_WIFI_PS_MIN_MODEM` selects modem sleep. Both are
+  off by default, so the station is unchanged.
+- Diagnostics: `diag` declares its `vfs` dependency, builds without core dumps, and has
+  no warning when PSRAM has no no-init segment.
+- API: additions only, except that callers of `um98x_ctl` that arm the loader prompt
+  detector can now get `ESP_ERR_NOT_ALLOWED` from calls other than detection.
+
+Pending, to clear from this list as each is tested on hardware (remove before tagging):
+
+- Download cancel: app tested in QEMU only (cancelled while queued, at 10 %, refused
+  at 100 %); receiver package cancel not tested at all.
+- App row while an update is busy: not tested on hardware.
+- Web split: running on one station since 2026-11-08 (boot, status, Onocoy, app
+  upload); the page in a browser tested against QEMU only. `examples/external-web`
+  has run in QEMU only, and its BOOT recovery not at all.
+- Receiver link, commands, observations, framing, recovery refusal, settings, LEDs and
+  `fw_update` provider: host tests and builds, plus normal streaming on that station;
+  the loader prompt stop and restart count not exercised on hardware.
+- Network options: policy host-tested and compiled only.
 
 ## v0.1.14
 
