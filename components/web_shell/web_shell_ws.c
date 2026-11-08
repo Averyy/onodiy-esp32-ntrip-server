@@ -624,6 +624,7 @@ static void flush_events(void)
 EXT_RAM_BSS_ATTR static char s_scratch[MSG_SCRATCH];
 EXT_RAM_BSS_ATTR static web_shell_baseline_t s_baseline[2];
 EXT_RAM_BSS_ATTR static web_shell_frame_t s_frame;
+EXT_RAM_BSS_ATTR static char s_frame_text[WEB_SHELL_STATUS_MAX];
 static uint32_t s_seq[2];
 
 esp_err_t web_shell_status_rest(web_req_t *r)
@@ -861,9 +862,7 @@ esp_err_t web_ws_init(void)
     }
     s_reboot_sent = false;
     memset(s_baseline,0,sizeof(s_baseline));
-    if (!web_shell_frame_reserve(web_shell_registry(),&s_frame)) {
-        ESP_LOGW(TAG,"no memory for the status frame now: tried again at each status push");
-    }
+    web_shell_frame_attach(&s_frame,s_frame_text,sizeof(s_frame_text));
     web_lograte_init(&s_refused_log);
     return ESP_OK;
 }

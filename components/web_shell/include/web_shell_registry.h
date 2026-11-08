@@ -51,6 +51,7 @@ typedef struct {
 typedef struct {
     char *text;
     size_t cap, len, count;
+    bool borrowed;
     uint32_t uptime_s;
     bool public_form;
     bool built;
@@ -62,7 +63,12 @@ typedef struct {
     web_shell_cell_t cells[WEB_SHELL_ITEMS_MAX];
 } web_shell_baseline_t;
 
-/* Takes the frame's block now (a start-up call: later builds then cannot fail for memory). */
+/* A caller-owned block for the frame's text, never freed here. A heap block of
+ * up to CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL bytes (the default status size)
+ * comes from internal RAM: a long-lived frame on the target uses this with a
+ * PSRAM buffer. A build refuses a block smaller than the registry's status_cap. */
+void web_shell_frame_attach(web_shell_frame_t *frame, char *buffer, size_t cap);
+/* Takes the frame's block now, unless one is attached. */
 bool web_shell_frame_reserve(const web_shell_registry_t *r, web_shell_frame_t *frame);
 bool web_shell_frame_build(const web_shell_registry_t *r, const void *snapshot,
                            uint32_t uptime_s, bool pub, web_shell_frame_t *frame);

@@ -145,11 +145,18 @@ bool web_shell_access_valid(web_access_t access)
 
 void web_shell_frame_dispose(web_shell_frame_t *f)
 {
-    if (f) { free(f->text); memset(f, 0, sizeof(*f)); }
+    if (f) { if (!f->borrowed) free(f->text); memset(f, 0, sizeof(*f)); }
+}
+
+void web_shell_frame_attach(web_shell_frame_t *f, char *buffer, size_t cap)
+{
+    web_shell_frame_dispose(f);
+    f->text = buffer; f->cap = cap; f->borrowed = true;
 }
 
 bool web_shell_frame_reserve(const web_shell_registry_t *r, web_shell_frame_t *f)
 {
+    if (f->borrowed) return f->cap >= r->status_cap;
     if (f->text && f->cap != r->status_cap) web_shell_frame_dispose(f);   /* web_shell_init() retried with another size */
     if (!f->text) {
         f->text = malloc(r->status_cap);

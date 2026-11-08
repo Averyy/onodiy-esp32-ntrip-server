@@ -129,7 +129,7 @@ static uint32_t s_late_count;
 /* Server-task buffers in PSRAM. */
 EXT_RAM_BSS_ATTR static char s_http_buf[2048];
 EXT_RAM_BSS_ATTR static char s_body[WEB_JSON_MAX_CA + 1];
-static char s_csp[1536];
+EXT_RAM_BSS_ATTR static char s_csp[1536];
 static web_shell_config_t s_config;
 EXT_RAM_BSS_ATTR static web_shell_registry_t s_registry;
 EXT_RAM_BSS_ATTR static web_route_t s_routes[WEB_SHELL_ROUTES_MAX];
@@ -1583,7 +1583,7 @@ esp_err_t web_shell_register_routes(const web_route_t *routes, size_t count)
     if ((!routes && count) || count > s_registry.route_cap - s_registry.route_count) {
         s_registry.failed = true; return ESP_ERR_INVALID_ARG;
     }
-    static web_shell_route_rule_t rules[WEB_SHELL_ROUTES_MAX];
+    EXT_RAM_BSS_ATTR static web_shell_route_rule_t rules[WEB_SHELL_ROUTES_MAX];
     for (size_t i=0; i<count; i++) {
         const web_route_t *r=&routes[i];
         if (!r->fn || !web_shell_access_valid(r->access) || (unsigned)r->body > WEB_BODY_UPLOAD ||

@@ -276,6 +276,19 @@ TEST_CASE("web provider: a frame keeps its block across builds and follows a cha
     TEST_ASSERT_EQUAL_size_t(WEB_SHELL_STATUS_MAX-1,f.cap);
     web_shell_frame_dispose(&f);
     TEST_ASSERT_NULL(f.text); TEST_ASSERT_EQUAL_size_t(0,f.cap);
+
+    /* An attached block is used in place, refused when too small, and never freed. */
+    static char text[WEB_SHELL_STATUS_MAX];
+    web_shell_frame_attach(&f,text,sizeof(text));
+    TEST_ASSERT_TRUE(web_shell_frame_build(&r,&s,5,false,&f));
+    TEST_ASSERT_EQUAL_PTR(text,f.text); TEST_ASSERT_TRUE(f.built);
+    web_shell_frame_dispose(&f);
+    web_shell_frame_attach(&f,text,sizeof(text));
+    web_shell_registry_t too_big=r; too_big.status_cap=sizeof(text)+1;
+    TEST_ASSERT_FALSE(web_shell_frame_build(&too_big,&s,6,false,&f));
+    TEST_ASSERT_EQUAL_PTR(text,f.text);
+    web_shell_frame_dispose(&f);
+    TEST_ASSERT_NULL(f.text);
 }
 
 typedef struct { bool acquire_ok, enqueue_ok; unsigned acquired, queued, owned, restored, closed, completed; } owner_t;
