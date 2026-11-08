@@ -11,7 +11,7 @@ build-tested only: this repository does not run it on hardware.
 
 ## What is supported
 
-Seven components, used unchanged from a pinned revision:
+Eight components, used unchanged from a pinned revision:
 
 | Component | What it is | Needs (from here) |
 |---|---|---|
@@ -22,12 +22,14 @@ Seven components, used unchanged from a pinned revision:
 | `gnss_link` | Sole owner of the receiver UART: RX task, sinks, STREAM/COMMAND/RAW leases, writes | `gnss_framing`, `board`, `settings` |
 | `gnss_obs` | Observations from the stream (MSM, 1005/1006, 1033, GSV) and the receiver's solution sentences field by field (GGA, GST: `gnss_obs_get_solution`) | `gnss_framing`, `gnss_types` |
 | `um98x_ctl` | Unicore N4 command layer: detection, identity, commands, mode read-back, the station's base configuration | `gnss_link`, `gnss_types`, `settings`, `gnss_obs`, `gnss_framing` |
+| `leds` | The board's LEDs (status RGB, Wi-Fi, GNSS): the station's blink codes, or a product's own patterns (`leds_set_pattern`) | `board` |
 
-`um98x_ctl` therefore needs all seven. The ESP-IDF components they use are
-listed in each `CMakeLists.txt` (`esp_driver_uart`, `esp_driver_gpio`,
-`esp_partition`, `spi_flash`, `nvs_flash`, `esp_event`, `esp_timer`).
-Nothing else in `components/` is part of this contract: the station, web,
-casters, hub, updaters, diagnostics and LEDs.
+`um98x_ctl` therefore needs the first seven; `leds` only `board`. The ESP-IDF
+components they use are listed in each `CMakeLists.txt` (`esp_driver_uart`,
+`esp_driver_gpio`, `esp_driver_ledc`, `esp_partition`, `spi_flash`,
+`nvs_flash`, `esp_event`, `esp_timer`). Nothing else in `components/` is
+part of this contract: the station, web, casters, hub, updaters and
+diagnostics.
 
 None of them starts station behaviour on its own: the station supervisor,
 casters and web server live in other components. `um98x_ctl` holds the
@@ -40,7 +42,7 @@ station's base profile and apply session, which run only when called
   by its path, and keep the rest of the tree out of the build:
 
   ```cmake
-  foreach(c board settings gnss_types gnss_framing gnss_link gnss_obs um98x_ctl)
+  foreach(c board settings gnss_types gnss_framing gnss_link gnss_obs um98x_ctl leds)
       list(APPEND EXTRA_COMPONENT_DIRS "${STATION_DIR}/components/${c}")
   endforeach()
   set(COMPONENTS main)
@@ -50,7 +52,7 @@ station's base profile and apply session, which run only when called
   version up: a change that breaks a public API of these components is called
   out there.
 - `tools/ci/external_app.sh` fails when the example build takes any other
-  component from this repository than these seven.
+  component from this repository than these eight.
 
 ## Build requirements
 
@@ -169,6 +171,19 @@ the input, and reports the input it holds (`gnss_rtcm_scan_held`) and each
 frame's stream offset (`gnss_frame_t.start`). The framer reports the same
 for its own input (`gnss_framer_held`). Details in the headers.
 
+## LEDs
+
+`leds_init()` after `board_init()` (a board without LEDs is a no-op), then
+either the station's codes (`leds_set`) or the product's own feedback:
+`leds_set_pattern()` takes one looping pattern per LED (status colour steps,
+Wi-Fi brightness steps, and the GNSS LED either following the receiver's
+status input or its own on/off steps; `leds_pattern.h`). One driver owns the
+pins, the LEDC timer and channels and the 25 ms timer, so never configure
+those pins elsewhere. Setting an equal pattern again keeps its phase, so a
+product can set it on every status update; what each pattern means (phone
+connected, subscribed, a fresh or stale fix) is the product's policy. The
+GNSS status input says the receiver has a position fix, not which kind.
+
 ## Receiver firmware updates (`um98x_flash`)
 
 Not part of this contract yet: `um98x_flash` also needs the station's
@@ -242,12 +257,12 @@ and checks every frame's CRC-24Q again:
 tools/ci/external_host_framing.sh    # cc, then the check on test/fixtures/rtcm/centipede_LAX_30ep.rtcm3
 ```
 
-The pure cores of all seven components are covered by the station's own
+The pure cores of all eight components are covered by the station's own
 host tests (`test/host`, ESP-IDF's linux target).
 
 ## Licence
 
-All seven components are this project's original code under the MIT licence
+All eight components are this project's original code under the MIT licence
 (SPDX headers, [`LICENSE`](../LICENSE)), with no third-party code inside. An
 image built from them also contains the ESP-IDF parts they link (Apache-2.0,
 FreeRTOS under MIT, the C library under BSD licences, ...); the product

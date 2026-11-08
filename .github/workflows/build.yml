@@ -221,7 +221,7 @@ jobs:
   # Another product's build of the receiver components (docs/component-reuse.md):
   # examples/external-receiver copied out of the tree and built against this
   # checkout with only board, settings, gnss_types, gnss_framing, gnss_link,
-  # gnss_obs and um98x_ctl (16 MB and 8 MB layouts, the station's strict
+  # gnss_obs, um98x_ctl and leds (16 MB and 8 MB layouts, the station's strict
   # warnings on them), and the framing code on the host compiler. A change
   # that breaks that contract fails here first.
   external-app:

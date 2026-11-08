@@ -130,3 +130,98 @@ uint8_t led_wifi_level(bool online, int8_t rssi)
     uint32_t above = (uint32_t)(rssi - WIFI_DIM_DBM);
     return (uint8_t)(WIFI_MIN_LEVEL + (255u - WIFI_MIN_LEVEL) * above / span);
 }
+
+/* ---- a product's patterns ------------------------------------------------- */
+
+static bool steps_valid_rgb(const leds_rgb_step_t *s, uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        if (s[i].ms == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool steps_valid_level(const leds_level_step_t *s, uint8_t n)
+{
+    for (uint8_t i = 0; i < n; i++) {
+        if (s[i].ms == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool led_pattern_valid(const leds_pattern_t *p)
+{
+    return p != NULL && p->rgb_steps <= LEDS_PATTERN_STEPS && p->wifi_steps <= LEDS_PATTERN_STEPS &&
+           p->gnss_steps <= LEDS_PATTERN_STEPS &&
+           (p->gnss_mode == LEDS_GNSS_RECEIVER || p->gnss_mode == LEDS_GNSS_PATTERN) &&
+           steps_valid_rgb(p->rgb, p->rgb_steps) && steps_valid_level(p->wifi, p->wifi_steps) &&
+           steps_valid_level(p->gnss, p->gnss_steps);
+}
+
+bool led_pattern_equal(const leds_pattern_t *a, const leds_pattern_t *b)
+{
+    if (a->rgb_steps != b->rgb_steps || a->wifi_steps != b->wifi_steps || a->gnss_steps != b->gnss_steps ||
+        a->gnss_mode != b->gnss_mode) {
+        return false;
+    }
+    for (uint8_t i = 0; i < a->rgb_steps; i++) {
+        const leds_rgb_step_t *x = &a->rgb[i];
+        const leds_rgb_step_t *y = &b->rgb[i];
+        if (x->r != y->r || x->g != y->g || x->b != y->b || x->ms != y->ms) {
+            return false;
+        }
+    }
+    for (uint8_t i = 0; i < a->wifi_steps; i++) {
+        if (a->wifi[i].level != b->wifi[i].level || a->wifi[i].ms != b->wifi[i].ms) {
+            return false;
+        }
+    }
+    for (uint8_t i = 0; i < a->gnss_steps; i++) {
+        if (a->gnss[i].level != b->gnss[i].level || a->gnss[i].ms != b->gnss[i].ms) {
+            return false;
+        }
+    }
+    return true;
+}
+
+led_rgb_t led_pattern_rgb(const leds_pattern_t *p, uint64_t t64)
+{
+    uint32_t total = 0;
+    for (uint8_t i = 0; i < p->rgb_steps; i++) {
+        total += p->rgb[i].ms;
+    }
+    if (total == 0) {
+        return OFF;
+    }
+    uint32_t t = (uint32_t)(t64 % total);
+    for (uint8_t i = 0; i < p->rgb_steps; i++) {
+        if (t < p->rgb[i].ms) {
+            return (led_rgb_t){ p->rgb[i].r, p->rgb[i].g, p->rgb[i].b };
+        }
+        t -= p->rgb[i].ms;
+    }
+    return OFF;
+}
+
+uint8_t led_pattern_level(const leds_level_step_t *steps, uint8_t n, uint64_t t64)
+{
+    uint32_t total = 0;
+    for (uint8_t i = 0; i < n; i++) {
+        total += steps[i].ms;
+    }
+    if (total == 0) {
+        return 0;
+    }
+    uint32_t t = (uint32_t)(t64 % total);
+    for (uint8_t i = 0; i < n; i++) {
+        if (t < steps[i].ms) {
+            return steps[i].level;
+        }
+        t -= steps[i].ms;
+    }
+    return 0;
+}

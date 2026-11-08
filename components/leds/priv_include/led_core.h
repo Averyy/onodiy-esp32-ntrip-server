@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "leds_pattern.h"
 #include "leds_state.h"
 
 #ifdef __cplusplus
@@ -64,6 +65,20 @@ uint32_t led_cycle_ms(const led_state_t *s);
 
 /** The colour `t` ms into a cycle for state `s` (the plain codes, no overlay). */
 led_rgb_t led_code_at(const led_state_t *s, uint32_t t);
+
+/* ---- a product's patterns (leds_pattern.h) ---------------------------------- */
+
+/** Whether every step in use lasts at least 1 ms and the counts fit. */
+bool led_pattern_valid(const leds_pattern_t *p);
+
+/** Same patterns: the counts, the GNSS mode and the steps in use (padding and unused steps ignored). */
+bool led_pattern_equal(const leds_pattern_t *a, const leds_pattern_t *b);
+
+/** The status LED's colour t ms after the pattern started (loops; dark without steps; 64-bit: no wrap). */
+led_rgb_t led_pattern_rgb(const leds_pattern_t *p, uint64_t t);
+
+/** A level pattern's level t ms after it started (loops; 0 without steps). */
+uint8_t led_pattern_level(const leds_level_step_t *steps, uint8_t n, uint64_t t);
 
 /**
  * The Wi-Fi LED's brightness, 0-255: off without an address, else by signal (dim at -90 dBm, full from -45 dBm;

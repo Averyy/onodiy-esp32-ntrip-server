@@ -65,6 +65,11 @@ before tagging ([releases](docs/releases.md)).
   namespace but refuses the station's, so such a reset keeps the shared
   device state. `docs/component-reuse.md` says which keys are shared and who
   migrates them. The station's own factory reset is unchanged.
+- LEDs: `leds_set_pattern()` lets another product show its own feedback on
+  the board's LEDs (one looping pattern per LED, `leds_pattern.h`) with the
+  same driver, pins and dimming; `leds_set()` and the station's codes are
+  unchanged. `leds` joins the components another app may use, in the
+  external build.
 - Docs: the command layer's and the flasher's headers no longer say that only
   the UM982 is flashed; UM980 packages are accepted too.
 - API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,

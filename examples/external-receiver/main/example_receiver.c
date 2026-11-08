@@ -20,6 +20,7 @@
 #include "freertos/task.h"
 #include "gnss_link.h"
 #include "gnss_obs.h"
+#include "leds.h"
 #include "nvs_flash.h"
 #include "settings.h"
 #include "settings_schema.h"
@@ -165,6 +166,16 @@ static esp_err_t receiver_start(void)
         return ESP_ERR_INVALID_STATE;
     }
     const board_desc_t *b = board_get();
+
+    /* The board's LEDs with the product's own pattern (a no-op without LEDs):
+     * a slow white blink, the GNSS LED following the receiver as on the station. */
+    ESP_ERROR_CHECK(leds_init());
+    static const leds_pattern_t k_idle = {
+        .rgb = { { 40, 40, 40, 100 }, { 0, 0, 0, 1900 } },
+        .rgb_steps = 2,
+        .gnss_mode = LEDS_GNSS_RECEIVER,
+    };
+    ESP_ERROR_CHECK(leds_set_pattern(&k_idle));
 
     ESP_ERROR_CHECK(gnss_obs_init());
     ESP_ERROR_CHECK(um98x_ctl_init());

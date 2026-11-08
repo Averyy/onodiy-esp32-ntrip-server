@@ -30,6 +30,9 @@ static const char *TAG = "leds";
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static led_state_t s_state;    /* s_lock */
 static bool s_have_state;      /* s_lock */
+static bool s_product;         /* s_lock: a product's patterns, not the station's codes */
+static leds_pattern_t s_pattern;   /* s_lock */
+static int64_t s_pattern_ms;   /* s_lock: when the showing pattern started (esp_timer ms) */
 
 /* The timer's own (only the timer callback touches them after leds_init). */
 static esp_timer_handle_t s_timer;
@@ -55,12 +58,38 @@ static void tick(void *arg)
     (void)arg;
     led_state_t st;
     bool have;
+    bool product;
+    static leds_pattern_t pat;   /* the timer's copy */
+    int64_t pat_ms;
     portENTER_CRITICAL(&s_lock);
     st = s_state;
     have = s_have_state;
+    product = s_product;
+    if (product) {
+        pat = s_pattern;
+    }
+    pat_ms = s_pattern_ms;
     portEXIT_CRITICAL(&s_lock);
     int64_t now = esp_timer_get_time() / 1000;
 
+    if (product) {
+        uint64_t t = now > pat_ms ? (uint64_t)(now - pat_ms) : 0;
+        if (s_rgb) {
+            led_rgb_t c = led_pattern_rgb(&pat, t);
+            set_duty(CH_RED, c.r);
+            set_duty(CH_GREEN, c.g);
+            set_duty(CH_BLUE, c.b);
+        }
+        if (s_wifi) {
+            set_duty(CH_WIFI, led_pattern_level(pat.wifi, pat.wifi_steps, t));
+        }
+        if (s_gnss_led >= 0) {
+            int on = pat.gnss_mode == LEDS_GNSS_PATTERN ? led_pattern_level(pat.gnss, pat.gnss_steps, t) != 0
+                     : (s_gnss_in >= 0 ? gpio_get_level((gpio_num_t)s_gnss_in) : 0);
+            (void)gpio_set_level((gpio_num_t)s_gnss_led, on);
+        }
+        return;
+    }
     if (s_rgb) {
         led_rgb_t c = led_seq_color(&s_seq, have ? &st : NULL, now);
         set_duty(CH_RED, c.r);
@@ -176,5 +205,22 @@ void leds_set(const led_state_t *s)
     portENTER_CRITICAL(&s_lock);
     s_state = *s;
     s_have_state = true;
+    s_product = false;
     portEXIT_CRITICAL(&s_lock);
+}
+
+esp_err_t leds_set_pattern(const leds_pattern_t *p)
+{
+    if (!led_pattern_valid(p)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    int64_t now = esp_timer_get_time() / 1000;
+    portENTER_CRITICAL(&s_lock);
+    if (!s_product || !led_pattern_equal(&s_pattern, p)) {
+        s_pattern_ms = now;   /* a new pattern starts at its first steps */
+    }
+    s_pattern = *p;
+    s_product = true;
+    portEXIT_CRITICAL(&s_lock);
+    return ESP_OK;
 }

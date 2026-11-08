@@ -23,7 +23,7 @@ set(STATION_FLASH "16MB" CACHE STRING "Station layout: 16MB (partitions.csv) or 
 
 # The supported receiver components, each by its path: nothing else of the
 # station is visible to the build.
-set(STATION_COMPONENTS board settings gnss_types gnss_framing gnss_link gnss_obs um98x_ctl)
+set(STATION_COMPONENTS board settings gnss_types gnss_framing gnss_link gnss_obs um98x_ctl leds)
 foreach(_c ${STATION_COMPONENTS})
     if(NOT EXISTS "${STATION_DIR}/components/${_c}/CMakeLists.txt")
         message(FATAL_ERROR "STATION_DIR ${STATION_DIR} has no component ${_c}")

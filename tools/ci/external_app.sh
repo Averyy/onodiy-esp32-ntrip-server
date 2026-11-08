@@ -6,8 +6,8 @@
 # (docs/component-reuse.md): copied out of this repository, pointed at it
 # only through STATION_DIR, for both station layouts (16 MB and 8 MB), with
 # -Werror on its own code. Then checks that the build took exactly the
-# supported receiver components from this repository and nothing else of
-# it, and that no Kconfig symbol was unknown or ignored.
+# supported components from this repository and nothing else of it, and
+# that no Kconfig symbol was unknown or ignored.
 #
 #   tools/ci/external_app.sh [<out dir>]     (ESP-IDF environment required)
 #
@@ -33,7 +33,7 @@ app="$out/app"
 rm -rf "$app"
 cp -R "$repo/examples/external-receiver" "$app"
 
-supported="board gnss_framing gnss_link gnss_obs gnss_types settings um98x_ctl"
+supported="board gnss_framing gnss_link gnss_obs gnss_types leds settings um98x_ctl"
 
 for layout in 16MB 8MB; do
     b="$out/build-$layout"

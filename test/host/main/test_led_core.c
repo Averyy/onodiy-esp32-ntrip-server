@@ -163,3 +163,82 @@ TEST_CASE("leds: the Wi-Fi LED is off without an address, brighter with a strong
         prev = v;
     }
 }
+
+/* ---- a product's patterns ------------------------------------------------------ */
+
+TEST_CASE("leds: a product's pattern loops step by step; no steps is dark", "[leds]")
+{
+    leds_pattern_t p;
+    memset(&p, 0, sizeof(p));
+    TEST_ASSERT_TRUE(led_pattern_valid(&p));
+    led_rgb_t c = led_pattern_rgb(&p, 1234);
+    TEST_ASSERT_TRUE(c.r == 0 && c.g == 0 && c.b == 0);
+    TEST_ASSERT_EQUAL_UINT8(0, led_pattern_level(p.wifi, p.wifi_steps, 99));
+
+    /* SYNTHETIC: a product's "connected" pattern: blue 100 ms, dark 900 ms. */
+    p.rgb[0] = (leds_rgb_step_t){ 0, 0, 255, 100 };
+    p.rgb[1] = (leds_rgb_step_t){ 0, 0, 0, 900 };
+    p.rgb_steps = 2;
+    TEST_ASSERT_TRUE(led_pattern_valid(&p));
+    static const struct {
+        uint32_t t;
+        uint8_t b;
+    } k[] = { { 0, 255 }, { 99, 255 }, { 100, 0 }, { 999, 0 }, { 1000, 255 }, { 1099, 255 }, { 5100, 0 } };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(k[i].b, led_pattern_rgb(&p, k[i].t).b, "loops every 1000 ms");
+    }
+    /* Level patterns: the Wi-Fi LED's brightness, the GNSS LED on or off. */
+    p.wifi[0] = (leds_level_step_t){ 200, 300 };
+    p.wifi[1] = (leds_level_step_t){ 20, 300 };
+    p.wifi_steps = 2;
+    TEST_ASSERT_EQUAL_UINT8(200, led_pattern_level(p.wifi, p.wifi_steps, 0));
+    TEST_ASSERT_EQUAL_UINT8(20, led_pattern_level(p.wifi, p.wifi_steps, 450));
+    TEST_ASSERT_EQUAL_UINT8(200, led_pattern_level(p.wifi, p.wifi_steps, 600));
+    /* Each LED loops on its own period. */
+    TEST_ASSERT_EQUAL_UINT8(255, led_pattern_rgb(&p, 3000).b);
+    TEST_ASSERT_EQUAL_UINT8(200, led_pattern_level(p.wifi, p.wifi_steps, 3000));
+    /* No glitch where 32 bits of milliseconds wrap (about 49.7 days in). */
+    uint64_t wrap = (uint64_t)UINT32_MAX + 1u;   /* 2^32 = 4294967296: 296 ms into a 1000 ms loop */
+    TEST_ASSERT_EQUAL_UINT8(0, led_pattern_rgb(&p, wrap).b);
+    TEST_ASSERT_EQUAL_UINT8(255, led_pattern_rgb(&p, wrap + 704).b);
+}
+
+TEST_CASE("leds: a product's pattern is checked; equal ones keep their phase whatever the padding", "[leds]")
+{
+    leds_pattern_t a;
+    memset(&a, 0, sizeof(a));
+    a.rgb[0] = (leds_rgb_step_t){ 255, 0, 0, 150 };
+    a.rgb_steps = 1;
+    a.gnss_mode = LEDS_GNSS_PATTERN;
+    a.gnss[0] = (leds_level_step_t){ 1, 500 };
+    a.gnss[1] = (leds_level_step_t){ 0, 500 };
+    a.gnss_steps = 2;
+    TEST_ASSERT_TRUE(led_pattern_valid(&a));
+    TEST_ASSERT_FALSE(led_pattern_valid(NULL));
+
+    leds_pattern_t b;
+    memset(&b, 0xA5, sizeof(b));   /* other padding and unused steps */
+    b.rgb[0] = (leds_rgb_step_t){ 255, 0, 0, 150 };
+    b.rgb_steps = 1;
+    b.wifi_steps = 0;
+    b.gnss_mode = LEDS_GNSS_PATTERN;
+    b.gnss[0] = (leds_level_step_t){ 1, 500 };
+    b.gnss[1] = (leds_level_step_t){ 0, 500 };
+    b.gnss_steps = 2;
+    TEST_ASSERT_TRUE(led_pattern_equal(&a, &b));
+    b.gnss[1].ms = 400;
+    TEST_ASSERT_FALSE(led_pattern_equal(&a, &b));
+    b.gnss[1].ms = 500;
+    b.gnss_mode = LEDS_GNSS_RECEIVER;
+    TEST_ASSERT_FALSE(led_pattern_equal(&a, &b));
+
+    leds_pattern_t bad = a;
+    bad.rgb[0].ms = 0;
+    TEST_ASSERT_FALSE(led_pattern_valid(&bad));
+    bad = a;
+    bad.wifi_steps = LEDS_PATTERN_STEPS + 1;
+    TEST_ASSERT_FALSE(led_pattern_valid(&bad));
+    bad = a;
+    bad.gnss_mode = (leds_gnss_mode_t)7;
+    TEST_ASSERT_FALSE(led_pattern_valid(&bad));
+}
