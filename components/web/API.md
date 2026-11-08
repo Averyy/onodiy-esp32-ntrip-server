@@ -3164,9 +3164,11 @@ newest first, read backwards through the journal.
 
 ### `GET /api/coredump`, `DELETE /api/coredump`
 
-`GET` streams the ELF dump (`application/octet-stream`,
-`Content-Disposition: attachment; filename="coredump-<version>.elf"`) for
-`idf.py coredump-info`; `404 no_coredump` when none. `DELETE` erases it:
+`GET` streams the dump as flash holds it, a header and then the ELF
+(`application/octet-stream`,
+`Content-Disposition: attachment; filename="coredump-<version>.elf"`), for
+`idf.py coredump-info -c`, which detects that format (`esp-coredump`:
+`--core-format raw`); `404 no_coredump` when none. `DELETE` erases it:
 `200 {"ok": true}`. The summary is in `/api/health`.
 
 ---

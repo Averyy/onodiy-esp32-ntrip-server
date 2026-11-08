@@ -6,6 +6,8 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Docs: the core dump download is the raw flash format, not a bare ELF.
+
 - Reuse: `network` options for a product: open the setup AP only when asked, and
   Wi-Fi modem sleep; the station's defaults are unchanged. `diag` builds without
   a warning when PSRAM has no no-init segment. Pending: host tests and builds

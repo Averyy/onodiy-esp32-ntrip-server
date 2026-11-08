@@ -714,7 +714,8 @@ int64_t diag_utc_now(void);
 /** Summary of the stored core dump (present = false if none). */
 esp_err_t diag_coredump_info(diag_coredump_info_t *out);
 
-/** Read raw core dump bytes (ELF) for download; reads past the end fail with ESP_ERR_INVALID_SIZE. */
+/** Read the core dump as flash holds it, for download: a header, then the ELF (esp-coredump format
+ * `raw`; its default detects that). Reads past the end fail with ESP_ERR_INVALID_SIZE. */
 esp_err_t diag_coredump_read(size_t offset, void *buf, size_t len);
 
 /** Erase the stored core dump. */
