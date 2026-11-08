@@ -403,6 +403,38 @@ TEST_CASE("trial: an unknown or empty baseline passes at once", "[app_trial]")
     TEST_ASSERT_EQUAL(FW_TRIAL_ACT_VERIFIED, fw_trial_tick(&in, &r, &obs));
 }
 
+TEST_CASE("trial: a product with nothing to prove: start-up and crashes still decide", "[app_trial]")
+{
+    /* Offline at install (no network, no data path, no outputs): the baseline is empty. */
+    fw_trial_rec_t r;
+    fw_trial_rec_new(&r, NULL, "v1.0.0", 0, 0, 0);
+    fw_trial_obs_t obs;
+    memset(&obs, 0, sizeof(obs));
+
+    /* A start that never completes is never confirmed: the bootloader takes it back. */
+    fw_trial_tick_in_t in = tick_in(FW_TRIAL_RUN_CONFIRMING, CONFIRM_S * 100u);
+    in.init_complete = false;
+    TEST_ASSERT_EQUAL(FW_TRIAL_ACT_NONE, fw_trial_tick(&in, &r, &obs));
+    in.init_complete = true;
+    TEST_ASSERT_EQUAL(FW_TRIAL_ACT_CONFIRM, fw_trial_tick(&in, &r, &obs));
+
+    /* Nothing was up before the update, nothing is asked of it. */
+    in = tick_in(FW_TRIAL_RUN_VERIFYING, CONFIRM_S + 1u);
+    TEST_ASSERT_EQUAL(FW_TRIAL_ACT_VERIFIED, fw_trial_tick(&in, &r, &obs));
+
+    /* Crash resets during the watch still revert it. */
+    r.stage = FW_TRIAL_REC_WATCHING;
+    fw_trial_boot_in_t b = boot_in("v1.0.0", false);
+    b.crash_reset = true;
+    b.prev_uptime_s = 100;
+    fw_trial_boot_out_t out;
+    fw_trial_on_boot(&r, &b, &out);
+    fw_trial_on_boot(&r, &b, &out);
+    TEST_ASSERT_FALSE(out.revert);
+    fw_trial_on_boot(&r, &b, &out);
+    TEST_ASSERT_TRUE(out.revert);
+}
+
 TEST_CASE("trial: the crash watch ends after its time", "[app_trial]")
 {
     fw_trial_rec_t r = rec_with("v0.3.0", FW_TRIAL_REC_WATCHING);

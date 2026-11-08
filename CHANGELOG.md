@@ -87,6 +87,12 @@ before tagging ([releases](docs/releases.md)).
   `pkg_store`); CI builds it in a third external variant, and
   `docs/component-reuse.md` lists what to do for each journal state. `diag`
   now declares its `vfs` dependency and builds without core dumps.
+- Updates: `fw_update` no longer links the station, the casters or the hub.
+  What it needs from them now comes through `fw_update_set_product()`: health
+  for the app trial and the receiver's state and jobs. The station's side is
+  the new `fw_update_station` component, and its behaviour is unchanged. CI
+  builds the updater in a fourth external variant, for a product with no
+  casters that is offline.
 - Docs: the command layer's and the flasher's headers no longer say that only
   the UM982 is flashed; UM980 packages are accepted too.
 - API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,

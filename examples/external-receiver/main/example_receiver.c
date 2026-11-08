@@ -31,6 +31,10 @@
 #include "pkg_store.h"
 #include "um98x_flash.h"
 #endif
+#if EXAMPLE_APP_UPDATE
+#include "fw_update.h"
+#include "lifecycle.h"
+#endif
 
 static const char *TAG = "example";
 
@@ -218,6 +222,22 @@ esp_err_t example_send_correction(const uint8_t *frame, size_t len, gnss_link_tx
     return gnss_link_write_ex(NULL, frame, len, CORRECTION_TX_MS, tx);
 }
 
+#if EXAMPLE_APP_UPDATE
+/* The product's side of the app updater: an offline device with no casters.
+ * Left false, nothing here is asked of a new image: it must start (confirmed
+ * only after fw_update_start and its confirm time) and not crash. A product
+ * that has a network or a data path reports them, and the new image must
+ * reach again what was true when the update was installed. */
+static void product_health(fw_update_health_t *out, void *ctx)
+{
+    (void)ctx;
+    out->network_up = false;
+    out->data_fed = false;
+    out->outputs = 0;
+    out->receiver_problem = false;
+}
+#endif
+
 /* ---- start -------------------------------------------------------------- */
 
 static esp_err_t receiver_start(void)
@@ -287,12 +307,22 @@ static esp_err_t receiver_start(void)
 
 void app_main(void)
 {
+#if EXAMPLE_APP_UPDATE
+    lifecycle_early_boot();   /* first: the reset class and reboot gate that installs and the crash watch need */
+#endif
     /* NVS holds the station's shared device keys: never erased here. */
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     if (settings_init() != ESP_OK) {
         ESP_LOGW(TAG, "settings unavailable: the components run on their defaults, nothing is stored");
     }
+#if EXAMPLE_APP_UPDATE
+    /* First, so a failing trial is reverted before the steps that may be what fails. */
+    const fw_update_product_t product = { .health = product_health };   /* no receiver updates through it */
+    ESP_ERROR_CHECK(lifecycle_init());
+    ESP_ERROR_CHECK(fw_update_set_product(&product));
+    ESP_ERROR_CHECK(fw_update_init());
+#endif
     if (receiver_start() != ESP_OK) {
         return;
     }
@@ -302,4 +332,7 @@ void app_main(void)
         return;
     }
     __atomic_store_n(&s_supervisor, t, __ATOMIC_RELEASE);
+#if EXAMPLE_APP_UPDATE
+    ESP_ERROR_CHECK(fw_update_start());   /* the start is complete: the trial may confirm this image */
+#endif
 }

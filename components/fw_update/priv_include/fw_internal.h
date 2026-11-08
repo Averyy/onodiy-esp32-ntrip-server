@@ -137,7 +137,15 @@ void fw_repo(char *out, size_t out_size);
 bool fw_asset_url(const char *tag, const char *asset, char *out, size_t out_size);
 
 /** The RTCM hub received a frame within the last few seconds. */
-bool fw_hub_fed_now(void);
+/* The product's side (fw_update_set_product), NULL callbacks handled. */
+void fw_product_health(fw_update_health_t *out);
+esp_err_t fw_product_receiver(fw_update_receiver_t *out);
+bool fw_product_model_supported(const char *model);
+uint32_t fw_product_downtime_s(uint32_t size);
+bool fw_product_waits_for_package(um98x_flash_journal_t *j);
+esp_err_t fw_product_receiver_start(const fw_update_receiver_job_t *job);
+esp_err_t fw_product_receiver_check(const fw_update_receiver_job_t *job);
+esp_err_t fw_product_receiver_retry(void);
 
 /** Map the trial state of this boot to the public enum. */
 fw_update_trial_t fw_trial_public(fw_trial_run_t run);

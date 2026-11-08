@@ -27,9 +27,9 @@ Eight components, used unchanged from a pinned revision:
 `um98x_ctl` therefore needs the first seven; `leds` only `board`. The ESP-IDF
 components they use are listed in each `CMakeLists.txt` (`esp_driver_uart`,
 `esp_driver_gpio`, `esp_driver_ledc`, `esp_partition`, `spi_flash`,
-`nvs_flash`, `esp_event`, `esp_timer`). Nothing else in `components/` is
-part of this contract: the station, web, casters, hub, updaters and
-diagnostics.
+`nvs_flash`, `esp_event`, `esp_timer`). The two updaters are optional sets,
+described below. Nothing else in `components/` is part of this contract:
+the station, web, casters and hub.
 
 None of them starts station behaviour on its own: the station supervisor,
 casters and web server live in other components. `um98x_ctl` holds the
@@ -240,6 +240,44 @@ is staged again.
 Tested in `test/host` against a simulated receiver: wrong model and the
 package rules (`test_pkg_check.c`), interruption and retry transitions, the
 point of no return, needs-user and recovery plans (`test_fl_session.c`).
+
+## App updates (`fw_update`)
+
+Optional as well: `fw_update` with `network`, `lifecycle`, `ledger`,
+`tcp_diag`, `diag` and `pkg_store`, none of which needs the station, casters
+or hub. The example builds this set with `-D STATION_APP_UPDATE=ON`
+(`tools/ci/external_app.sh` checks it). It needs
+`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` and the station's OTA partitions.
+The release repository and manifest name are the existing Kconfig options
+(`CONFIG_FW_UPDATE_GITHUB_REPO`, `CONFIG_FW_UPDATE_MANIFEST_ASSET`); a product
+sets its own, so it is only offered its own releases.
+
+Order at start: `lifecycle_early_boot()` (the reset class and the reboot
+gate that installs and the crash watch need), `lifecycle_init()`, `fw_update_set_product()`,
+`fw_update_init()` before the steps that might be what fails, and
+`fw_update_start()` once the start is complete: an image that never gets
+there is not confirmed and the bootloader takes it back.
+
+`fw_update_product_t` is the product's side; any callback may be `NULL`.
+They run on the caller of the `fw_update` function that needs them (the web
+server's handler, the updater's worker, or its 1 s trial tick), so they must
+not block for long or call back into `fw_update`.
+
+- **`health`** (trial): what is true when an update is installed (network,
+  data path, outputs) is what the new image must reach again within its
+  verify window. What a product leaves false is not asked, so an offline
+  device passes on start-up and crash evidence alone; crash resets during
+  the watch still revert it. `receiver_problem` excuses the data path and
+  the outputs at the end of the window, so an unplugged antenna does not
+  revert a good image.
+- **`receiver`** and the `receiver_*` callbacks (receiver updates): the
+  product reports the receiver's identity and readiness and runs the update
+  it is handed. Without `receiver`, no receiver update is offered.
+
+Not replaceable by a product: the download host and certificate rules, the
+manifest and its signature, size and SHA-256 checks, the check that an image
+was built for this product (its project name), the rollback list and the
+trial stages.
 
 ## Shared NVS keys
 

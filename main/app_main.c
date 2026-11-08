@@ -52,6 +52,7 @@
 #include "board.h"
 #include "diag.h"
 #include "fw_update.h"
+#include "fw_update_station.h"
 #include "gnss_link.h"
 #include "gnss_obs.h"
 #include "health.h"
@@ -138,7 +139,7 @@ static esp_err_t board_step(void)
  * the steps that might be what is failing. The receiver path and the casters
  * are skipped in safe mode; their status getters work uninitialised. */
 static const boot_step_t s_init_steps[] = {
-    { "fw_update",    fw_update_init,    false }, /* app trial bookkeeping, revert */
+    { "fw_update",    fw_update_station_init, false }, /* the station as its product; app trial bookkeeping, revert */
     { "board",        board_step,        false }, /* which board, its pins */
     { "leds",         leds_init,         false }, /* the start pattern until health's first tick */
     { "ledger",       ledger_step,       false }, /* first shutdown hook; planned-reboot accounting */

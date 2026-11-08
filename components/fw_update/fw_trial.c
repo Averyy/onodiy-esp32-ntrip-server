@@ -13,11 +13,8 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "fw_internal.h"
-#include "network.h"
-#include "ntrip_server.h"
 #include "sdkconfig.h"
 #include "settings.h"
-#include "station.h"
 
 static const char *TAG = "fw_update";
 
@@ -133,54 +130,6 @@ static void journal(diag_event_t kind, int32_t a, int32_t b)
         /* The log line next to every call says the same. */
         ESP_LOGD(TAG, "journal record %d not written: %s", (int)kind, esp_err_to_name(err));
     }
-}
-
-/* Station state that means "no RTCM because of the receiver". */
-static bool receiver_problem(void)
-{
-    station_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return false;
-    }
-    bool problem = false;
-    if (station_get_status(st) == ESP_OK) {
-        switch (st->state) {
-        case STATION_STATE_DETECTING:
-        case STATION_STATE_CONFIGURING:
-        case STATION_STATE_RECOVERING:
-        case STATION_STATE_NO_RECEIVER:
-        case STATION_STATE_FLASHING:
-        case STATION_STATE_FLASH_RECOVERY:
-            problem = true;
-            break;
-        case STATION_STATE_IDLE:
-        case STATION_STATE_STREAMING:
-            break;
-        }
-    }
-    free(st);
-    return problem;
-}
-
-/* Caster slots in `mask` that stream now. */
-static uint8_t streaming_slots(uint8_t mask)
-{
-    if (mask == 0) {
-        return 0;
-    }
-    ntrip_caster_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return 0;
-    }
-    uint8_t now = 0;
-    size_t n = ntrip_server_slot_count();
-    for (size_t i = 0; i < n && i < 8; i++) {
-        if ((mask & (1u << i)) && ntrip_server_get_status(i, st) == ESP_OK && st->state == NTRIP_STATE_STREAMING) {
-            now |= (uint8_t)(1u << i);
-        }
-    }
-    free(st);
-    return now;
 }
 
 /*
@@ -431,15 +380,13 @@ void fw_trial_tick_worker(void)
     }
 
     if (run == FW_TRIAL_RUN_VERIFYING) {
-        bool online = network_is_online();
-        bool fed = fw_hub_fed_now();
-        uint8_t slots = streaming_slots(rec.streaming_slots);
-        bool problem = receiver_problem();
+        fw_update_health_t h;
+        fw_product_health(&h);
         fw_lock();
-        g_fw.obs.sta_online_seen |= online;
-        g_fw.obs.hub_fed_seen |= fed;
-        g_fw.obs.streaming_seen |= slots;
-        g_fw.obs.receiver_problem = problem;
+        g_fw.obs.sta_online_seen |= h.network_up;
+        g_fw.obs.hub_fed_seen |= h.data_fed;
+        g_fw.obs.streaming_seen |= (uint8_t)(h.outputs & rec.streaming_slots);
+        g_fw.obs.receiver_problem = h.receiver_problem;
         fw_unlock();
     }
 

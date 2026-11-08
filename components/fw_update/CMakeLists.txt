@@ -21,7 +21,7 @@ idf_component_register(
         "release_url.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
-    REQUIRES esp_event
+    REQUIRES esp_event gnss_types
     PRIV_REQUIRES
         app_update
         esp_app_format
@@ -35,8 +35,4 @@ idf_component_register(
         settings
         lifecycle
         diag
-        station
-        um98x_flash
-        network
-        ntrip_server
-        rtcm_hub)
+        network)

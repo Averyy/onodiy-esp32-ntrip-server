@@ -11,7 +11,8 @@
 #
 # STATION_DIR: a checkout of this repository at the revision the product
 # pins (by default the checkout this directory sits in). STATION_UPDATER=ON
-# adds the receiver updater (um98x_flash and the diag and pkg_store it needs). STATION_FLASH: the
+# adds the receiver updater (um98x_flash and the diag and pkg_store it needs);
+# STATION_APP_UPDATE=ON the app updater (fw_update and what it needs). STATION_FLASH: the
 # station layout the image is for, 16MB (partitions.csv: the 16 MB boards)
 # or 8MB (partitions-8mb.csv: the NTRIP-X); it goes into the
 # generated sdkconfig, so another layout needs another build directory and
@@ -22,12 +23,17 @@ set(STATION_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "onodiy-esp32-ntrip
 get_filename_component(STATION_DIR "${STATION_DIR}" ABSOLUTE)
 set(STATION_FLASH "16MB" CACHE STRING "Station layout: 16MB (partitions.csv) or 8MB (partitions-8mb.csv)")
 option(STATION_UPDATER "Also the receiver updater (um98x_flash with diag and pkg_store)" OFF)
+option(STATION_APP_UPDATE "Also the app updater (fw_update, with no station, caster or hub code)" OFF)
 
 # The supported receiver components, each by its path: nothing else of the
 # station is visible to the build.
 set(STATION_COMPONENTS board settings gnss_types gnss_framing gnss_link gnss_obs um98x_ctl leds)
 if(STATION_UPDATER)
     list(APPEND STATION_COMPONENTS um98x_flash diag pkg_store)
+endif()
+if(STATION_APP_UPDATE)
+    list(APPEND STATION_COMPONENTS fw_update network lifecycle ledger tcp_diag diag pkg_store)
+    list(REMOVE_DUPLICATES STATION_COMPONENTS)
 endif()
 foreach(_c ${STATION_COMPONENTS})
     if(NOT EXISTS "${STATION_DIR}/components/${_c}/CMakeLists.txt")
@@ -51,7 +57,11 @@ file(WRITE "${_layout}"
     "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
     "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${STATION_DIR}/${_table}\"\n"
     "CONFIG_PARTITION_TABLE_OFFSET=0x10000\n")
-if(STATION_UPDATER)
+if(STATION_APP_UPDATE)
+    # A new image runs on trial: the bootloader takes it back if it is never confirmed.
+    file(APPEND "${_layout}" "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n")
+endif()
+if(STATION_UPDATER OR STATION_APP_UPDATE)
     # The updater checks and sends a PSRAM copy of the package (and stages it
     # there on the 8 MB layout): the boards' octal PSRAM, as the station sets it.
     file(APPEND "${_layout}"
@@ -70,6 +80,9 @@ set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${_layout}"
 set(COMPONENTS main)
 if(STATION_UPDATER)
     list(APPEND COMPONENTS um98x_flash pkg_store)   # main takes them as optional requirements
+endif()
+if(STATION_APP_UPDATE)
+    list(APPEND COMPONENTS fw_update lifecycle)
 endif()
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(external_receiver)

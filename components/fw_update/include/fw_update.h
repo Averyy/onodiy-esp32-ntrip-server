@@ -165,6 +165,7 @@
 
 #include "esp_err.h"
 #include "esp_event.h"
+#include "gnss_types.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -268,6 +269,75 @@ typedef struct {
  * trial image, publish the trial flag to lifecycle.
  */
 esp_err_t fw_update_init(void);
+
+/* ---- what the product supplies ------------------------------------------------------ */
+
+/**
+ * The product's health right now, for the app trial: what is true when an
+ * update is installed is the baseline the new image must reach again within
+ * its verify window. Whatever a product leaves false is not asked of the new
+ * image, so an offline device passes on start-up and crash evidence alone.
+ */
+typedef struct {
+    bool network_up;        /**< the device has its network (station: an address on its Wi-Fi) */
+    bool data_fed;          /**< the product's data path runs (station: RTCM reaches the hub) */
+    uint8_t outputs;        /**< bit per output delivering now, at most 8 (station: caster slots streaming) */
+    bool receiver_problem;  /**< the receiver is not usable right now: excuses data_fed and outputs at the window's end */
+} fw_update_health_t;
+
+/** The receiver as the product knows it, for offering and starting receiver updates. */
+typedef struct {
+    bool valid;             /**< identity known */
+    char model[16];
+    char firmware[48];
+    uint32_t build;
+    bool ready;             /**< in its normal running state: a receiver update may start */
+    bool journal_open;      /**< a receiver update journal is open */
+} fw_update_receiver_t;
+
+/** A downloaded, verified receiver package to act on. */
+typedef struct {
+    uint8_t sha256[32];
+    uint32_t size;
+    char expected_fw[48];
+    uint32_t expected_build;
+    bool cross_layout_confirmed;
+} fw_update_receiver_job_t;
+
+/**
+ * The product's side of the updater (fw_update_set_product). Every callback
+ * may be NULL: without `health` the trial asks nothing beyond start-up and
+ * crash evidence; without `receiver` no receiver update is offered. They run
+ * on the caller of the fw_update call that needs them (the web server's
+ * handler, the updater's worker or its 1 s trial tick): they must not block
+ * for long and must not call back into fw_update. Integrity, trust, version
+ * and rollback rules stay inside the updater and cannot be replaced here.
+ */
+typedef struct {
+    void *ctx;
+    void (*health)(fw_update_health_t *out, void *ctx);
+    /** ESP_OK with *out filled; ESP_ERR_NO_MEM is passed on to the caller; any other error: state unknown now. */
+    esp_err_t (*receiver)(fw_update_receiver_t *out, void *ctx);
+    /** A model whose packages can be installed. NULL: every model. */
+    bool (*model_supported)(const char *model, void *ctx);
+    /** Expected receiver downtime for a package of `size` bytes, seconds (0: unknown). */
+    uint32_t (*receiver_downtime_s)(uint32_t size, void *ctx);
+    /** An open journal waits for its package to be staged again (*journal gets it). */
+    bool (*receiver_waits_for_package)(um98x_flash_journal_t *journal, void *ctx);
+    /** Hand a verified package over: the product runs the update. ESP_ERR_NOT_SUPPORTED: updates are off in this build. */
+    esp_err_t (*receiver_start)(const fw_update_receiver_job_t *job, void *ctx);
+    /** Check the package against the rules without sending it (after receiver_start said ESP_ERR_NOT_SUPPORTED). */
+    esp_err_t (*receiver_check)(const fw_update_receiver_job_t *job, void *ctx);
+    /** Retry the interrupted update with the package just staged again. */
+    esp_err_t (*receiver_retry_restaged)(void *ctx);
+} fw_update_product_t;
+
+/**
+ * Register the product's side (copied). Call once, before fw_update_init().
+ * Without it the updater runs as if every callback were NULL.
+ * @return ESP_OK, ESP_ERR_INVALID_ARG (NULL), ESP_ERR_INVALID_STATE (after fw_update_init).
+ */
+esp_err_t fw_update_set_product(const fw_update_product_t *product);
 
 /** Start the worker task, the trial timers and the daily check (due from ota/last_check). */
 esp_err_t fw_update_start(void);

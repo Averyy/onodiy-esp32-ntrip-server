@@ -19,12 +19,9 @@
 #include "network.h"
 #include "pkg_store.h"
 #include "release_url.h"
-#include "rtcm_hub.h"
 #include "sdkconfig.h"
 #include "semver.h"
 #include "settings.h"
-#include "station.h"
-#include "um98x_flash.h"
 
 static const char *TAG = "fw_update";
 
@@ -36,7 +33,6 @@ fw_ctx_t g_fw;
 #define WORKER_PRIO      4
 #define WORKER_TICK_MS   1000
 #define JOB_QUEUE_LEN    4
-#define HUB_FED_MS       5000u
 #define CHECK_INTERVAL_S ((uint32_t)CONFIG_FW_UPDATE_CHECK_INTERVAL_H * 3600u)
 #define MANIFEST_CAP     ((size_t)CONFIG_FW_UPDATE_MANIFEST_MAX_KB * 1024u)
 #define MANIFEST_KEEP    4000u   /* a larger manifest (with its repository) is not kept over a restart */
@@ -145,11 +141,65 @@ bool fw_asset_url(const char *tag, const char *asset, char *out, size_t out_size
     return fw_release_asset_url(out, out_size, g_fw.repo, tag, asset);
 }
 
-bool fw_hub_fed_now(void)
+/* ---- the product's side ---------------------------------------------------------------- */
+
+static fw_update_product_t s_product;
+
+esp_err_t fw_update_set_product(const fw_update_product_t *product)
 {
-    rtcm_hub_stats_t st;
-    rtcm_hub_get_stats(&st);
-    return st.last_frame_age_ms <= HUB_FED_MS;
+    if (product == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (g_fw.mtx != NULL) {
+        return ESP_ERR_INVALID_STATE;   /* the trial may already have read it */
+    }
+    s_product = *product;
+    return ESP_OK;
+}
+
+void fw_product_health(fw_update_health_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (s_product.health != NULL) {
+        s_product.health(out, s_product.ctx);
+    }
+}
+
+esp_err_t fw_product_receiver(fw_update_receiver_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    return s_product.receiver != NULL ? s_product.receiver(out, s_product.ctx) : ESP_ERR_NOT_FOUND;
+}
+
+bool fw_product_model_supported(const char *model)
+{
+    return s_product.model_supported == NULL || s_product.model_supported(model, s_product.ctx);
+}
+
+uint32_t fw_product_downtime_s(uint32_t size)
+{
+    return s_product.receiver_downtime_s != NULL ? s_product.receiver_downtime_s(size, s_product.ctx) : 0;
+}
+
+bool fw_product_waits_for_package(um98x_flash_journal_t *j)
+{
+    return s_product.receiver_waits_for_package != NULL && s_product.receiver_waits_for_package(j, s_product.ctx);
+}
+
+esp_err_t fw_product_receiver_start(const fw_update_receiver_job_t *job)
+{
+    return s_product.receiver_start != NULL ? s_product.receiver_start(job, s_product.ctx) : ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t fw_product_receiver_check(const fw_update_receiver_job_t *job)
+{
+    return s_product.receiver_check != NULL ? s_product.receiver_check(job, s_product.ctx) : ESP_ERR_NOT_SUPPORTED;
+}
+
+esp_err_t fw_product_receiver_retry(void)
+{
+    return s_product.receiver_retry_restaged != NULL ? s_product.receiver_retry_restaged(s_product.ctx)
+                                                     : ESP_ERR_NOT_SUPPORTED;
 }
 
 fw_update_trial_t fw_trial_public(fw_trial_run_t run)
@@ -176,7 +226,7 @@ static const char *running_version(void)
 
 /* Why a receiver update cannot start now (banner, dialog, and the install
  * call itself). The station repeats its own checks when it is asked. */
-static fw_update_gnss_block_t gnss_block_reason(const station_status_t *st, bool st_ok)
+static fw_update_gnss_block_t gnss_block_reason(const fw_update_receiver_t *r, bool known)
 {
     if (lifecycle_in_safe_mode()) {
         return FW_GNSS_BLOCK_SAFE_MODE;
@@ -187,13 +237,13 @@ static fw_update_gnss_block_t gnss_block_reason(const station_status_t *st, bool
     if (lifecycle_update_active() == LIFECYCLE_UPDATE_APP) {
         return FW_GNSS_BLOCK_APP_UPDATE;
     }
-    if (!st_ok || st->flash_journal_open) {
+    if (!known || r->journal_open) {
         return FW_GNSS_BLOCK_JOURNAL_OPEN;
     }
-    if (st->receiver.valid && !um98x_flash_model_supported(st->receiver.model)) {
+    if (r->valid && !fw_product_model_supported(r->model)) {
         return FW_GNSS_BLOCK_UNSUPPORTED_MODEL;
     }
-    if (st->state != STATION_STATE_STREAMING) {
+    if (!r->ready) {
         return FW_GNSS_BLOCK_RECEIVER_NOT_STREAMING;
     }
     return FW_GNSS_BLOCK_NONE;
@@ -709,12 +759,13 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
     if (g_fw.mtx == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
-    station_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return ESP_ERR_NO_MEM;
+    fw_update_receiver_t r;
+    esp_err_t rx_err = fw_product_receiver(&r);
+    if (rx_err == ESP_ERR_NO_MEM) {
+        return rx_err;
     }
-    bool st_ok = station_get_status(st) == ESP_OK;
-    fw_update_gnss_block_t block = gnss_block_reason(st, st_ok);
+    bool known = rx_err == ESP_OK;
+    fw_update_gnss_block_t block = gnss_block_reason(&r, known);
     pkg_store_info_t pkg;
     bool pinned = pkg_store_get_info(&pkg) == ESP_OK && pkg.pinned;
 
@@ -722,7 +773,7 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
     fw_lock();
     const fw_manifest_gnss_t *entry =
         g_fw.have_manifest && !pkg_store_absent()   /* no package partition on this board: nothing to offer */
-            ? fw_policy_gnss_offered(&g_fw.manifest, st->receiver.model, st->receiver.build, offered_build)
+            ? fw_policy_gnss_offered(&g_fw.manifest, r.model, r.build, offered_build)
             : NULL;
     if (block != FW_GNSS_BLOCK_NONE) {
         ESP_LOGW(TAG, "receiver update refused (reason %d)", (int)block);
@@ -735,7 +786,6 @@ esp_err_t fw_update_install_gnss(uint32_t offered_build, bool cross_layout_ack)
         err = queue_job_locked(&job);
     }
     fw_unlock();
-    free(st);
     return err;
 }
 
@@ -758,7 +808,7 @@ bool fw_manifest_entry_for_journal(const um98x_flash_journal_t *j, fw_manifest_g
 bool fw_update_has_journal_package(void)
 {
     um98x_flash_journal_t j;
-    if (g_fw.mtx == NULL || !station_flash_waits_for_package(&j)) {
+    if (g_fw.mtx == NULL || !fw_product_waits_for_package(&j)) {
         return false;
     }
     fw_manifest_gnss_t entry;
@@ -774,7 +824,7 @@ esp_err_t fw_update_restage_gnss(void)
         return ESP_ERR_INVALID_STATE;
     }
     um98x_flash_journal_t j;
-    if (!station_flash_waits_for_package(&j)) {
+    if (!fw_product_waits_for_package(&j)) {
         return ESP_ERR_INVALID_STATE;
     }
     fw_manifest_gnss_t entry;
@@ -817,20 +867,20 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
     out->next_check_in_s = UINT32_MAX;
     strlcpy(out->running_version, running_version(), sizeof(out->running_version));
 
-    station_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return ESP_ERR_NO_MEM;
+    fw_update_receiver_t r;
+    esp_err_t rx_err = fw_product_receiver(&r);
+    if (rx_err == ESP_ERR_NO_MEM) {
+        return rx_err;
     }
-    bool st_ok = station_get_status(st) == ESP_OK;
-    out->gnss_blocked = gnss_block_reason(st, st_ok);
-    if (st_ok && st->receiver.valid) {
-        strlcpy(out->gnss_running, st->receiver.firmware, sizeof(out->gnss_running));
+    bool known = rx_err == ESP_OK;
+    out->gnss_blocked = gnss_block_reason(&r, known);
+    if (known && r.valid) {
+        strlcpy(out->gnss_running, r.firmware, sizeof(out->gnss_running));
     }
     int64_t now = 0;
     bool trusted = fw_clock(&now);
 
     if (g_fw.mtx == NULL) {
-        free(st);
         return ESP_OK;
     }
     fw_lock();
@@ -854,24 +904,21 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
         out->app_update_available = offer.available;
         out->latest_rolled_back = offer.rolled_back;
         const fw_manifest_gnss_t *g =
-            st_ok && st->receiver.valid && !pkg_store_absent()
-                ? fw_policy_gnss_offer(&g_fw.manifest, st->receiver.model, st->receiver.build)
-                : NULL;
+            known && r.valid && !pkg_store_absent() ? fw_policy_gnss_offer(&g_fw.manifest, r.model, r.build) : NULL;
         if (g != NULL) {
             strlcpy(out->gnss_latest, g->version, sizeof(out->gnss_latest));
             out->gnss_latest_build = g->build;
             out->gnss_update_available = true;
-            out->gnss_expected_downtime_s = station_expected_flash_downtime_s(g->file.size);
+            out->gnss_expected_downtime_s = fw_product_downtime_s(g->file.size);
         }
         const fw_manifest_gnss_t *rel =
-            st_ok && st->receiver.valid ? fw_policy_gnss_release(&g_fw.manifest, st->receiver.model) : NULL;
+            known && r.valid ? fw_policy_gnss_release(&g_fw.manifest, r.model) : NULL;
         if (rel != NULL) {
             strlcpy(out->gnss_release, rel->version, sizeof(out->gnss_release));
             out->gnss_release_build = rel->build;
         }
     }
     fw_unlock();
-    free(st);
     return ESP_OK;
 }
 
@@ -884,25 +931,21 @@ size_t fw_update_gnss_offers(fw_update_gnss_offer_t *out, size_t cap)
     if (out == NULL || cap == 0 || g_fw.mtx == NULL) {
         return 0;
     }
-    station_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return 0;
-    }
-    bool rx = station_get_status(st) == ESP_OK && st->receiver.valid;
+    fw_update_receiver_t r;
+    bool rx = fw_product_receiver(&r) == ESP_OK && r.valid;
     size_t n = 0;
     fw_lock();
     if (rx && g_fw.have_manifest && !pkg_store_absent()) {
         const fw_manifest_gnss_t *offers[FW_MANIFEST_MAX_GNSS];
-        n = fw_policy_gnss_offers(&g_fw.manifest, st->receiver.model, st->receiver.build, offers,
+        n = fw_policy_gnss_offers(&g_fw.manifest, r.model, r.build, offers,
                                   cap < FW_MANIFEST_MAX_GNSS ? cap : FW_MANIFEST_MAX_GNSS);
         for (size_t i = 0; i < n; i++) {
             strlcpy(out[i].version, offers[i]->version, sizeof(out[i].version));
             out[i].build = offers[i]->build;
-            out[i].expected_downtime_s = station_expected_flash_downtime_s(offers[i]->file.size);
+            out[i].expected_downtime_s = fw_product_downtime_s(offers[i]->file.size);
         }
     }
     fw_unlock();
-    free(st);
     return n;
 }
 

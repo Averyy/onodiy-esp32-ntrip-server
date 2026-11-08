@@ -14,35 +14,17 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "fw_internal.h"
-#include "network.h"
-#include "ntrip_server.h"
 #include "pkg_store.h"
 #include "psa/crypto.h"
-#include "station.h"
 
 static const char *TAG = "fw_update";
 
 void fw_capture_baseline(uint8_t *baseline, uint8_t *slots)
 {
-    *baseline = 0;
-    *slots = 0;
-    if (network_is_online()) {
-        *baseline |= FW_BASELINE_STA_IP;
-    }
-    if (fw_hub_fed_now()) {
-        *baseline |= FW_BASELINE_HUB_FED;
-    }
-    ntrip_caster_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        return;
-    }
-    size_t n = ntrip_server_slot_count();
-    for (size_t i = 0; i < n && i < 8; i++) {
-        if (ntrip_server_get_status(i, st) == ESP_OK && st->state == NTRIP_STATE_STREAMING) {
-            *slots |= (uint8_t)(1u << i);
-        }
-    }
-    free(st);
+    fw_update_health_t h;
+    fw_product_health(&h);
+    *baseline = (h.network_up ? FW_BASELINE_STA_IP : 0u) | (h.data_fed ? FW_BASELINE_HUB_FED : 0u);
+    *slots = h.outputs;
 }
 
 /* The new image is active: record its trial, then reboot into it. The update
@@ -327,7 +309,7 @@ esp_err_t fw_install_gnss_restage_job(void)
 {
     static fw_manifest_gnss_t entry;   /* worker only */
     um98x_flash_journal_t j;
-    bool waits = station_flash_waits_for_package(&j);
+    bool waits = fw_product_waits_for_package(&j);
     fw_lock();
     bool have = waits && fw_manifest_entry_for_journal(&j, &entry);
     char tag[sizeof(g_fw.manifest.version)];
@@ -351,7 +333,7 @@ esp_err_t fw_install_gnss_restage_job(void)
         err = pkg_store_verify();
     }
     if (err == ESP_OK) {
-        err = station_flash_retry_restaged();
+        err = fw_product_receiver_retry();
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "the interrupted receiver update was not retried: %s", esp_err_to_name(err));
@@ -367,24 +349,21 @@ esp_err_t fw_install_gnss_restage_job(void)
 esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
 {
     static fw_manifest_gnss_t entry;   /* worker only */
-    station_status_t *st = malloc(sizeof(*st));
-    if (st == NULL) {
-        fw_set_state(FW_UPDATE_FAILED, ESP_ERR_NO_MEM);
-        return ESP_ERR_NO_MEM;
+    fw_update_receiver_t r;
+    esp_err_t rx_err = fw_product_receiver(&r);
+    if (rx_err == ESP_ERR_NO_MEM) {
+        fw_set_state(FW_UPDATE_FAILED, rx_err);
+        return rx_err;
     }
-    bool ok = station_get_status(st) == ESP_OK && st->state == STATION_STATE_STREAMING &&
-              !st->flash_journal_open && !lifecycle_app_trial_active() && !lifecycle_in_safe_mode() &&
-              lifecycle_update_active() == LIFECYCLE_UPDATE_NONE && !pkg_store_absent();
+    bool ok = rx_err == ESP_OK && r.ready && !r.journal_open && !lifecycle_app_trial_active() &&
+              !lifecycle_in_safe_mode() && lifecycle_update_active() == LIFECYCLE_UPDATE_NONE && !pkg_store_absent();
     fw_lock();
     const fw_manifest_gnss_t *g =
-        (ok && g_fw.have_manifest)
-            ? fw_policy_gnss_offered(&g_fw.manifest, st->receiver.model, st->receiver.build, build)
-            : NULL;
+        (ok && g_fw.have_manifest) ? fw_policy_gnss_offered(&g_fw.manifest, r.model, r.build, build) : NULL;
     if (g != NULL) {
         entry = *g;
     }
     fw_unlock();
-    free(st);
     if (g == NULL) {
         /* Something changed since the user confirmed. */
         fw_set_state(FW_UPDATE_FAILED, ESP_ERR_INVALID_STATE);
@@ -421,31 +400,24 @@ esp_err_t fw_install_gnss_job(uint32_t build, bool cross_layout_ack)
         }
     }
     if (err == ESP_OK) {
-        station_flash_request_t req;
-        memset(&req, 0, sizeof(req));
-        memcpy(req.sha256, entry.file.sha256, sizeof(req.sha256));
-        req.size = entry.file.size;
-        strlcpy(req.expected_fw, entry.version, sizeof(req.expected_fw));
-        req.expected_build = entry.build;
-        req.cross_layout_confirmed = cross_layout_ack;
-        if (station_sg_test_running()) {
-            /* Started while the package downloaded: the comparison owns the
-             * receiver until it ends (the web refuses an update during one). */
-            ESP_LOGE(TAG, "a signal-group comparison is running: receiver update not started (start it again "
-                          "when the comparison has ended)");
-        }
-        err = station_request_flash(&req);
+        fw_update_receiver_job_t job;
+        memset(&job, 0, sizeof(job));
+        memcpy(job.sha256, entry.file.sha256, sizeof(job.sha256));
+        job.size = entry.file.size;
+        strlcpy(job.expected_fw, entry.version, sizeof(job.expected_fw));
+        job.expected_build = entry.build;
+        job.cross_layout_confirmed = cross_layout_ack;
+        err = fw_product_receiver_start(&job);
         bool checking = false;
         if (err == ESP_ERR_NOT_SUPPORTED) {
-            /* Receiver flashing is not enabled in this build: the station
+            /* Receiver flashing is not enabled in this build: the product
              * checks the package against every rule instead (nothing is sent
              * to the receiver) and releases it afterwards. */
-            checking = station_request_package_check(&req) == ESP_OK;
+            checking = fw_product_receiver_check(&job) == ESP_OK;
             ESP_LOGW(TAG, "receiver flashing is not enabled in this build: %s",
                      checking ? "the downloaded package is checked, then released" : "package released");
         } else if (err != ESP_OK) {
-            ESP_LOGE(TAG, "the station did not take the receiver update (%s): package released",
-                     esp_err_to_name(err));
+            ESP_LOGE(TAG, "the receiver update was not taken (%s): package released", esp_err_to_name(err));
         }
         if (err != ESP_OK && !checking) {
             /* Nothing stays staged without a session that uses it. */
