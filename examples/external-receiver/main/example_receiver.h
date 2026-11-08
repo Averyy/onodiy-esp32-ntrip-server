@@ -21,6 +21,20 @@ extern "C" {
  */
 esp_err_t example_send_correction(const uint8_t *frame, size_t len, gnss_link_tx_t *tx);
 
+#if EXAMPLE_UPDATER
+#include "um98x_flash.h"
+
+/**
+ * A receiver update with a package already staged (pkg_store) that the user
+ * confirmed (size, SHA-256, the firmware it should produce): the receiver
+ * identified, the package checked against it, pinned, sent under one RAW
+ * lease. *res gets the outcome; with UM98X_FLASH_END_DONE or _ABORTED its
+ * receiver field is the application's own version log after the session,
+ * for the product's profile check before anything else is sent.
+ */
+esp_err_t example_update_receiver(const um98x_flash_expect_t *confirmed, um98x_flash_result_t *res);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

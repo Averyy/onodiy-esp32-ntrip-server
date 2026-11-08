@@ -15,7 +15,6 @@
 #include "diag_task_core.h"
 
 #include "esp_attr.h"
-#include "esp_core_dump.h"
 #include "esp_heap_caps.h"
 #include "esp_ipc.h"
 #include "esp_log.h"
@@ -27,6 +26,10 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+#include "esp_core_dump.h"
+#endif
 
 static const char *TAG = "diag";
 

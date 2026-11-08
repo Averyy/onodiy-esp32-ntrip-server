@@ -16,5 +16,5 @@ idf_component_register(
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     REQUIRES log
-    PRIV_REQUIRES espcoredump esp_partition esp_driver_uart esp_driver_usb_serial_jtag esp_mm esp_timer esp_system
+    PRIV_REQUIRES espcoredump esp_partition esp_driver_uart esp_driver_usb_serial_jtag esp_mm esp_timer esp_system vfs
                   hal esp_app_format)

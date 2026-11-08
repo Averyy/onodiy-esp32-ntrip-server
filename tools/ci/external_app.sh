@@ -5,7 +5,8 @@
 # Builds examples/external-receiver as another product would
 # (docs/component-reuse.md): copied out of this repository, pointed at it
 # only through STATION_DIR, for both station layouts (16 MB and 8 MB), with
-# -Werror on its own code. Then checks that the build took exactly the
+# -Werror on its own code, and once more on 16 MB with the receiver updater
+# (STATION_UPDATER=ON). Then checks that each build took exactly the
 # supported components from this repository and nothing else of it, and
 # that no Kconfig symbol was unknown or ignored.
 #
@@ -33,20 +34,30 @@ app="$out/app"
 rm -rf "$app"
 cp -R "$repo/examples/external-receiver" "$app"
 
-supported="board gnss_framing gnss_link gnss_obs gnss_types leds settings um98x_ctl"
+base="board gnss_framing gnss_link gnss_obs gnss_types leds settings um98x_ctl"
+with_updater="board diag gnss_framing gnss_link gnss_obs gnss_types leds pkg_store settings um98x_ctl um98x_flash"
 
-for layout in 16MB 8MB; do
-    b="$out/build-$layout"
-    rm -rf "$b"
-    args=(-C "$app" -B "$b" -D SDKCONFIG="$b/sdkconfig" -D STATION_DIR="$repo" -D STATION_FLASH="$layout")
-    idf.py "${args[@]}" set-target esp32s3 2>&1 | tee "$out/set-target-$layout.log"
-    idf.py "${args[@]}" build 2>&1 | tee "$out/build-$layout.log"
-    if grep -E "unknown kconfig symbol|but is not visible" "$out/set-target-$layout.log" "$out/build-$layout.log"; then
-        die "$layout: a Kconfig symbol is unknown or ignored"
+# The two layouts, then the 16 MB one with the receiver updater as well.
+for variant in 16MB 8MB 16MB-updater; do
+    layout=${variant%%-*}
+    updater=OFF
+    supported=$base
+    if [ "$variant" != "$layout" ]; then
+        updater=ON
+        supported=$with_updater
     fi
-    grep -q "^CONFIG_ESPTOOLPY_FLASHSIZE_$layout=y" "$b/sdkconfig" || die "$layout: the flash size did not come from the layout"
+    b="$out/build-$variant"
+    rm -rf "$b"
+    args=(-C "$app" -B "$b" -D SDKCONFIG="$b/sdkconfig" -D STATION_DIR="$repo" -D STATION_FLASH="$layout"
+          -D STATION_UPDATER="$updater")
+    idf.py "${args[@]}" set-target esp32s3 2>&1 | tee "$out/set-target-$variant.log"
+    idf.py "${args[@]}" build 2>&1 | tee "$out/build-$variant.log"
+    if grep -E "unknown kconfig symbol|but is not visible" "$out/set-target-$variant.log" "$out/build-$variant.log"; then
+        die "$variant: a Kconfig symbol is unknown or ignored"
+    fi
+    grep -q "^CONFIG_ESPTOOLPY_FLASHSIZE_$layout=y" "$b/sdkconfig" || die "$variant: the flash size did not come from the layout"
     if grep -q "^CONFIG_GNSS_LINK_BENCH_HOOKS=y" "$b/sdkconfig"; then
-        die "$layout: the link's bench hooks are on (they need the station's bench console)"
+        die "$variant: the link's bench hooks are on (they need the station's bench console)"
     fi
     # Every component the build took from this repository's components/, by
     # its directory (the app's own main may sit anywhere, also in the tree).
@@ -55,16 +66,18 @@ import json
 import os
 import sys
 
-desc, comps = sys.argv[1], os.path.realpath(sys.argv[2])
+desc, comps = sys.argv[1], sys.argv[2]
 info = json.load(open(desc))["build_component_info"]
 names = []
 for name, c in info.items():
-    d = os.path.realpath(c.get("dir") or "")
-    if d.startswith(comps + os.sep):
+    # By file identity, not by spelling: a case-insensitive file system
+    # (macOS) may give the same directory in another case.
+    parent = os.path.dirname(os.path.normpath(c.get("dir") or "/"))
+    if os.path.isdir(parent) and os.path.samefile(parent, comps):
         names.append(name)
 print(" ".join(sorted(names)))
 PY
 )
-    [ "$took" = "$supported" ] || die "$layout: components from this repository: '$took', want '$supported'"
-    echo "external app ($layout): built with exactly: $took"
+    [ "$took" = "$supported" ] || die "$variant: components from this repository: '$took', want '$supported'"
+    echo "external app ($variant): built with exactly: $took"
 done

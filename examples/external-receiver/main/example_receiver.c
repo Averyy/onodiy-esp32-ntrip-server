@@ -11,6 +11,8 @@
  */
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "board.h"
 #include "esp_event.h"
@@ -25,6 +27,10 @@
 #include "settings.h"
 #include "settings_schema.h"
 #include "um98x_ctl.h"
+#if EXAMPLE_UPDATER
+#include "pkg_store.h"
+#include "um98x_flash.h"
+#endif
 
 static const char *TAG = "example";
 
@@ -122,9 +128,81 @@ static void identify(bool after_restart)
     }
 }
 
+#if EXAMPLE_UPDATER
+/* Before any ordinary write: an open receiver update decides what may be
+ * sent. Only ESP_ERR_NOT_FOUND means none is open; an unreadable journal,
+ * one of a newer schema or settings unavailable count as open: send nothing
+ * and leave the journal as it is (the user acts). */
+static bool update_open(void)
+{
+    um98x_flash_journal_t j;
+    esp_err_t err = um98x_flash_journal_get(&j);
+    if (err == ESP_ERR_NOT_FOUND) {
+        return false;
+    }
+    const char *plan = NULL;
+    (void)um98x_flash_journal_plan(err, &j, false, &plan);
+    ESP_LOGW(TAG, "receiver update open (%s, %s): nothing ordinary is sent", esp_err_to_name(err),
+             plan != NULL ? plan : "?");
+    return true;
+}
+
+esp_err_t example_update_receiver(const um98x_flash_expect_t *confirmed, um98x_flash_result_t *res)
+{
+    gnss_link_lease_t lease = NULL;
+    esp_err_t err = gnss_link_acquire(GNSS_LINK_MODE_RAW, "update", LEASE_WAIT_MS, &lease);
+    if (err != ESP_OK) {
+        return err;
+    }
+    uint32_t stored_baud = 0;
+    (void)settings_get_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, &stored_baud);
+    um98x_flash_ident_t id;
+    err = um98x_flash_identify(lease, stored_baud, false, &id);
+    if (err == ESP_OK && id.result != UM98X_FLASH_ID_OK) {
+        err = ESP_ERR_INVALID_STATE;   /* no answer, or at its loader: no session */
+    }
+    um98x_flash_expect_t e = *confirmed;
+    um98x_flash_pkg_facts_t facts;
+    if (err == ESP_OK) {
+        e.receiver = id.info;   /* the live identity: a wrong model is refused here */
+        err = um98x_flash_prepare(&e, &facts);
+    }
+    if (err == ESP_OK) {
+        err = pkg_store_set_pinned(true);   /* before the journal opens */
+    }
+    if (err == ESP_OK) {
+        um98x_flash_request_t req = { 0 };
+        memcpy(req.journal.sha256, facts.sha256, sizeof(req.journal.sha256));
+        req.journal.size = e.size;
+        snprintf(req.journal.expected_fw, sizeof(req.journal.expected_fw), "%s", e.expected_fw);
+        req.journal.expected_build = e.expected_build;
+        snprintf(req.journal.pre_model, sizeof(req.journal.pre_model), "%s", id.info.model);
+        snprintf(req.journal.pre_fw, sizeof(req.journal.pre_fw), "%s", id.info.firmware);
+        req.journal.pre_build = id.info.build;
+        req.journal.app_baud = id.app_baud;
+        err = um98x_flash_run(lease, &req, res);
+        if (err != ESP_OK) {
+            (void)pkg_store_set_pinned(false);   /* refused before the journal opened */
+        }
+    }
+    um98x_flash_discard();
+    ESP_ERROR_CHECK(gnss_link_release(lease));
+    /* DONE / ABORTED: res->receiver is what runs now; the product checks its
+     * profile, then closes the journal and releases the package
+     * (um98x_flash_journal_close, pkg_store_release). NEEDS_USER: the journal
+     * and the pinned package wait for the user. */
+    return err;
+}
+#endif
+
 static void supervisor(void *arg)
 {
     (void)arg;
+#if EXAMPLE_UPDATER
+    if (update_open()) {
+        vTaskDelete(NULL);   /* the product's maintenance flow takes over; nothing ordinary goes out */
+    }
+#endif
     identify(false);
     for (;;) {
         if (ulTaskNotifyTake(pdTRUE, portMAX_DELAY) != 0) {
@@ -179,6 +257,14 @@ static esp_err_t receiver_start(void)
 
     ESP_ERROR_CHECK(gnss_obs_init());
     ESP_ERROR_CHECK(um98x_ctl_init());
+#if EXAMPLE_UPDATER
+    ESP_ERROR_CHECK(pkg_store_init());   /* no package partition (8 MB): staged in PSRAM if built so, else none */
+    ESP_ERROR_CHECK(um98x_flash_init());
+    um98x_flash_journal_t j;
+    if (um98x_flash_journal_get(&j) == ESP_ERR_NOT_FOUND) {
+        (void)pkg_store_release();   /* no open update: a package left over goes, pinned or not */
+    }
+#endif
     um98x_ctl_set_restart_cb(on_restart, NULL);
     um98x_ctl_set_port((uint8_t)b->gnss_port);
     err = gnss_link_init();

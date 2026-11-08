@@ -186,32 +186,60 @@ GNSS status input says the receiver has a position fix, not which kind.
 
 ## Receiver firmware updates (`um98x_flash`)
 
-Not part of this contract yet: `um98x_flash` also needs the station's
-`diag` and `pkg_store` components (and `mbedtls`), and the external build
-does not include it. What its header already defines, for a product that
-plans to:
+Optional, on top of the eight: `um98x_flash` with the two components it
+needs, `diag` and `pkg_store`. The example builds this set with
+`-D STATION_UPDATER=ON` (`tools/ci/external_app.sh` checks that build too;
+its `example_update_receiver` is the sequence below, build-tested only). It
+needs octal PSRAM (the package is checked and sent from a PSRAM copy) and
+FreeRTOS run-time statistics for `diag`; both are set by the example when
+the option is on. A product doesn't have to run `diag_init`.
 
-- **Before any ordinary write** at start, read the journal
-  (`um98x_flash_journal_get`): `ESP_ERR_NOT_FOUND` is the only result that
-  means no update is open. An unreadable journal, one from a newer schema or
-  settings unavailable all count as open and waiting for the user: send
-  nothing to the receiver. `um98x_flash_journal_plan` gives the recovery
-  table's plan for it.
-- **Recovery actions** (`um98x_flash_recover`, the boot race
-  `um98x_flash_race`) run only in a build with
-  `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS` (off by default). Without it both
-  return `ESP_ERR_NOT_SUPPORTED` at once and touch nothing: not the receiver,
-  the staged copy or the journal. The journal then waits for the user
-  (`um98x_flash_user_retry`, `um98x_flash_user_restart`).
-- **Ownership**: a session runs under a RAW lease held by the caller
-  throughout. `um98x_flash_cancel` is honoured only before the receiver's
-  reset.
-- **Staged package**: on the 8 MB layout (no `gnss_pkg` partition) the
-  package lives in RAM only and does not survive a restart; the journal then
-  waits for the package to be staged again.
-- **After a transfer**: the session confirms the receiver's application
-  with its version; re-applying a profile, checking it and closing the
-  journal (`um98x_flash_journal_close`) are the caller's.
+At start, after `settings_init`: `pkg_store_init()`, `um98x_flash_init()`,
+and **before any ordinary write to the receiver** read the journal:
+
+| `um98x_flash_journal_get` | Meaning | What to do |
+|---|---|---|
+| `ESP_ERR_NOT_FOUND` | No update open | Normal start. Release a package left over (`pkg_store_release`), pinned or not |
+| `ESP_OK` | An update is open | Send nothing ordinary. `um98x_flash_journal_plan` gives the recovery plan; without recovery actions the journal waits for the user (`um98x_flash_user_retry`, `um98x_flash_user_restart`) |
+| `ESP_ERR_INVALID_SIZE` | Unreadable (damaged, read error) | Counts as open and waiting: send nothing. Nothing erases it for you; only the user's decision clears it (`um98x_flash_journal_close`) |
+| `ESP_ERR_INVALID_VERSION` | From a newer schema | The same; it can be cleared the same way |
+| `ESP_ERR_INVALID_STATE` | Settings unavailable this boot | State unknown: send nothing, nothing to clear |
+
+A session, as the station runs it, all under one RAW lease
+(`gnss_link_acquire(GNSS_LINK_MODE_RAW, ...)`, held throughout; the caller's
+task, which the updater's waits feed if it is on the task watchdog):
+
+1. `um98x_flash_identify`. `UM98X_FLASH_ID_NO_ANSWER` (receiver absent) or
+   `_AT_LOADER`: no session, no journal, nothing written.
+2. `um98x_flash_prepare` with the size and SHA-256 the user confirmed and the
+   live identity: every pre-flight rule on a RAM copy. A wrong model, a wrong
+   package, a downgrade or a bad checksum is refused here (`failed_rule`,
+   `why`): nothing has been sent. Release the package.
+3. `pkg_store_set_pinned(true)`, then `um98x_flash_run` with the journal's
+   identity fields. It opens the journal and writes it before every state.
+4. `um98x_flash_cancel` is honoured only before the receiver's reset.
+
+How it ends (`um98x_flash_result_t.end`):
+
+- `DONE` or `ABORTED`: `receiver` is the application's own version log after
+  the session (model, firmware, build). The product compares that with what
+  it expected and verifies its own profile **before** reopening corrections,
+  then calls `um98x_flash_journal_close` and `pkg_store_release`.
+- `NEEDS_USER`: the journal and the pinned package stay for the user.
+- `NOT_STARTED`: nothing was sent and no journal exists. Unpin and release.
+
+Recovery actions (`um98x_flash_recover`, the boot race `um98x_flash_race`)
+run only in a build with `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS` (off by
+default). Without it both return `ESP_ERR_NOT_SUPPORTED` at once and touch
+nothing: not the receiver, the staged copy or the journal.
+
+On the 8 MB layout (no `gnss_pkg` partition) the package lives in PSRAM only:
+after a restart it is gone and an open journal waits until the same package
+is staged again.
+
+Tested in `test/host` against a simulated receiver: wrong model and the
+package rules (`test_pkg_check.c`), interruption and retry transitions, the
+point of no return, needs-user and recovery plans (`test_fl_session.c`).
 
 ## Shared NVS keys
 
