@@ -92,7 +92,9 @@
  *  - Counters are 64-bit: at ~50 lines/s a 32-bit counter would wrap in
  *    under three years of uptime. Every fed byte ends up in exactly one
  *    emitted unit (a line's CR/LF belong to it), in bytes_discarded, or in
- *    the unit still being collected (discarded if a reset drops it).
+ *    the unit still being collected (discarded if a reset drops it;
+ *    gnss_framer_held). Each unit carries the stream offset of its first
+ *    byte (gnss_frame_t.start).
  *
  * Cost: a rejected candidate is rescanned once; a stream built to chain
  * false candidates can make the framer rescan each byte many times (CRC
@@ -101,7 +103,8 @@
  * its CRC, i.e. after at most GNSS_RTCM3_MAX_FRAME bytes of further input.
  * A rejected line is rescanned only when it holds another lead byte; a line
  * built to nest failing lines costs at most about GNSS_TEXT_MAX_LINE^2 / 4
- * steps.
+ * steps. For input from an untrusted source where only RTCM3 matters,
+ * gnss_rtcm_scan.h finds the same frames at a bounded cost per byte.
  *
  * Version log parser (gnss_versiona_parse): the one parser for the receiver's
  * version log, shared by the command layer and the firmware flasher. The line
@@ -157,6 +160,7 @@ typedef struct {
     size_t len;
     uint16_t rtcm_msg_type;  /**< RTCM3 message number (first 12 payload bits); 0 for text and prompt */
     uint64_t at;             /**< prompt: stream offset of the match's last byte (bytes fed before it since init); 0 otherwise */
+    uint64_t start;          /**< stream offset of the unit's first byte (bytes fed before it since init) */
 } gnss_frame_t;
 
 /** Called synchronously from gnss_framer_feed() (and gnss_framer_reset() for a pending prompt). */
@@ -235,6 +239,24 @@ void gnss_framer_feed(gnss_framer_t *f, const uint8_t *data, size_t len);
 
 /** Copy the counters. */
 void gnss_framer_get_stats(const gnss_framer_t *f, gnss_framing_stats_t *out);
+
+/**
+ * Input the framer holds: bytes fed that are neither in an emitted frame or
+ * line nor counted in bytes_discarded yet; they are always the newest bytes
+ * fed. *first (may be NULL) gets the stream offset of the oldest of them
+ * (bytes_in - held; bytes_in when none).
+ *
+ * Between feeds: bytes_in == bytes_discarded + the bytes of the RTCM frames
+ * and text lines emitted + held, each line with its terminator (the CR or LF
+ * that ended it, and the LF right after a CR once that LF has been fed). A
+ * loader prompt (GNSS_FRAME_PROMPT) is a notification, not a unit: its bytes
+ * are counted elsewhere. The bytes of a binary log or of an overlong line
+ * being skipped are discarded as they arrive, never held. From the callback
+ * the bytes still waiting to be scanned again also count as held; during a
+ * rescan that can include the LF of the very line being emitted, which joins
+ * its line once it has been scanned.
+ */
+size_t gnss_framer_held(const gnss_framer_t *f, uint64_t *first);
 
 /** Arm or disarm the loader prompt detector (disarming forgets partial and pending matches). */
 void gnss_framer_set_prompt_detect(gnss_framer_t *f, bool armed);

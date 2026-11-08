@@ -11,6 +11,7 @@ idf_component_register(
         "test_main.c"
         "test_gnss_framing.c"
         "test_gnss_rtcm3.c"
+        "test_rtcm_scan.c"
         "test_gnss_obs_core.c"
         "test_gnss_obs_parse.c"
         "rtcm_vectors.c"

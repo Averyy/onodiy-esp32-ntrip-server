@@ -45,11 +45,21 @@ before tagging ([releases](docs/releases.md)).
   `gnss_obs_get_fix()` is unchanged. Tested against pynmeagps on three
   public captures (two new fixtures from gpsd: a Trimble RTK stream and a
   u-blox ZED-F9P stream with GST).
+- Framing: every unit the framer emits carries the stream offset of its first
+  byte (`gnss_frame_t.start`), and `gnss_framer_held()` reports the input it
+  holds and since which byte. New `gnss_rtcm_scan.h`: an RTCM3-only scanner
+  for input from an untrusted source. It finds the same frames as the framer
+  on every public capture at any feed size, at a bounded cost per byte
+  whatever the input (it never rescans: each candidate is checked once from
+  the running CRC), and it reports the input it holds. New
+  `gnss_rtcm3_crc24q_update()`. The station still frames its receiver link
+  with the framer as before.
 - Docs: the command layer's and the flasher's headers no longer say that only
   the UM982 is flashed; UM980 packages are accepted too.
 - API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,
   `gnss_link_prompt_seen`, `gnss_obs_get_solution` and the types of
-  `gnss_obs_nmea.h`). Callers of `um98x_ctl` that arm the loader
+  `gnss_obs_nmea.h`, `gnss_frame_t.start`, `gnss_framer_held`,
+  `gnss_rtcm3_crc24q_update` and `gnss_rtcm_scan.h`). Callers of `um98x_ctl` that arm the loader
   prompt detector can now get `ESP_ERR_NOT_ALLOWED` from calls other than
   detection.
 - Pending: host tests, the station build and the external app build only;

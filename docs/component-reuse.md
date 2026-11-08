@@ -16,7 +16,7 @@ Seven components, used unchanged from a pinned revision:
 | Component | What it is | Needs (from here) |
 |---|---|---|
 | `gnss_types` | Types only (`um98x_info_t`, ...) | nothing |
-| `gnss_framing` | Byte stream to RTCM3 frames and checksum-valid text lines; the loader prompt detector. Pure C, no ESP-IDF | nothing |
+| `gnss_framing` | Byte stream to RTCM3 frames and checksum-valid text lines; the loader prompt detector; an RTCM3-only scanner for untrusted input (`gnss_rtcm_scan.h`). Pure C, no ESP-IDF | nothing |
 | `board` | Board table, pin validation, saved receiver wiring | nothing |
 | `settings` | NVS store (generic get/set/blob/batch) and the station's settings schema | nothing |
 | `gnss_link` | Sole owner of the receiver UART: RX task, sinks, STREAM/COMMAND/RAW leases, writes | `gnss_framing`, `board`, `settings` |
@@ -163,6 +163,12 @@ nothing is queued or replayed. Before taking a lease, the product closes its
 own admission of corrections and lets a write already under way finish;
 `gnss_link_acquire` also waits for it.
 
+**Untrusted RTCM input** (a phone app): `gnss_rtcm_scan.h` finds the same
+frames as the framer on real streams, at a bounded cost per byte whatever
+the input, and reports the input it holds (`gnss_rtcm_scan_held`) and each
+frame's stream offset (`gnss_frame_t.start`). The framer reports the same
+for its own input (`gnss_framer_held`). Details in the headers.
+
 ## Shared NVS keys
 
 Namespace `gnss`, written as device state (no `SETTINGS_EVENT_CHANGED`):
@@ -180,8 +186,8 @@ is not defined yet for another product.
 
 ## Host tests
 
-`gnss_framing.c` and `gnss_rtcm3.c` build with a host C compiler alone, no
-ESP-IDF: [`host/framing_check.c`](../examples/external-receiver/host/framing_check.c)
+`gnss_framing.c`, `gnss_rtcm3.c` and `gnss_rtcm_scan.c` build with a host C
+compiler alone, no ESP-IDF: [`host/framing_check.c`](../examples/external-receiver/host/framing_check.c)
 feeds a recorded RTCM3 file through the framer in pieces of 1 to 97 bytes
 and checks every frame's CRC-24Q again:
 

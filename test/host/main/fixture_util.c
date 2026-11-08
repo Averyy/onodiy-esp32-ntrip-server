@@ -205,11 +205,10 @@ static void on_unit(const gnss_frame_t *fr, void *arg)
     if (fr->kind == GNSS_FRAME_PROMPT) {
         return;
     }
-    size_t at = c->pos;
-    while (at + fr->len <= c->len && memcmp(c->buf + at, fr->data, fr->len) != 0) {
-        at++;
-    }
-    TEST_ASSERT_TRUE_MESSAGE(at + fr->len <= c->len, "emitted unit not found in the input");
+    /* The unit sits at its stream offset, after the previous one. */
+    size_t at = (size_t)fr->start;
+    TEST_ASSERT_TRUE_MESSAGE(fr->start >= c->pos && at + fr->len <= c->len, "emitted unit outside the input");
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(c->buf + at, fr->data, fr->len, "emitted unit is not the input at its start");
     fx_units_t *o = c->out;
     if (o->n == o->cap) {
         o->cap = o->cap ? o->cap * 2 : 256;

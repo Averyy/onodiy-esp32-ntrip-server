@@ -117,6 +117,13 @@ typedef struct {
 uint32_t gnss_rtcm3_crc24q(const uint8_t *data, size_t len);
 
 /**
+ * CRC-24Q continued over `len` more bytes from the register value `crc` (the
+ * CRC of what came before): gnss_rtcm3_crc24q(data, len) ==
+ * gnss_rtcm3_crc24q_update(0, data, len).
+ */
+uint32_t gnss_rtcm3_crc24q_update(uint32_t crc, const uint8_t *data, size_t len);
+
+/**
  * Full check of one frame: preamble, zero reserved bits, payload of at
  * least 2 bytes, `len` equal to payload + 6, and the CRC.
  */

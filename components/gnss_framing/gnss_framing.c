@@ -193,6 +193,7 @@ static void report_prompt(gnss_framer_t *f)
         .len = sizeof(k_prompt),
         .rtcm_msg_type = 0,
         .at = f->prompt_at,
+        .start = f->prompt_at + 1u - sizeof(k_prompt),
     };
     f->cb(&fr, f->ctx);
 }
@@ -221,6 +222,7 @@ static void emit_rtcm(gnss_framer_t *f)
         .data = f->buf,
         .len = len,
         .rtcm_msg_type = (uint16_t)(((unsigned)f->buf[3] << 4) | (f->buf[4] >> 4)),
+        .start = start,
     };
     f->cb(&fr, f->ctx);
 }
@@ -233,6 +235,7 @@ static bool has_lead(const uint8_t *p, size_t n)
 static void end_line(gnss_framer_t *f, uint8_t term)
 {
     size_t len = f->fill;
+    uint64_t start = cur_offset(f) - len;   /* the terminator is the byte being processed */
     bool valid = (f->buf[0] == '$' || f->buf[0] == '#') ? gnss_text_line_valid((const char *)f->buf, len)
                                                          : notice_valid((const char *)f->buf, len);
     if (!valid) {
@@ -265,6 +268,7 @@ static void end_line(gnss_framer_t *f, uint8_t term)
         .data = f->buf,
         .len = len,
         .rtcm_msg_type = 0,
+        .start = start,
     };
     f->cb(&fr, f->ctx);
 }
@@ -504,6 +508,17 @@ void gnss_framer_feed(gnss_framer_t *f, const uint8_t *data, size_t len)
 void gnss_framer_get_stats(const gnss_framer_t *f, gnss_framing_stats_t *out)
 {
     *out = f->stats;
+}
+
+size_t gnss_framer_held(const gnss_framer_t *f, uint64_t *first)
+{
+    /* The unit being collected (fill is 0 in every state that holds none)
+     * and the bytes waiting to be scanned again, the newest bytes fed. */
+    size_t held = f->fill + (f->rescan_end - f->rescan_pos);
+    if (first != NULL) {
+        *first = f->stats.bytes_in - held;
+    }
+    return held;
 }
 
 void gnss_framer_set_prompt_detect(gnss_framer_t *f, bool armed)

@@ -46,13 +46,18 @@ static const uint32_t k_crc24q[256] = {
     0x42FA2Fu, 0xC4B6D4u, 0xC82F22u, 0x4E63D9u, 0xD11CCEu, 0x575035u, 0x5BC9C3u, 0xDD8538u,
 };
 
-uint32_t gnss_rtcm3_crc24q(const uint8_t *data, size_t len)
+uint32_t gnss_rtcm3_crc24q_update(uint32_t crc, const uint8_t *data, size_t len)
 {
-    uint32_t crc = 0;
+    crc &= 0xFFFFFFu;
     for (size_t i = 0; i < len; i++) {
         crc = ((crc << 8) & 0xFFFFFFu) ^ k_crc24q[((crc >> 16) ^ data[i]) & 0xFFu];
     }
     return crc;
+}
+
+uint32_t gnss_rtcm3_crc24q(const uint8_t *data, size_t len)
+{
+    return gnss_rtcm3_crc24q_update(0, data, len);
 }
 
 /* Payload of a structurally sound frame (preamble, length field equal to
