@@ -419,8 +419,50 @@ expiry). The worker survives stop; service contexts therefore survive it too. Ca
 The station keeps `web_init/web_start/web_stop` in `web.h`, its settings keys
 (`sys/admin_hash`, `web/sessions`, existing public/setup keys) and binary codecs,
 its status builders/parsers, caster and health hooks, receiver staging/expiry,
-progress conversion and firmware-service calls in `components/web`. The legacy
-global asset table still supplies its asset descriptor. Branding/storage
-metadata is carried in C configuration; browser composition and the bundler
-remain unchanged in this phase. The station wire contract remains
+progress conversion and firmware-service calls in `components/web`. The station composition in `components/web/ui/product.json`
+generates its product-owned `station_ui_assets` descriptor and C/JS metadata.
+The station wire contract remains
 [`components/web/API.md`](../components/web/API.md).
+
+### Browser composition
+
+`web_shell/cmake/web_ui.cmake` provides `web_shell_ui_bundle()` with `TARGET`,
+`MANIFEST`, `PRODUCT_ROOT`, `ASSET_MANIFEST`, `SYMBOL_PREFIX`, `MAX_PROJECT_GZ`
+and `MAX_GZ`. The station uses 163840 and 655360 bytes for the two gzip budgets.
+The helper resolves the selected inputs at configure time, adds them to
+configure/build dependencies, and generates `<prefix>.c` and `<prefix>.h`.
+The header declares `<prefix>_assets` (`web_shell_assets_t`) and product
+metadata macros; the product passes these to `web_shell_init()`.
+
+The JSON module manifest lists every module in execution order, with a unique
+`name`, `source` and `requires` naming earlier modules. An optional `entrypoint`
+marks the last module. `shared:` sources resolve under `web_shell/ui`, and
+`product:` sources under `PRODUCT_ROOT`. The first module, `generated:product`,
+provides the same title, default brand, product noun, project identity and
+browser storage prefix as the generated C header. Assets are an explicit list
+of URL/source/MIME entries. `generated:bundle` supplies `/app.js`;
+`stylesheet` adds an escaped external link to the canonical HTML. `if_module`
+selects an asset only with that module, and `hash_manifest` pins vendor bytes.
+The station's MapLibre scripts, CSS and license are selected with `map`.
+Binary product assets are read as bytes and gzip-compressed without text
+conversion. All selected project HTML, JavaScript, CSS and SVG retain their
+structural/CSP checks, including the final strict IIFE. Gzip has no filename
+or timestamp; the descriptor digest is the first 16 hex digits of SHA-256 over
+the ordered compressed assets, preserving digest-based ETags.
+
+`web_shell/ui` holds the canonical index, CSS, favicon and shared registry,
+DOM/API/storage helpers, live transport, routing/theme/dialogs, authentication,
+password claim/Wi-Fi helpers, app update controls and startup. Products register
+navigation/aliases/redirects, status classification, section merge functions,
+notices/page identity, branding and error/progress overrides before startup.
+Unregistered sections replace their previous value. Classification has an
+unknown fallback; commissioning defaults to password claim followed by the
+product's Status view, without caster requests. Station modules supply its
+state model, keyed caster merge/rates, notices, commissioning, receiver update
+panels and pages. The station's browser keys retain the `station.` prefix.
+The station's IndexedDB map cache also retains its existing name.
+
+The canonical bundler is `web_shell/tools/ui_bundle.py`; the former station
+tool path forwards to it and still accepts `--ui components/web/ui`.
+The bench UI harnesses resolve their sources with the same production manifest
+loader, excluding only its entrypoint when a harness controls startup.

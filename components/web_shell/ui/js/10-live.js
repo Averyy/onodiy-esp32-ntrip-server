@@ -14,7 +14,6 @@ const S = {
   status: null,     /* GET /api/status, kept current by the WebSocket */
   statusAt: 0,      /* Date.now() of the last status data */
   progress: {},     /* job -> last progress message */
-  rates: {},        /* slot -> [[uptime_s, bytes_sent], ...] over the last minute */
   publicView: false,
 };
 
@@ -34,13 +33,13 @@ function apiMismatch(v) {
   if (v === undefined || v === null || v === API_VERSION) return false;
   let last = 0;
   try {
-    last = Number(sessionStorage.getItem('station.reloadAt')) || 0;
+    last = Number(sessionStorage.getItem(storageKey('reloadAt'))) || 0;
   } catch (e) {
     last = 0;
   }
   if (Date.now() - last > 60000) {
     try {
-      sessionStorage.setItem('station.reloadAt', String(Date.now()));
+      sessionStorage.setItem(storageKey('reloadAt'), String(Date.now()));
     } catch (e) {
       /* without storage the next mismatch reloads again, a minute apart at best */
     }
@@ -65,14 +64,8 @@ function applyStatusMessage(m) {
   const data = m.data || {};
   if (m.full || !S.status) S.status = {};
   for (const k of Object.keys(data)) {
-    if (k === 'casters' && !m.full && Array.isArray(S.status.casters)) {
-      const bySlot = {};
-      for (const c of S.status.casters) bySlot[c.slot] = c;
-      for (const c of data.casters) bySlot[c.slot] = c;
-      S.status.casters = Object.keys(bySlot).map(Number).sort((a, b) => a - b).map(n => bySlot[n]);
-    } else {
-      S.status[k] = data[k];
-    }
+    const merge = !m.full && UI.mergeSections[k];
+    S.status[k] = merge ? merge(S.status[k], data[k]) : data[k];
   }
   if (m.uptime_s !== undefined) S.status.uptime_s = m.uptime_s;
   statusChanged();
@@ -80,38 +73,8 @@ function applyStatusMessage(m) {
 
 function statusChanged() {
   S.statusAt = Date.now();
-  sampleRates();
+  if (UI.sampleStatus) UI.sampleStatus(S.status);
   bus.emit('status', S.status);
-}
-
-/* Output rate per caster from bytes_sent (device uptime as the clock). */
-function sampleRates() {
-  const st = S.status;
-  if (!st || !Array.isArray(st.casters) || st.uptime_s === undefined) return;
-  for (const c of st.casters) {
-    if (c.bytes_sent === undefined || c.bytes_sent === null) continue;
-    let l = S.rates[c.slot] || (S.rates[c.slot] = []);
-    const last = l[l.length - 1];
-    if (last && (c.bytes_sent < last[1] || st.uptime_s < last[0])) l = S.rates[c.slot] = [];
-    if (!last || st.uptime_s > last[0]) l.push([st.uptime_s, c.bytes_sent]);
-    while (l.length > 2 && l[0][0] < st.uptime_s - 61) l.shift();
-  }
-}
-
-/** Bits per second a slot sent over the last `window` seconds (null = not enough data). */
-function slotRate(slot, window) {
-  const l = S.rates[slot];
-  if (!l || l.length < 2) return null;
-  const end = l[l.length - 1];
-  let start = l[0];
-  for (const p of l) {
-    if (p[0] >= end[0] - window) {
-      start = p;
-      break;
-    }
-  }
-  if (end[0] - start[0] < Math.min(window, 3)) return null;
-  return ((end[1] - start[1]) * 8) / (end[0] - start[0]);
 }
 
 /*

@@ -5,7 +5,7 @@
  * Core helpers: DOM building, formatting, the JSON client, browser storage
  * and a small event bus.
  *
- * The bundle (tools/ui_bundle.py) joins js/*.js in name order inside one
+ * The bundle (tools/ui_bundle.py) joins the manifest modules in order inside one
  * strict-mode function (comments left out), so these names are shared by
  * the later files and nothing reaches the global object. The page is built
  * from DOM nodes only: text from the station (caster replies, SSIDs, log
@@ -487,7 +487,7 @@ function hasControl(s) {
 const store = {
   get(k, dflt) {
     try {
-      const v = localStorage.getItem('station.' + k);
+      const v = localStorage.getItem(storageKey(k));
       return v === null ? dflt : JSON.parse(v);
     } catch (e) {
       return dflt;
@@ -495,8 +495,8 @@ const store = {
   },
   set(k, v) {
     try {
-      if (v === null || v === undefined) localStorage.removeItem('station.' + k);
-      else localStorage.setItem('station.' + k, JSON.stringify(v));
+      if (v === null || v === undefined) localStorage.removeItem(storageKey(k));
+      else localStorage.setItem(storageKey(k), JSON.stringify(v));
     } catch (e) {
       /* private mode, captive-portal browser: the setting lasts for this page only */
     }
@@ -659,94 +659,8 @@ function upload(path, file, onProgress, headers) {
 
 /* ---- Errors in the user's words ----------------------------------------- */
 
-const ERR = {
-  network: 'The station did not answer. Check that this device is still on the same network as the station.',
-  timeout: 'The station did not answer in time.',
-  bad_json: 'The station could not read the request.',
-  invalid_field: 'A value is not accepted',
-  confirm_required: 'This action needs a confirmation.',
-  bad_request: 'The station refused the request.',
-  invalid_image: 'This file is not a valid firmware image for this chip.',
-  size_mismatch: 'The upload ended early. Try again.',
-  unauthorized: 'Your session ended. Login again.',
-  forbidden: 'The station refused the request from this page.',
-  wrong_password: 'Wrong password.',
-  not_on_setup_ap: 'The first admin password can only be set over the setup hotspot.',
-  not_found: 'Not found.',
-  nothing_staged: 'No uploaded receiver package is waiting.',
-  no_journal: 'There is no receiver update session.',
-  no_coredump: 'There is no core dump.',
-  nothing_pending: 'No new Wi-Fi settings are waiting (they were confirmed or discarded meanwhile).',
-  method_not_allowed: 'The station does not support this action.',
-  busy: 'The station is busy with another job. Try again in a moment.',
-  journal_open: 'A receiver update session is open. Finish or clear it first.',
-  not_waiting: 'The receiver update is still running.',
-  app_trial: 'The new app version is still being checked.',
-  app_update: 'An app update is running.',
-  safe_mode: 'Not possible in safe mode.',
-  not_in_safe_mode: 'The station is not in safe mode.',
-  receiver_not_streaming: 'The receiver must be streaming first.',
-  unsupported_model: 'Not possible with this receiver model.',
-  needs_firmware: 'This receiver firmware does not have that command.',
-  package_pinned: 'A receiver package is held for an open update session.',
-  manifest_changed: 'The offered version changed since this page loaded. Check the new offer and try again.',
-  not_offered: 'That version is not offered (any more).',
-  rolled_back_ack_required: 'This version was rolled back on this station before.',
-  reboot_inhibited: 'A restart is blocked right now',
-  settings_unavailable: 'The settings storage is unavailable this boot, so nothing can be saved.',
-  no_position_yet: 'There is no surveyed position yet.',
-  caster_policy: 'This server setup is not allowed.',
-  slot_disabled: 'The slot is not enabled.',
-  sha256_mismatch: 'The SHA-256 does not match the uploaded package.',
-  package_needed: 'Upload the same receiver package (.pkg) again under Install manually.',
-  downgrade: 'That build is older than the receiver\'s current firmware.',
-  no_rollback_image: 'There is no previous app version to go back to.',
-  admin_already_set: 'An admin password is already set.',
-  admin_not_set: 'No admin password is set yet. Set one over the setup hotspot.',
-  receiver_maintenance: 'Receiver maintenance is on: nothing is sent to the receiver. End it first.',
-  not_in_maintenance: 'Receiver maintenance is not on (it may have ended meanwhile).',
-  live_view_closed: 'The sky view is not open (it may have closed meanwhile).',
-  length_required: 'The upload needs a known size.',
-  too_large: 'Too large for the station.',
-  unsupported_media_type: 'The station refused the request type.',
-  bad_host: 'Open the station by its IP address or its hostname.',
-  not_this_project: 'This image is not firmware for this station.',
-  same_image: 'This is the version already running.',
-  not_no_receiver: 'The station is not looking for a receiver right now (it found one, or is busy with it).',
-  no_receiver: 'No receiver is connected. Connect it, then try again.',
-  rate_limited: 'Too many attempts.',
-  internal: 'The station hit an internal error',
-  not_available_yet: 'Receiver firmware updates are not enabled in this build yet.',
-  checks_disabled: 'This build cannot check for updates. Uploading a file still works.',
-  too_many_clients: 'Too many pages are open on the station.',
-  signal_test_running: 'A signal-group comparison is running. Wait for it to end, or stop it in Receiver settings.',
-  signal_test_idle: 'No signal-group comparison is running (it may have ended meanwhile).',
-  signal_test_not_deciding: 'The comparison is not waiting for your choice (not yet, or not any more).',
-  first_apply_held: 'The receiver is not configured yet. Confirm its configuration on the Receiver page first.',
-  autocfg_off: 'The station does not configure the receiver (receiver setup is Manual).',
-  identity_unconfirmed: 'The receiver is not identified yet.',
-  config_failed: 'The receiver\'s configuration failed. That needs fixing first.',
-  position_not_locked: 'Lock the base position first; until then every receiver restart starts a new survey.',
-  query_running: 'The receiver is still answering the last question.',
-  report_not_failed: 'Refresh is available after a failed Onocoy report check.',
-  not_cancellable: 'Too late to cancel: the download has ended, or the station is already installing it.',
-};
-
-/* Request fields as the forms label them, for "<label>: <rule>" refusals. */
-const FIELD_LABEL = {
-  name: 'Name', host: 'Host', port: 'Port', mountpoint: 'Mountpoint', username: 'Username', password: 'Password',
-  label: 'Dashboard label', trust: 'Certificate check', backoff_profile: 'Retry pace', ntrip_version: 'NTRIP version',
-  ssid: 'Network name', ap_password: 'Access point password', hostname: 'Station name', duration_s: 'Duration',
-  minutes: 'Duration', pem: 'CA certificate', new: 'New password', current: 'Current password',
-  expected_fw: 'Expected firmware', station_id: 'Station ID', com1_baud: 'Receiver link speed',
-  wiring: 'Receiver wiring', 'wiring.rx_gpio': 'ESP32 RX pin', 'wiring.tx_gpio': 'ESP32 TX pin', 'wiring.port': 'Receiver port',
-  survey_in_s: 'Survey-in time', lat_deg: 'Latitude', lon_deg: 'Longitude', height_m: 'Height',
-  signal_group_master: 'Signal group (main antenna)', signal_group_slave: 'Signal group (second antenna)',
-  antenna_model: 'Antenna model', antenna_serial: 'Antenna serial number', antenna_setup_id: 'Antenna setup ID',
-  elevation_mask_deg: 'Elevation mask', signal_group_um980: 'Signal group (UM980)',
-  rtcm: 'RTCM messages', recovery: 'Receiver recovery', step: 'Setup step', tag: 'Tag', level: 'Log level',
-  groups: 'Signal groups', phase_s: 'Time per group',
-};
+const ERR = UI.errors;
+const FIELD_LABEL = UI.fieldLabels;
 
 /** The generic message of a code (the server's own default, not a rule). */
 const GENERIC_INVALID = 'A field has an invalid value';
@@ -754,32 +668,15 @@ const GENERIC_INVALID = 'A field has an invalid value';
 /** "<Label>: <rule>" for a 400 invalid_field (the rule the station gave, or a plain fallback). */
 function fieldErrorText(e) {
   const label = FIELD_LABEL[e.field] || String(e.field).replace(/_/g, ' ');
-  const rule = e.body && e.body.message && e.body.message !== GENERIC_INVALID ? e.body.message : 'the station did not accept this value';
+  const rule = e.body && e.body.message && e.body.message !== GENERIC_INVALID ? e.body.message : UI.fieldRule;
   return label.charAt(0).toUpperCase() + label.slice(1) + ': ' + rule;
 }
-
-const POLICY = {
-  second_onocoy: 'Another server here already streams to Onocoy, and Onocoy allows one stream per station.',
-  second_rtk2go: 'Another server here already streams to RTK2go. Stream to RTK2go from one server only.',
-  dup_stream_ack_required: 'Streaming to Onocoy and to RTK2go or Centipede at the same time needs your OK first.',
-};
 
 function errText(e) {
   if (!(e instanceof ApiError)) return 'This page hit an error: ' + (e && e.message ? e.message : String(e));
   let t = ERR[e.code] || e.message || ('Error ' + e.status);
-  if (e.code === 'caster_policy' && POLICY[e.body.reason]) t = POLICY[e.body.reason];
-  if (e.code === 'busy' && e.body.reason === 'receiver_session') {
-    t = 'The station is working with the receiver right now (configuring or checking it). Offer maintenance again when that ends.';
-  }
-  if (e.code === 'busy' && e.body.reason === 'wiring_pending') {
-    t = 'The receiver wiring changes at the next restart. Restart the station first, then update the receiver.';
-  }
-  if (e.code === 'busy' && e.body.reason === 'live_view_output') {
-    t = 'The sky view has the receiver\'s satellite positions turned on. The station turns them off first (the sky view stays open ' +
-      'without them): start maintenance again in a few seconds.';
-  }
+  t = UI.errorText(e, t);
   if (e.code === 'invalid_field' && e.field) t = fieldErrorText(e);
-  if (e.code === 'not_available_yet') t = notEnabled();
   if (e.code === 'reboot_inhibited' && e.by) t += ' (' + e.by + ')';
   if (e.code === 'internal' && e.message) t += ' (' + e.message + ')';
   if (/[^.!?]$/.test(t)) t += '.';

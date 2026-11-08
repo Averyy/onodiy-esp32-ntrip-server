@@ -1,0 +1,207 @@
+{
+  "metadata": {
+    "title": "Station",
+    "default_brand": "Station",
+    "product_noun": "station",
+    "project_name": "onodiy-esp32-ntrip-server",
+    "browser_storage_prefix": "station."
+  },
+  "assets": "assets.json",
+  "modules": [
+    {
+      "name": "product",
+      "source": "generated:product",
+      "requires": []
+    },
+    {
+      "name": "registry",
+      "source": "shared:js/00-registry.js",
+      "requires": [
+        "product"
+      ]
+    },
+    {
+      "name": "core",
+      "source": "shared:js/00-core.js",
+      "requires": [
+        "registry"
+      ]
+    },
+    {
+      "name": "format",
+      "source": "shared:js/05-format.js",
+      "requires": [
+        "core"
+      ]
+    },
+    {
+      "name": "labels",
+      "source": "product:js/05-labels.js",
+      "requires": [
+        "core",
+        "format"
+      ]
+    },
+    {
+      "name": "address",
+      "source": "product:js/07-address.js",
+      "requires": [
+        "core"
+      ]
+    },
+    {
+      "name": "live",
+      "source": "shared:js/10-live.js",
+      "requires": [
+        "core"
+      ]
+    },
+    {
+      "name": "station-state",
+      "source": "product:js/15-station-state.js",
+      "requires": [
+        "labels",
+        "live"
+      ]
+    },
+    {
+      "name": "station-product",
+      "source": "product:js/18-product.js",
+      "requires": [
+        "station-state"
+      ]
+    },
+    {
+      "name": "shell",
+      "source": "shared:js/20-shell.js",
+      "requires": [
+        "station-product",
+        "live"
+      ]
+    },
+    {
+      "name": "auth",
+      "source": "shared:js/30-auth.js",
+      "requires": [
+        "shell"
+      ]
+    },
+    {
+      "name": "commissioning",
+      "source": "product:js/31-commissioning.js",
+      "requires": [
+        "auth",
+        "address"
+      ]
+    },
+    {
+      "name": "dashboard",
+      "source": "product:js/40-dashboard.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "report",
+      "source": "product:js/45-onocoy-report.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "casters",
+      "source": "product:js/50-casters.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "receiver",
+      "source": "product:js/60-receiver.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "map",
+      "source": "product:js/61-map-cache.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "signals",
+      "source": "product:js/65-signals.js",
+      "requires": [
+        "shell",
+        "station-state"
+      ]
+    },
+    {
+      "name": "sky",
+      "source": "product:js/66-live.js",
+      "requires": [
+        "shell",
+        "station-state",
+        "map",
+        "signals"
+      ]
+    },
+    {
+      "name": "app-updates",
+      "source": "shared:js/70-updates.js",
+      "requires": [
+        "auth",
+        "format"
+      ]
+    },
+    {
+      "name": "receiver-updates",
+      "source": "product:js/71-receiver-updates.js",
+      "requires": [
+        "app-updates",
+        "labels",
+        "station-product"
+      ]
+    },
+    {
+      "name": "diag",
+      "source": "product:js/80-diag.js",
+      "requires": [
+        "shell",
+        "receiver-updates"
+      ]
+    },
+    {
+      "name": "network-diag",
+      "source": "product:js/82-network-diag.js",
+      "requires": [
+        "shell",
+        "receiver-updates"
+      ]
+    },
+    {
+      "name": "system",
+      "source": "product:js/90-system.js",
+      "requires": [
+        "shell",
+        "receiver-updates"
+      ]
+    },
+    {
+      "name": "main",
+      "source": "shared:js/99-main.js",
+      "requires": [
+        "auth",
+        "system",
+        "commissioning"
+      ],
+      "entrypoint": true
+    }
+  ]
+}

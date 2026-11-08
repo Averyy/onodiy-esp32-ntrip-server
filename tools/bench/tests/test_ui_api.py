@@ -7,17 +7,16 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-UI_JS = Path(__file__).resolve().parents[3] / "components" / "web" / "ui" / "js"
+from ui_sources import HARNESS_MODULES
 
 HARNESS = r"""
-const fs = require('fs'), path = require('path'), vm = require('vm');
-const [dir, casesJson] = process.argv.slice(-2);
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== '99-main.js').sort();
-const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+const fs = require('fs'), vm = require('vm');
+const [modulesJson, casesJson] = process.argv.slice(-2);
+const modules = JSON.parse(modulesJson);
+const src = modules.map(m => m.path ? fs.readFileSync(m.path, 'utf8') : m.source).join('\n');
 const noop = () => {};
 const el = new Proxy(function () {}, { get: (t, k) => (k === Symbol.toPrimitive ? () => '' : el), apply: () => el,
                                        construct: () => el });
@@ -81,7 +80,7 @@ def run(cases: list[dict]) -> list[dict]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
-    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps(cases)], capture_output=True, text=True, timeout=60)
+    res = subprocess.run([node, "-e", HARNESS, HARNESS_MODULES, json.dumps(cases)], capture_output=True, text=True, timeout=60)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
 

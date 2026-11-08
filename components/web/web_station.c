@@ -13,6 +13,7 @@
 #include "ntrip_server.h"
 #include "fw_update.h"
 #include "web.h"
+#include "station_ui.h"
 #include "web_internal.h"
 #include "web_enums.h"
 #include "web_parse.h"
@@ -249,9 +250,10 @@ esp_err_t web_init(void)
 {
     static const char *const origins[]={WEB_MAP_TILE_ORIGIN};
     web_shell_config_t cfg={
-        .assets={web_ui_assets,web_ui_asset_count,web_ui_digest,web_ui_gz_total},
-        .title="Station",.default_brand="Station",.product_noun="station",.project_name=WEB_PROJECT_NAME,
-        .browser_storage_prefix="station.",
+        .assets=station_ui_assets,
+        .title=STATION_UI_TITLE,.default_brand=STATION_UI_DEFAULT_BRAND,
+        .product_noun=STATION_UI_PRODUCT_NOUN,.project_name=STATION_UI_PROJECT_NAME,
+        .browser_storage_prefix=STATION_UI_BROWSER_STORAGE_PREFIX,
         .storage={
             .password={SETTINGS_NS_SYS,SETTINGS_KEY_ADMIN_HASH},
             .sessions={SETTINGS_NS_WEB,SETTINGS_KEY_WEB_SESSIONS},

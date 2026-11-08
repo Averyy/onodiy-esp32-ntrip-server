@@ -4,11 +4,12 @@
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-UI = Path(__file__).resolve().parents[3] / "components/web/ui/js/82-network-diag.js"
+from ui_sources import module_path
+
+UI = module_path("82-network-diag.js")
 
 
 def download(pages):

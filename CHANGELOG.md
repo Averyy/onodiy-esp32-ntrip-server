@@ -6,6 +6,10 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Reuse: select browser modules/assets with an ordered product manifest; share
+  the UI bundler, shell, registry and app controls while retaining station
+  navigation, setup, status text and browser storage keys.
+
 - Reuse: move the HTTP server, authentication, WebSocket transport and worker
   into `web_shell`, with bounded station route, status and service adapters.
 

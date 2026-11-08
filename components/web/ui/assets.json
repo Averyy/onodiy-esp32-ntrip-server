@@ -1,0 +1,57 @@
+{
+  "assets": [
+    {
+      "url": "/index.html",
+      "source": "shared:index.html",
+      "type": "text/html; charset=utf-8"
+    },
+    {
+      "url": "/app.js",
+      "source": "generated:bundle",
+      "type": "text/javascript; charset=utf-8"
+    },
+    {
+      "url": "/app.css",
+      "source": "shared:app.css",
+      "type": "text/css; charset=utf-8"
+    },
+    {
+      "url": "/favicon.svg",
+      "source": "shared:favicon.svg",
+      "type": "image/svg+xml"
+    },
+    {
+      "url": "/vendor/maplibre-gl.mjs",
+      "source": "product:vendor/maplibre-gl.mjs",
+      "type": "text/javascript; charset=utf-8",
+      "if_module": "map",
+      "vendor": true,
+      "hash_manifest": "product:vendor/manifest.json"
+    },
+    {
+      "url": "/vendor/maplibre-gl-worker.mjs",
+      "source": "product:vendor/maplibre-gl-worker.mjs",
+      "type": "text/javascript; charset=utf-8",
+      "if_module": "map",
+      "vendor": true,
+      "hash_manifest": "product:vendor/manifest.json"
+    },
+    {
+      "url": "/vendor/maplibre-gl.css",
+      "source": "product:vendor/maplibre-gl.css",
+      "type": "text/css; charset=utf-8",
+      "if_module": "map",
+      "vendor": true,
+      "hash_manifest": "product:vendor/manifest.json",
+      "stylesheet": true
+    },
+    {
+      "url": "/vendor/maplibre-LICENSE.txt",
+      "source": "product:vendor/maplibre-LICENSE.txt",
+      "type": "text/plain; charset=utf-8",
+      "if_module": "map",
+      "vendor": true,
+      "hash_manifest": "product:vendor/manifest.json"
+    }
+  ]
+}

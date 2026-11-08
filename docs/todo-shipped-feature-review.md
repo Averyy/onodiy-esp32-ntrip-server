@@ -66,7 +66,7 @@ Back to [development](development.md) · [Latency work](todo-network-latency.md)
   messages retain their existing path.
 
 - [x] **A failed logout must not appear confirmed.**
-  [logout](../components/web/ui/js/20-shell.js) catches all DELETE failures and
+  [logout](../components/web_shell/ui/js/20-shell.js) catches all DELETE failures and
   displays Login anyway. If the request never reached the station, the HttpOnly
   remembered cookie and server session still authenticate after a reload.
   Treat success or an already-unauthorized response as confirmed; clear visible
@@ -78,7 +78,7 @@ Back to [development](development.md) · [Latency work](todo-network-latency.md)
   lost responses and late secret responses.
 
 - [x] **Reconcile receiver-update UI state after missed completion events.**
-  [Updates load](../components/web/ui/js/70-updates.js) initializes `rflow` from
+  [Updates load](../components/web/ui/js/71-receiver-updates.js) initializes `rflow` from
   polling, but only the final progress event settles an existing flow. If that
   event is lost while disconnected, later successful snapshots can leave the
   page showing downloading/installing indefinitely and hide the last outcome.
@@ -93,7 +93,7 @@ Back to [development](development.md) · [Latency work](todo-network-latency.md)
   cover the additive flags; the host suite passes 1,345 tests and the target builds.
 
 - [x] **A failed receiver-status refresh must not hide a recovery session.**
-  [Updates load / renderSession](../components/web/ui/js/70-updates.js) converts a
+  [Updates load / renderSession](../components/web/ui/js/71-receiver-updates.js) converts a
   failed `/api/gnss/flash` request to null, then treats null as no open session.
   Preserve the last snapshot with an explicit stale/error state and disable
   recovery actions until refreshed. Test one endpoint failing while the general

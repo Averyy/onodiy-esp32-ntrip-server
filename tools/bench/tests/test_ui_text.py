@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 """Sentences the web UI builds from the station's status (components/web/ui/js), run in Node.
 
-The UI's modules are loaded the way the bundle joins them (every js/*.js but
-the start-up in 99-main.js, in file-name order, inside one function), with a
+The UI's modules are loaded the way the bundle joins them (the production manifest modules except
+the start-up entry point, in manifest order, inside one function), with a
 document that answers every lookup and timers that never fire, and the
 functions under test are called on status objects as the API sends them.
 Skipped when Node.js is not installed.
@@ -20,16 +20,17 @@ from pathlib import Path
 
 import pytest
 
+from ui_sources import CSS, HARNESS_MODULES, MODULE_FILES, module_path
+
 ROOT = Path(__file__).resolve().parents[3]
 UI_JS = ROOT / "components" / "web" / "ui" / "js"
 
 HARNESS = r"""
 const fs = require('fs');
-const path = require('path');
 const vm = require('vm');
-const [dir, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== '99-main.js').sort();
-const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+const [modulesJson, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
+const modules = JSON.parse(modulesJson);
+const src = modules.map(m => m.path ? fs.readFileSync(m.path, 'utf8') : m.source).join('\n');
 const noop = () => {};
 const el = new Proxy(function () {}, {
   get: (t, k) => (k === Symbol.toPrimitive ? () => '' : el),
@@ -115,7 +116,7 @@ def run_ui(cases: list[tuple[str, object]]) -> list:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
-    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps(cases)], capture_output=True, text=True,
+    res = subprocess.run([node, "-e", HARNESS, HARNESS_MODULES, json.dumps(cases)], capture_output=True, text=True,
                          timeout=60)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
@@ -1086,7 +1087,7 @@ def test_status_page_leaves_out_the_notice_the_top_card_says():
 def test_band_wording_never_promises_a_top_reward():
     """4 bands is the most this receiver reaches (the fifth is Galileo E5 AltBOC, which the UM982 lacks): no page
     calls it Onocoy's top band reward."""
-    for f in UI_JS.glob("*.js"):
+    for f in MODULE_FILES:
         assert "top band reward" not in f.read_text(), f.name
     four = {"totals": {"tracked": 30, "cnr_dbhz": 44, "msm_age_ms": 100,
                        "systems": [{"sys": "galileo", "bands": {"l1": 8, "l5": 8, "l6": 7, "l2": 8}}]}}
@@ -1183,7 +1184,7 @@ def test_no_local_value_hides_a_shared_function_that_its_block_calls():
     """A const/let/var that is not a function, named like one of the UI's shared functions, is never called in its
     block: the call would reach the local (a button row once hid act(), so Start, Keep and Stop sent nothing). Locals
     that are functions of their own (a local add(), say()) are fine."""
-    files = {f.name: f.read_text() for f in sorted(UI_JS.glob("*.js"))}
+    files = {f.name: f.read_text() for f in MODULE_FILES}
     shared = set()
     for text in files.values():
         shared.update(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", text, re.M))
@@ -1419,7 +1420,7 @@ def test_message_and_satellite_lists_are_one_line_rows():
         assert "stack-sm" not in text and "stack: true" not in text, name
     assert "class: 'rows msgs'" in (UI_JS / "65-signals.js").read_text()
     assert "class: 'rows'" in (UI_JS / "66-live.js").read_text()
-    css = (UI_JS.parent / "app.css").read_text()
+    css = CSS.read_text()
     assert "table.rows th, table.rows td { padding: 0.35rem 0.45rem; white-space: nowrap; }" in css
     assert "table.rows.msgs td.name { white-space: normal; overflow: visible; }" in css
 
@@ -1694,15 +1695,15 @@ def test_receiver_unchecked_during_maintenance_says_so():
     rx = (UI_JS / "60-receiver.js").read_text()
     assert "unchecked ? h('p', { class: 'muted' }, NOT_CHECKED + '.') : null" in rx
     assert "(unchecked ? null : ['Model', h('span', { class: 'muted' }, 'Not identified yet')])" in rx
-    upd = (UI_JS / "70-updates.js").read_text()
+    upd = module_path("71-receiver-updates.js").read_text()
     assert "rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.'" in upd
 
 
 def test_receiver_maintenance_starts_in_one_place():
     """Settings' Updates card, next to the receiver update, is the one place that starts it (the notices and the
     Status page end it); Receiver settings has no maintenance card any more."""
-    starts = [f.name for f in sorted(UI_JS.glob("*.js")) if "/api/gnss/maintenance', { duration_s" in f.read_text()]
-    assert starts == ["70-updates.js"]
+    starts = [f.name for f in MODULE_FILES if "/api/gnss/maintenance', { duration_s" in f.read_text()]
+    assert starts == ["71-receiver-updates.js"]
     assert "'Receiver maintenance'" not in (UI_JS / "60-receiver.js").read_text()
 
 
@@ -1711,7 +1712,7 @@ def test_no_top_level_name_is_declared_twice():
     the first everywhere (a page's own link helper once dropped the caster box's "↗")."""
     seen: dict[str, str] = {}
     dup = []
-    for f in sorted(UI_JS.glob("*.js")):
+    for f in MODULE_FILES:
         for n, line in enumerate(f.read_text().splitlines(), 1):
             m = re.match(r"(?:async\s+)?function\s+(\w+)|(?:const|let|var|class)\s+(\w+)\b", line)
             if not m:
@@ -1745,7 +1746,7 @@ def test_header_says_the_station_state_in_a_word_in_the_top_cards_colour():
     it decides has its word, chosen for it (none falls back to the long title, none is left for a key that is gone),
     in the top card's colour, short enough for a phone's header. "Streaming" only green, "Not streaming" only red,
     amber words for what needs a look, plain words for what is under way: the header never contradicts the page."""
-    src = (UI_JS / "15-state.js").read_text()
+    src = module_path("15-station-state.js").read_text()
     # pick('key', ...), and the antenna's reasons (pick(ladder.id, ...): no satellites, no corrections).
     keys = set(re.findall(r"pick\('([a-z_]+)'", src)) | {"no_satellites", "no_rtcm"}
     (mapped,) = run_ui([("stateWordKeys", None)])
@@ -1837,7 +1838,7 @@ def test_every_link_in_the_ui_goes_to_a_page_that_exists():
     # The places a part is opened at (#/receiver/settings/manage: the Receiver setup card).
     places = {("receiver", "settings"): {"manage"}, ("receiver", "live"): {"start"}}
     bad = []
-    for f in sorted(UI_JS.glob("*.js")):
+    for f in MODULE_FILES:
         for m in re.finditer(r"'#/([a-z]*)(?:/([a-z]+))?(?:/([a-z]+))?[a-z/]*'", f.read_text()):
             name, sub, at = m.group(1), m.group(2), m.group(3)
             if name not in pages or (sub and pages[name] is not None and sub not in pages[name]) or \
@@ -2099,7 +2100,7 @@ def test_logs_lists_are_one_line_rows():
     column has one width, so the text after it starts at the same place in every row."""
     js = (UI_JS / "80-diag.js").read_text()
     assert "stack: true" not in js and "stack-sm" not in js
-    css = (UI_JS.parent / "app.css").read_text()
+    css = CSS.read_text()
     assert "stack-sm" not in css and "table.events, table.events tbody" not in css
     assert "pre.log .ln { display: block; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }" in css
     assert "table.fixed { table-layout: fixed; }" in css and "table.fixed .when { width: 17rem; }" in css

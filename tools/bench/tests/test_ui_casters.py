@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 """The caster editor (components/web/ui/js/50-casters.js) driven in Node: what its Save sends and what it shows.
 
-The UI's modules are loaded the way the bundle joins them (every js/*.js but
-the start-up in 99-main.js, in file-name order, inside one function) over a
+The UI's modules are loaded the way the bundle joins them (the production manifest modules except
+the start-up entry point, in manifest order, inside one function) over a
 small DOM: elements with children, attributes, listeners and the form
 properties the editor reads (a select's value is its selected option's).
 Each case opens the editor on a slot as GET /api/casters gives it, changes
@@ -31,16 +31,17 @@ from pathlib import Path
 
 import pytest
 
+from ui_sources import CSS, HARNESS_MODULES
+
 ROOT = Path(__file__).resolve().parents[3]
 UI_JS = ROOT / "components" / "web" / "ui" / "js"
 
 HARNESS = r"""
 const fs = require('fs');
-const path = require('path');
 const vm = require('vm');
-const [dir, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== '99-main.js').sort();
-const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+const [modulesJson, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
+const modules = JSON.parse(modulesJson);
+const src = modules.map(m => m.path ? fs.readFileSync(m.path, 'utf8') : m.source).join('\n');
 const noop = () => {};
 
 class Node {
@@ -1406,7 +1407,7 @@ def run_editor(cases: list[dict]) -> list[dict]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
-    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps(cases)], capture_output=True, text=True,
+    res = subprocess.run([node, "-e", HARNESS, HARNESS_MODULES, json.dumps(cases)], capture_output=True, text=True,
                          timeout=60)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
@@ -2407,7 +2408,7 @@ def test_no_contact_greys_every_colour_on_the_status_page():
     claim it: its root is .status-page, and one rule turns every colour class the page draws (in every state, the
     admin's and a visitor's) to the grey of the header's dot: the tones (chips, bars, "Also:" marks, through --tone),
     the tone words and figures, the signals' ticks and C/N0."""
-    css = re.sub(r"/\*.*?\*/", "", (UI_JS.parent / "app.css").read_text(), flags=re.S)
+    css = re.sub(r"/\*.*?\*/", "", CSS.read_text(), flags=re.S)
     rules = re.findall(r"(body\.no-contact \.status-page[^{]*)\{([^}]*)\}", css)
     covered = {c for sel, _ in rules for c in re.findall(r"\.([\w-]+)", sel)} - {"no-contact", "status-page"}
     decl = " ".join(d for _, d in rules)
@@ -2913,7 +2914,7 @@ def test_long_values_wrap_at_their_separators():
                                                 ["Signal", "-61 dBm"], ["Note", "Remove the stored password"]]}])
     assert vals == ["R4.10|Build26000", "AA:|BB:|CC:|DD:|EE:|FF", "servers.|onocoy.|com:|2101", "Home", "-61 dBm",
                     "Remove the stored password"]
-    css = (UI_JS.parent / "app.css").read_text()
+    css = CSS.read_text()
     assert ".tight-kv .kv { grid-template-columns: minmax(7.5rem, min(13rem, 40%)) minmax(0, 1fr); }" in css
     # The Status page: a caster's name wraps at its separators; a long value without any (a 32-character network name)
     # wraps anywhere rather than widen its card.
@@ -3794,7 +3795,7 @@ def test_receiver_update_hides_the_list_its_button_and_why_not_while_it_runs():
               "receiver": {"model": "UM980", "firmware": "R4.10Build7923", "build": 7923}, "flash_available": True}
     (up,) = run_editor([{**base, "update": {**SET_UPDATE, "gnss": gnss}, "flash": idle, "staged": staged}])
     assert "Uploaded package" in up["subs"] and up["steps"] == ["1. Upload and check \u2713", "2. Install on the receiver"]
-    css = (UI_JS.parent / "app.css").read_text()
+    css = CSS.read_text()
     assert "* + .steps { margin-top: 0.75rem; }" in css   # space between the row and its steps
     # Not running (a page opened after it, the receiver not streaming yet): what is available, the list and the button,
     # and why it waits.
@@ -3820,7 +3821,7 @@ def test_a_dialog_gives_the_focus_back_without_scrolling():
 def test_a_select_as_wide_as_its_options_shows_them_whole():
     """A select sized to its options (width: auto: the receiver build list, the Events filter) drops the text-indent
     every select has: WebKit leaves the indent out of that width, so the longest option lost its last letters."""
-    css = re.sub(r"/\*.*?\*/", "", (UI_JS.parent / "app.css").read_text(), flags=re.S)
+    css = re.sub(r"/\*.*?\*/", "", CSS.read_text(), flags=re.S)
     auto = [(sel.strip(), decl) for sel, decl in re.findall(r"([^{}]*)\{([^{}]*)\}", css)
             if "select" in sel and re.search(r"(^|;)\s*width:\s*auto\s*(;|$)", decl.strip())]
     assert {sel for sel, _ in auto} >= {".form-actions.pick > select", ".tools select"}

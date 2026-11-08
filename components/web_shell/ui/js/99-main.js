@@ -6,14 +6,14 @@
  * session decides between setup, log in, public status and the app.
  *
  * A page that had a session when the station restarted (the restart
- * overlay noted it in sessionStorage 'station.restartedAt', 20-shell.js)
+ * overlay noted it in sessionStorage via storageKey('restartedAt'), 20-shell.js)
  * comes back at the login, which says why, also when public status would
  * otherwise show the public view: sessions do not survive a restart.
  */
 
 function restartedRecently() {
   try {
-    const at = Number(sessionStorage.getItem('station.restartedAt')) || 0;
+    const at = Number(sessionStorage.getItem(storageKey('restartedAt'))) || 0;
     return at > 0 && Date.now() - at < 10 * 60 * 1000;
   } catch (e) {
     return false;

@@ -2,8 +2,7 @@
  * SPDX-License-Identifier: MIT */
 #pragma once
 #include "web_assets.h"
-/* Product-owned generated storage; valid for firmware lifetime. The legacy
- * web_ui_assets globals remain supported by passing them in this descriptor. */
+/* Product-owned generated storage; valid for firmware lifetime. */
 typedef struct {
     const web_asset_t *table;
     size_t count;

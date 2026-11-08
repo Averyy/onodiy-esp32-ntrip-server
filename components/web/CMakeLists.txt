@@ -54,28 +54,13 @@ idf_component_register(
         fw_update
         board)
 
-# Browser UI (ui/): tools/ui_bundle.py checks the page, the scripts and the
-# styles (structure, and what the Content-Security-Policy would block), joins
-# ui/js/*.js into app.js without their comments, gzips every asset and
-# writes the asset table (web_shell/include/web_assets.h) as a C file into the
-# build directory. Any check failing, or the compressed UI growing past
-# UI_GZ_BUDGET bytes, fails the build. Adding a file under ui/js/
-# reconfigures (CONFIGURE_DEPENDS).
-set(UI_GZ_BUDGET 655360)
-file(GLOB _ui_js CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/js/*.js")
-file(GLOB _ui_vendor CONFIGURE_DEPENDS "${COMPONENT_DIR}/ui/vendor/*")
-set(_ui_inputs
-    "${COMPONENT_DIR}/ui/index.html"
-    "${COMPONENT_DIR}/ui/app.css"
-    "${COMPONENT_DIR}/ui/favicon.svg"
-    ${_ui_js} ${_ui_vendor})
-set(_ui_c "${CMAKE_CURRENT_BINARY_DIR}/web_ui_assets.c")
-idf_build_get_property(_python PYTHON)
-add_custom_command(
-    OUTPUT "${_ui_c}"
-    COMMAND "${_python}" "${COMPONENT_DIR}/tools/ui_bundle.py"
-            --ui "${COMPONENT_DIR}/ui" --c-out "${_ui_c}" --max-gz ${UI_GZ_BUDGET}
-    DEPENDS "${COMPONENT_DIR}/tools/ui_bundle.py" ${_ui_inputs}
-    COMMENT "Checking and embedding the web UI"
-    VERBATIM)
-target_sources(${COMPONENT_LIB} PRIVATE "${_ui_c}")
+# Product-owned assets and metadata, generated from the explicit station composition.
+include("${COMPONENT_DIR}/../web_shell/cmake/web_ui.cmake")
+web_shell_ui_bundle(
+    TARGET ${COMPONENT_LIB}
+    MANIFEST "${COMPONENT_DIR}/ui/product.json"
+    PRODUCT_ROOT "${COMPONENT_DIR}/ui"
+    ASSET_MANIFEST "${COMPONENT_DIR}/ui/assets.json"
+    SYMBOL_PREFIX station_ui
+    MAX_PROJECT_GZ 163840
+    MAX_GZ 655360)

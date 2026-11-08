@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
-"""The app shell's handling of the station's WebSocket events and its addresses (components/web/ui/js/20-shell.js),
+"""The app shell's handling of the station's WebSocket events and its addresses (components/web_shell/ui/js/20-shell.js),
 run in Node.
 
-The UI's modules are loaded the way the bundle joins them (every js/*.js but
-the start-up in 99-main.js, in file-name order, inside one function), with a
+The UI's modules are loaded the way the bundle joins them (the production manifest modules except
+the start-up entry point, in manifest order, inside one function), with a
 document that answers every lookup. Timers are kept, not run: a case says when
 the ones due so far fire ("settle"). Each case opens a page with reload() and
 dirty() (a form being edited or not), sends it events as the WebSocket hands
@@ -18,20 +18,17 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[3]
-UI_JS = ROOT / "components" / "web" / "ui" / "js"
+from ui_sources import HARNESS_MODULES
 
 HARNESS = r"""
 const fs = require('fs');
-const path = require('path');
 const vm = require('vm');
-const [dir, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
-const files = fs.readdirSync(dir).filter(f => f.endsWith('.js') && f !== '99-main.js').sort();
-const src = files.map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+const [modulesJson, casesJson] = process.argv.slice(-2);   /* node -e: no script path in argv */
+const modules = JSON.parse(modulesJson);
+const src = modules.map(m => m.path ? fs.readFileSync(m.path, 'utf8') : m.source).join('\n');
 const noop = () => {};
 const el = new Proxy(function () {}, {
   get: (t, k) => (k === Symbol.toPrimitive ? () => '' : el),
@@ -106,7 +103,7 @@ def run_shell(cases: list[dict]) -> list[dict]:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
-    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps(cases)], capture_output=True, text=True,
+    res = subprocess.run([node, "-e", HARNESS, HARNESS_MODULES, json.dumps(cases)], capture_output=True, text=True,
                          timeout=60)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)
@@ -199,7 +196,7 @@ def run_routes(routes: list[list[str]]) -> dict:
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is not installed")
-    res = subprocess.run([node, "-e", HARNESS, str(UI_JS), json.dumps({"routes": routes})], capture_output=True, text=True,
+    res = subprocess.run([node, "-e", HARNESS, HARNESS_MODULES, json.dumps({"routes": routes})], capture_output=True, text=True,
                          timeout=60)
     assert res.returncode == 0, res.stderr
     return json.loads(res.stdout)

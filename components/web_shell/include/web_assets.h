@@ -5,7 +5,7 @@
  * Embedded browser UI: the asset table and the lookups the HTTP handlers
  * need (pure logic, no IDF includes, host-testable).
  *
- * The build generates the table (components/web/tools/ui_bundle.py, run by
+ * The build generates the table (components/web_shell/tools/ui_bundle.py, run by
  * components/web/CMakeLists.txt): every asset gzip-compressed, in flash,
  * served with Content-Encoding: gzip. The names are fixed (components/web/API.md, request
  * checks):
@@ -17,8 +17,8 @@
  *
  * The UI routes with the URL fragment (/#/settings), so no other path is a
  * UI asset. Conditional requests use the ETag the server chooses (components/web/API.md:
- * the app version and web_ui_digest, quoted); web_etag_match() evaluates
- * If-None-Match against it. web_ui_digest identifies the bundle itself (first
+ * the app version and the asset-set digest, quoted); web_etag_match() evaluates
+ * If-None-Match against it. The digest identifies the bundle itself (first
  * 16 hex digits of a SHA-256 over the compressed assets), so a development
  * build whose version string does not change still gets a fresh UI.
  */
@@ -40,18 +40,12 @@ typedef struct {
     size_t gz_len;         /**< its length in bytes */
 } web_asset_t;
 
-/** The generated table (web_ui_assets.c in the build directory). */
-extern const web_asset_t web_ui_assets[];
-extern const size_t web_ui_asset_count;
-extern const char web_ui_digest[];
-extern const size_t web_ui_gz_total;
-
 /**
  * The asset a request URI names, or NULL. Only the path counts: a query
  * ("?v=2") or fragment is ignored, and "/" means "/index.html". Matching is
  * exact and case-sensitive.
  *
- * @param assets table to search (normally web_ui_assets)
+ * @param assets product-owned table to search
  * @param count  its number of entries
  * @param uri    request URI as received (may be NULL)
  */

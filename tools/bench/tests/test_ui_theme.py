@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
-"""The web UI's colour tokens (components/web/ui/app.css): the dark theme the
+"""The web UI's colour tokens (components/web_shell/ui/app.css): the dark theme the
 same from the system setting and from the header's button, and the colour
 pairs the pages draw at WCAG AA contrast (4.5:1 for text, 3:1 for the edges
 of controls and for figures)."""
@@ -8,10 +8,10 @@ of controls and for figures)."""
 from __future__ import annotations
 
 import re
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[3]
-CSS = (ROOT / "components" / "web" / "ui" / "app.css").read_text()
+from ui_sources import CSS as UI_CSS
+
+CSS = UI_CSS.read_text()
 NOCOMMENT = re.sub(r"/\*.*?\*/", "", CSS, flags=re.S)
 
 
