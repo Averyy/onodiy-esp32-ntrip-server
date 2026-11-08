@@ -4,6 +4,57 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
+## Unreleased
+
+- Reuse: the receiver components (board, settings, gnss_types, gnss_framing,
+  gnss_link, gnss_obs, um98x_ctl) are documented for use by another ESP-IDF
+  application in `docs/component-reuse.md`: SDK settings, partition tables,
+  start-up order, callbacks and the shared NVS keys. A new CI job,
+  `external-app`, builds `examples/external-receiver` outside the tree with
+  only those components, for the 16 MB and 8 MB layouts, and runs the framing
+  code with a plain host compiler. A release needs it.
+- Receiver link: `gnss_link_write_ex()` says what a write did on the wire:
+  nothing sent, TX done, or uncertain (a timeout after the bytes reached the
+  UART). `gnss_link.h` now documents writing complete RTCM correction frames
+  without a lease while streaming. `gnss_link_acquire()` waits up to 500 ms
+  for bytes of an earlier timed-out write to leave the UART before it grants.
+  New `gnss_link_prompt_seen()`: the loader prompt hit stays latched for the
+  rest of its lease.
+- Receiver commands: once the armed loader prompt detector fires under a
+  lease, no later call under that lease sends anything: no resend, no session
+  CR LF, no rollback RESET. These calls return the new result
+  `ESP_ERR_NOT_ALLOWED`. Detection still reports the prompt as before, now
+  also for a prompt seen earlier under the same lease, and its probe stops
+  at the prompt instead of waiting out its reply window. The loader's
+  restart key still goes out. The station arms the detector only for
+  detection, so its other sessions are unchanged.
+- Receiver commands: a restart that shows both its banner (or its "resetting"
+  answer) and an unasked version log within 20 s now counts as one restart,
+  not two.
+- Receiver commands: `um98x_ctl_query_mode()` is documented as the general
+  mode read-back. Rover modes come back as the receiver sends them, e.g.
+  `MODE ROVER SURVEY,` with its trailing comma (host-tested with the public
+  sample).
+- Observations: `gnss_obs_get_solution()` gives the receiver's latest
+  position (GGA) and error-statistics (GST) sentences field by field: UTC
+  time, position, HDOP, altitude, geoidal separation, the receiver's age of
+  differential data and its reference station, and the GST deviations, each
+  with its own validity, in fixed-point units, with arrival time and age, and
+  whether both describe the same epoch. An empty field is never reported as
+  zero; a no-fix sentence reports no position. `gnss_obs_reset()` clears it;
+  `gnss_obs_get_fix()` is unchanged. Tested against pynmeagps on three
+  public captures (two new fixtures from gpsd: a Trimble RTK stream and a
+  u-blox ZED-F9P stream with GST).
+- Docs: the command layer's and the flasher's headers no longer say that only
+  the UM982 is flashed; UM980 packages are accepted too.
+- API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,
+  `gnss_link_prompt_seen`, `gnss_obs_get_solution` and the types of
+  `gnss_obs_nmea.h`). Callers of `um98x_ctl` that arm the loader
+  prompt detector can now get `ESP_ERR_NOT_ALLOWED` from calls other than
+  detection.
+- Pending: host tests, the station build and the external app build only;
+  not yet tested on hardware.
+
 ## v0.1.14
 
 - Position: a confirmed antenna move no longer stops the RTCM. Onocoy, the other

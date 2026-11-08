@@ -277,20 +277,15 @@ static bool hex_field(field_t f, uint8_t *v)
     return true;
 }
 
-bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out)
+/* ---- position and error-statistics sentences ----------------------------- */
+
+#define NMEA_MAX_FIELDS 20u
+
+/* The fields after the address ("$..XXX,"), up to the checksum: count. */
+static unsigned split_fields(const char *line, size_t len, size_t start, field_t *f, unsigned cap)
 {
-    memset(out, 0, sizeof(*out));
-    talker_t talker;
-    if (line == NULL || len < 7 || line[0] != '$' || memcmp(line + 3, "GGA,", 4) != 0 ||
-        !talker_of(line[1], line[2], &talker)) {
-        return false;
-    }
-    /* Fields 1-7 after the address: time, latitude, N/S, longitude, E/W,
-     * quality, satellites used. */
-    field_t f[7];
     unsigned nf = 0;
-    size_t start = 7;
-    for (size_t i = start; nf < 7; i++) {
+    for (size_t i = start; nf < cap; i++) {
         bool end = (i >= len || line[i] == '*');
         if (end || line[i] == ',') {
             f[nf].s = line + start;
@@ -302,6 +297,159 @@ bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out)
             break;
         }
     }
+    return nf;
+}
+
+/*
+ * Decimal number: an optional sign (if allowed), 1..12 digits, an optional
+ * '.' and fraction digits; the value times 10^scale, rounded half away from
+ * zero at the first dropped digit. false for an empty or malformed field,
+ * and for more than 18 digits in front of the dropped ones (int64 range).
+ */
+static bool fixed_field(field_t f, bool allow_sign, unsigned scale, int64_t *v)
+{
+    size_t i = 0;
+    bool neg = false;
+    if (f.n > 0 && allow_sign && (f.s[0] == '-' || f.s[0] == '+')) {
+        neg = (f.s[0] == '-');
+        i = 1;
+    }
+    int64_t acc = 0;
+    size_t digits = 0;
+    for (; i < f.n && f.s[i] != '.'; i++) {
+        if (f.s[i] < '0' || f.s[i] > '9' || ++digits > 12) {
+            return false;
+        }
+        acc = acc * 10 + (f.s[i] - '0');
+    }
+    if (digits == 0 || digits + scale > 18) {
+        return false;
+    }
+    unsigned kept = 0;
+    bool round_up = false;
+    if (i < f.n) {
+        size_t frac = 0;
+        for (i++; i < f.n; i++, frac++) {
+            if (f.s[i] < '0' || f.s[i] > '9') {
+                return false;
+            }
+            if (kept < scale) {
+                acc = acc * 10 + (f.s[i] - '0');
+                kept++;
+            } else if (frac == scale) {
+                round_up = (f.s[i] >= '5');
+            }
+        }
+    }
+    for (; kept < scale; kept++) {
+        acc *= 10;
+    }
+    if (round_up) {
+        acc++;
+    }
+    *v = neg ? -acc : acc;
+    return true;
+}
+
+/* A fixed-point field that must fit [lo, hi]. */
+static bool fixed_in(field_t f, bool allow_sign, unsigned scale, int64_t lo, int64_t hi, int64_t *v)
+{
+    return fixed_field(f, allow_sign, scale, v) && *v >= lo && *v <= hi;
+}
+
+/* hhmmss with an optional fraction: ms since 00:00, the fraction cut to ms. */
+static bool utc_field(field_t f, uint32_t *ms)
+{
+    if (f.n < 6) {
+        return false;
+    }
+    for (size_t i = 0; i < 6; i++) {
+        if (f.s[i] < '0' || f.s[i] > '9') {
+            return false;
+        }
+    }
+    unsigned hh = (unsigned)(f.s[0] - '0') * 10u + (unsigned)(f.s[1] - '0');
+    unsigned mm = (unsigned)(f.s[2] - '0') * 10u + (unsigned)(f.s[3] - '0');
+    unsigned ss = (unsigned)(f.s[4] - '0') * 10u + (unsigned)(f.s[5] - '0');
+    if (hh > 23 || mm > 59 || ss > 60 || (ss == 60 && (hh != 23 || mm != 59))) {   /* 23:59:60: a leap second */
+        return false;
+    }
+    unsigned frac_ms = 0;
+    if (f.n > 6) {
+        if (f.s[6] != '.') {
+            return false;
+        }
+        unsigned scale = 100;
+        for (size_t i = 7; i < f.n; i++) {
+            if (f.s[i] < '0' || f.s[i] > '9') {
+                return false;
+            }
+            frac_ms += (unsigned)(f.s[i] - '0') * scale;
+            scale /= 10u;
+        }
+    }
+    *ms = ((hh * 60u + mm) * 60u + ss) * 1000u + frac_ms;
+    return true;
+}
+
+/* (d)ddmm.mmm... and its hemisphere: 1e-9 degree, positive = pos. */
+static bool angle_field(field_t f, field_t hemi, char pos, char neg, unsigned max_deg, int64_t *ndeg)
+{
+    if (hemi.n != 1 || (hemi.s[0] != pos && hemi.s[0] != neg)) {
+        return false;
+    }
+    int64_t min_e8;   /* degrees * 100 + minutes, in 1e-8 minute */
+    if (!fixed_field(f, false, 8, &min_e8)) {
+        return false;
+    }
+    /* The whole minutes as sent (the two digits in front of the point), below 60. */
+    const char *dot = memchr(f.s, '.', f.n);
+    size_t ints = dot != NULL ? (size_t)(dot - f.s) : f.n;
+    if (ints < 3 || (unsigned)(f.s[ints - 2] - '0') * 10u + (unsigned)(f.s[ints - 1] - '0') > 59u) {
+        return false;
+    }
+    int64_t deg = min_e8 / 10000000000LL;              /* the digits in front of the minutes */
+    int64_t minutes_e8 = min_e8 % 10000000000LL;       /* mm.mmmmmmmm */
+    if (minutes_e8 >= 6000000000LL) {
+        /* 59.999999995 and up rounded to 60 minutes: the next degree. */
+        deg += 1;
+        minutes_e8 -= 6000000000LL;
+    }
+    if (deg > (int64_t)max_deg || (deg == (int64_t)max_deg && minutes_e8 != 0)) {
+        return false;
+    }
+    /* 1e-8 minute = 1e-9 degree / 6 */
+    int64_t v = deg * 1000000000LL + (minutes_e8 + 3) / 6;
+    *ndeg = (hemi.s[0] == neg) ? -v : v;
+    return true;
+}
+
+/* A unit field: exactly "M" (empty: a value without its unit is not taken). */
+static bool unit_m(field_t f)
+{
+    return f.n == 1 && f.s[0] == 'M';
+}
+
+static void talker_copy(const char *line, char out[3])
+{
+    out[0] = line[1];
+    out[1] = line[2];
+    out[2] = '\0';
+}
+
+bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    talker_t talker;
+    if (line == NULL || len < 7 || line[0] != '$' || memcmp(line + 3, "GGA,", 4) != 0 ||
+        !talker_of(line[1], line[2], &talker)) {
+        return false;
+    }
+    /* Fields after the address: 1 time, 2-5 latitude N/S longitude E/W,
+     * 6 quality, 7 satellites used, 8 HDOP, 9-10 altitude M, 11-12 geoidal
+     * separation M, 13 age of differential data, 14 reference station. */
+    field_t f[NMEA_MAX_FIELDS];
+    unsigned nf = split_fields(line, len, 7, f, NMEA_MAX_FIELDS);
     if (nf < 7) {
         return false;
     }
@@ -311,8 +459,85 @@ bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out)
         !in(n, 0, 99)) {
         return false;
     }
-    out->quality = (uint8_t)q;
-    out->satellites = (uint8_t)n;
+    obs_gga_t g;
+    memset(&g, 0, sizeof(g));
+    talker_copy(line, g.talker);
+    g.quality = (uint8_t)q;
+    g.satellites = (uint8_t)n;
+    g.utc_valid = utc_field(f[0], &g.utc_ms);
+    const bool fix = (g.quality != 0);
+    g.position_valid = fix && angle_field(f[1], f[2], 'N', 'S', 90, &g.lat_ndeg) &&
+                       angle_field(f[3], f[4], 'E', 'W', 180, &g.lon_ndeg);
+    if (!g.position_valid) {
+        g.lat_ndeg = 0;
+        g.lon_ndeg = 0;
+    }
+    int64_t v;
+    if (nf > 7 && fixed_in(f[7], false, 2, 0, UINT16_MAX, &v)) {
+        g.hdop_valid = true;
+        g.hdop_c = (uint16_t)v;
+    }
+    if (fix && nf > 9 && unit_m(f[9]) && fixed_in(f[8], true, 4, INT32_MIN, INT32_MAX, &v)) {
+        g.altitude_valid = true;
+        g.altitude_01mm = (int32_t)v;
+    }
+    if (fix && nf > 11 && unit_m(f[11]) && fixed_in(f[10], true, 4, INT32_MIN, INT32_MAX, &v)) {
+        g.geoid_valid = true;
+        g.geoid_01mm = (int32_t)v;
+    }
+    if (nf > 12 && fixed_in(f[12], false, 3, 0, UINT32_MAX, &v)) {
+        g.diff_age_valid = true;
+        g.diff_age_ms = (uint32_t)v;
+    }
+    if (nf > 13 && f[13].n > 0 && f[13].n <= 4 && fixed_in(f[13], false, 0, 0, 4095, &v) &&
+        memchr(f[13].s, '.', f[13].n) == NULL) {
+        g.diff_station_valid = true;
+        g.diff_station = (uint16_t)v;
+    }
+    *out = g;
+    return true;
+}
+
+bool obs_gst_parse(const char *line, size_t len, gnss_obs_gst_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    talker_t talker;
+    if (line == NULL || len < 7 || line[0] != '$' || memcmp(line + 3, "GST,", 4) != 0 ||
+        !talker_of(line[1], line[2], &talker)) {
+        return false;
+    }
+    /* 1 time, 2 RMS, 3 semi-major, 4 semi-minor, 5 orientation, 6-8 latitude,
+     * longitude and altitude standard deviations (metres, degrees). */
+    field_t f[NMEA_MAX_FIELDS];
+    unsigned nf = split_fields(line, len, 7, f, NMEA_MAX_FIELDS);
+    if (nf < 8) {
+        return false;
+    }
+    gnss_obs_gst_t g;
+    memset(&g, 0, sizeof(g));
+    talker_copy(line, g.talker);
+    g.utc_valid = utc_field(f[0], &g.utc_ms);
+    int64_t v;
+    struct {
+        unsigned idx;
+        bool *valid;
+        uint32_t *val;
+    } const len_fields[] = {
+        { 1, &g.rms_valid, &g.rms_01mm },       { 2, &g.major_valid, &g.major_01mm },
+        { 3, &g.minor_valid, &g.minor_01mm },   { 5, &g.lat_sd_valid, &g.lat_sd_01mm },
+        { 6, &g.lon_sd_valid, &g.lon_sd_01mm }, { 7, &g.alt_sd_valid, &g.alt_sd_01mm },
+    };
+    for (size_t i = 0; i < sizeof(len_fields) / sizeof(len_fields[0]); i++) {
+        if (fixed_in(f[len_fields[i].idx], false, 4, 0, UINT32_MAX, &v)) {
+            *len_fields[i].valid = true;
+            *len_fields[i].val = (uint32_t)v;
+        }
+    }
+    if (fixed_in(f[4], false, 2, 0, 36000, &v)) {
+        g.orient_valid = true;
+        g.orient_cdeg = (uint16_t)v;
+    }
+    *out = g;
     return true;
 }
 

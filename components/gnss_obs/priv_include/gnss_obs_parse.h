@@ -54,6 +54,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "gnss_obs_nmea.h"
 #include "gnss_rtcm3.h"
 
 #ifdef __cplusplus
@@ -106,19 +107,30 @@ bool obs_msm_cnr(const uint8_t *frame, size_t len, const gnss_rtcm3_msm_t *h, ob
  */
 bool obs_gsv_parse(const char *line, size_t len, obs_gsv_t *out);
 
-/** What a position sentence says about the fix. */
-typedef struct {
-    uint8_t quality;          /**< fix quality (0 = no fix) */
-    uint8_t satellites;       /**< satellites used in the position */
-} obs_gga_t;
+/** What a position sentence says (gnss_obs_nmea.h). */
+typedef gnss_obs_gga_t obs_gga_t;
 
 /**
  * Parse one text line (without its terminator) as a position sentence
- * ("$..GGA", any talker): the fix quality (field 6) and the satellites used
- * (field 7). false (out cleared) for any other line, a malformed one or one
- * without those two fields.
+ * ("$..GGA", a talker of the satellite-in-view list): false (out cleared)
+ * for any other line, a malformed one or one without a readable fix quality
+ * (field 6, 0..9) and satellites used (field 7, 0..99). The other fields
+ * have their own validity (gnss_obs_nmea.h): one that cannot be read is
+ * reported invalid without refusing the sentence. Latitude and longitude:
+ * degrees and minutes (ddmm.m..., dddmm.m...), whole minutes below 60, up
+ * to 8 minute decimals used (1e-8 minute, under 0.02 mm; a carry from the
+ * rounding goes into the degrees), hemisphere N/S and E/W, at most 90 and
+ * 180 degrees. UTC: hhmmss with an optional fraction, second 60 only at
+ * 23:59 (a leap second).
  */
 bool obs_gga_parse(const char *line, size_t len, obs_gga_t *out);
+
+/**
+ * Parse one text line as an error-statistics sentence ("$..GST", same
+ * talkers): false (out cleared) for any other line or one with fewer than
+ * its 8 fields. Each field has its own validity as for GGA.
+ */
+bool obs_gst_parse(const char *line, size_t len, gnss_obs_gst_t *out);
 
 #define OBS_1033_STR_MAX 31u   /**< longest string of a 1033 (characters) */
 

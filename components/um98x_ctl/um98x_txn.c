@@ -126,6 +126,13 @@ void um98x_txn_abort(um98x_txn_t *t, int64_t now_ms)
     }
 }
 
+void um98x_txn_stop_prompt(um98x_txn_t *t, int64_t now_ms)
+{
+    if (t->status == UM98X_TXN_PENDING) {
+        finish(t, UM98X_TXN_PROMPT, now_ms);
+    }
+}
+
 bool um98x_txn_leading_crlf(const um98x_txn_t *t)
 {
     return t->kind == UM98X_TXN_VERSION || t->kind == UM98X_TXN_VERSION_RESTART || t->kind == UM98X_TXN_PROBE;

@@ -8,6 +8,7 @@
  * from the pyrtcm oracle; and the satellite-in-view parser and sky view over
  * a real Unicore NMEA capture, against pynmeagps.
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -499,6 +500,258 @@ TEST_CASE("fixtures: every satellite-in-view sentence of a real Unicore capture 
     TEST_ASSERT_GREATER_OR_EQUAL(30, nv);
 
     fx_jsonl_free(&j);
+    fx_units_free(&u);
+    free(buf);
+}
+
+/* ---- position and error statistics against pynmeagps ------------------------- */
+
+/* "hh:mm:ss[.ffffff]" as the oracle writes a time: ms since 00:00. */
+static uint32_t oracle_utc_ms(const char *t)
+{
+    unsigned hh = 0, mm = 0, ss = 0;
+    char frac[8] = "";
+    int n = sscanf(t, "%u:%u:%u.%7[0-9]", &hh, &mm, &ss, frac);
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(3, n);
+    unsigned ms = 0;
+    for (unsigned i = 0, scale = 100; i < 3 && frac[i] != '\0'; i++, scale /= 10u) {
+        ms += (unsigned)(frac[i] - '0') * scale;
+    }
+    return ((hh * 60u + mm) * 60u + ss) * 1000u + ms;
+}
+
+static const cJSON *field(const cJSON *r, const char *k)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(r, k);
+    TEST_ASSERT_NOT_NULL_MESSAGE(v, k);
+    return v;
+}
+
+/* A number field of the oracle: false for null (the field was empty). */
+static bool onum(const cJSON *r, const char *k, double *v)
+{
+    const cJSON *x = field(r, k);
+    if (cJSON_IsNull(x)) {
+        return false;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(cJSON_IsNumber(x), k);
+    *v = x->valuedouble;
+    return true;
+}
+
+static bool ostr_is(const cJSON *r, const char *k, const char *want)
+{
+    const cJSON *x = field(r, k);
+    return cJSON_IsString(x) && strcmp(x->valuestring, want) == 0;
+}
+
+static void check_gga(const cJSON *r, const obs_gga_t *g, const char *msg)
+{
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(field(r, "talker")->valuestring, g->talker, msg);
+    const cJSON *t = field(r, "time");
+    TEST_ASSERT_EQUAL_MESSAGE(cJSON_IsString(t), g->utc_valid, msg);
+    if (g->utc_valid) {
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(oracle_utc_ms(t->valuestring), g->utc_ms, msg);
+    }
+    double v, w;
+    TEST_ASSERT_TRUE(onum(r, "quality", &v));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)v, g->quality, msg);
+    TEST_ASSERT_TRUE(onum(r, "numSV", &v));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)v, g->satellites, msg);
+    bool fix = g->quality != 0;
+    /* Position within 1e-9 degree: ours is rounded to it, the oracle to 1e-10. */
+    bool pos = onum(r, "lat", &v) && onum(r, "lon", &w);
+    TEST_ASSERT_EQUAL_MESSAGE(fix && pos, g->position_valid, msg);
+    if (g->position_valid) {
+        TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(1.1e-9, v, (double)g->lat_ndeg * 1e-9, msg);
+        TEST_ASSERT_DOUBLE_WITHIN_MESSAGE(1.1e-9, w, (double)g->lon_ndeg * 1e-9, msg);
+    }
+    bool hd = onum(r, "HDOP", &v);
+    TEST_ASSERT_EQUAL_MESSAGE(hd, g->hdop_valid, msg);
+    if (hd) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 100.0), g->hdop_c, msg);
+    }
+    bool alt = fix && onum(r, "alt", &v) && ostr_is(r, "altUnit", "M");
+    TEST_ASSERT_EQUAL_MESSAGE(alt, g->altitude_valid, msg);
+    if (alt) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 1e4), g->altitude_01mm, msg);
+    }
+    bool sep = fix && onum(r, "sep", &v) && ostr_is(r, "sepUnit", "M");
+    TEST_ASSERT_EQUAL_MESSAGE(sep, g->geoid_valid, msg);
+    if (sep) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 1e4), g->geoid_01mm, msg);
+    }
+    bool age = onum(r, "diffAge", &v);
+    TEST_ASSERT_EQUAL_MESSAGE(age, g->diff_age_valid, msg);
+    if (age) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 1000.0), g->diff_age_ms, msg);
+    }
+    bool st = onum(r, "diffStation", &v);
+    TEST_ASSERT_EQUAL_MESSAGE(st, g->diff_station_valid, msg);
+    if (st) {
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE((uint16_t)v, g->diff_station, msg);
+    }
+}
+
+static void check_len(const cJSON *r, const char *k, bool valid, uint32_t v01mm, const char *msg)
+{
+    double v;
+    bool o = onum(r, k, &v);
+    TEST_ASSERT_EQUAL_MESSAGE(o, valid, msg);
+    if (o) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 1e4), v01mm, msg);
+    }
+}
+
+static void check_gst(const cJSON *r, const gnss_obs_gst_t *g, const char *msg)
+{
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(field(r, "talker")->valuestring, g->talker, msg);
+    const cJSON *t = field(r, "time");
+    TEST_ASSERT_EQUAL_MESSAGE(cJSON_IsString(t), g->utc_valid, msg);
+    if (g->utc_valid) {
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(oracle_utc_ms(t->valuestring), g->utc_ms, msg);
+    }
+    check_len(r, "rangeRms", g->rms_valid, g->rms_01mm, msg);
+    check_len(r, "stdMajor", g->major_valid, g->major_01mm, msg);
+    check_len(r, "stdMinor", g->minor_valid, g->minor_01mm, msg);
+    check_len(r, "stdLat", g->lat_sd_valid, g->lat_sd_01mm, msg);
+    check_len(r, "stdLong", g->lon_sd_valid, g->lon_sd_01mm, msg);
+    check_len(r, "stdAlt", g->alt_sd_valid, g->alt_sd_01mm, msg);
+    double v;
+    bool o = onum(r, "orient", &v);
+    TEST_ASSERT_EQUAL_MESSAGE(o, g->orient_valid, msg);
+    if (o) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(llround(v * 100.0), g->orient_cdeg, msg);
+    }
+}
+
+static const char *const k_solution_files[] = {
+    "gpsd_trimble_nmea-rtk.log",
+    "gpsd_ublox-zed-f9p-nmea_excerpt.log",
+    "gpsd_unicore-um621_excerpt.log",
+};
+
+TEST_CASE("fixtures: every GGA and GST of three real captures reads like pynmeagps, field by field", "[fixtures]")
+{
+    size_t seen_gga = 0, seen_gst = 0;
+    for (size_t f = 0; f < sizeof(k_solution_files) / sizeof(k_solution_files[0]); f++) {
+        const char *name = k_solution_files[f];
+        char rel[128];
+        snprintf(rel, sizeof(rel), "nmea/%s", name);
+        size_t len;
+        uint8_t *buf = fx_read(rel, &len);
+        fx_units_t u;
+        fx_frame(buf, len, 0, &u);
+        TEST_ASSERT_EQUAL_size_t_MESSAGE((size_t)num(fx_entry(name), "text_lines"), u.n, name);
+        fx_jsonl_t j;
+        snprintf(rel, sizeof(rel), "oracle/%s.solution.jsonl", name);
+        TEST_ASSERT_TRUE_MESSAGE(fx_jsonl_load(rel, &j), rel);
+        size_t r = 0;
+        for (size_t i = 0; i < u.n; i++) {
+            const char *line = (const char *)u.u[i].data;
+            obs_gga_t g;
+            gnss_obs_gst_t t;
+            bool is_gga = obs_gga_parse(line, u.u[i].len, &g);
+            bool is_gst = obs_gst_parse(line, u.u[i].len, &t);
+            if (!is_gga && !is_gst) {
+                continue;
+            }
+            char msg[200];
+            snprintf(msg, sizeof(msg), "%s, line %zu: %.*s", name, i, (int)u.u[i].len, line);
+            TEST_ASSERT_LESS_THAN_size_t_MESSAGE(j.n, r, msg);
+            const cJSON *rec = j.rec[r++];
+            TEST_ASSERT_EQUAL_INT_MESSAGE((int)i, (int)num(rec, "n"), msg);
+            if (is_gga) {
+                TEST_ASSERT_TRUE_MESSAGE(ostr_is(rec, "kind", "GGA"), msg);
+                check_gga(rec, &g, msg);
+                seen_gga++;
+            } else {
+                TEST_ASSERT_TRUE_MESSAGE(ostr_is(rec, "kind", "GST"), msg);
+                check_gst(rec, &t, msg);
+                seen_gst++;
+            }
+        }
+        TEST_ASSERT_EQUAL_size_t_MESSAGE(j.n, r, name);   /* nothing the oracle read was missed */
+        fx_jsonl_free(&j);
+        fx_units_free(&u);
+        free(buf);
+    }
+    TEST_ASSERT_EQUAL_size_t(122 + 3 + 7, seen_gga);
+    TEST_ASSERT_EQUAL_size_t(3, seen_gst);
+}
+
+TEST_CASE("fixtures: a GGA with a broken checksum never reaches the solution", "[fixtures]")
+{
+    size_t len;
+    uint8_t *buf = fx_read("nmea/gpsd_trimble_nmea-rtk.log", &len);
+    /* The last digit of the first GGA's station field: its checksum no longer verifies. */
+    const uint8_t *gga = memmem(buf, len, "$GNGGA,", 7);
+    TEST_ASSERT_NOT_NULL(gga);
+    uint8_t *star = memchr(gga, '*', len - (size_t)(gga - buf));
+    TEST_ASSERT_NOT_NULL(star);
+    star[-1] = (uint8_t)(star[-1] == '9' ? '8' : star[-1] + 1);
+    fx_units_t u;
+    fx_frame(buf, len, 0, &u);
+    TEST_ASSERT_EQUAL_size_t((size_t)num(fx_entry("gpsd_trimble_nmea-rtk.log"), "text_lines") - 1, u.n);
+    size_t n = 0;
+    for (size_t i = 0; i < u.n; i++) {
+        obs_gga_t g;
+        n += obs_gga_parse((const char *)u.u[i].data, u.u[i].len, &g);
+    }
+    TEST_ASSERT_EQUAL_size_t(121, n);
+    fx_units_free(&u);
+    free(buf);
+}
+
+TEST_CASE("fixtures: in real streams the solution follows the talker and pairs GGA and GST by epoch", "[fixtures]")
+{
+    /* u-blox: each epoch's GGA, then its GST; the next GGA parts them again. */
+    size_t len;
+    uint8_t *buf = fx_read("nmea/gpsd_ublox-zed-f9p-nmea_excerpt.log", &len);
+    fx_units_t u;
+    fx_frame(buf, len, 0, &u);
+    obs_solution_t s;
+    obs_solution_reset(&s);
+    gnss_obs_solution_t out;
+    unsigned paired = 0, parted = 0;
+    for (size_t i = 0; i < u.n; i++) {
+        obs_gga_t g;
+        gnss_obs_gst_t t;
+        int64_t at = (int64_t)i * 10000;
+        if (obs_gga_parse((const char *)u.u[i].data, u.u[i].len, &g)) {
+            obs_solution_feed_gga(&s, &g, at);
+            TEST_ASSERT_TRUE(obs_solution_get(&s, at, &out));
+            parted += out.gst_valid && !out.same_epoch;
+        } else if (obs_gst_parse((const char *)u.u[i].data, u.u[i].len, &t)) {
+            obs_solution_feed_gst(&s, &t, at);
+            TEST_ASSERT_TRUE(obs_solution_get(&s, at, &out));
+            TEST_ASSERT_TRUE(out.same_epoch);
+            paired++;
+        }
+    }
+    TEST_ASSERT_EQUAL_UINT(3, paired);
+    TEST_ASSERT_EQUAL_UINT(2, parted);
+    fx_units_free(&u);
+    free(buf);
+
+    /* Trimble: GN and GP sentences in one stream; the latest is kept, whatever its talker. */
+    buf = fx_read("nmea/gpsd_trimble_nmea-rtk.log", &len);
+    fx_frame(buf, len, 0, &u);
+    obs_solution_reset(&s);
+    unsigned switches = 0;
+    char last[3] = "";
+    for (size_t i = 0; i < u.n; i++) {
+        obs_gga_t g;
+        if (!obs_gga_parse((const char *)u.u[i].data, u.u[i].len, &g)) {
+            continue;
+        }
+        obs_solution_feed_gga(&s, &g, (int64_t)i * 10000);
+        TEST_ASSERT_TRUE(obs_solution_get(&s, (int64_t)i * 10000, &out));
+        TEST_ASSERT_EQUAL_STRING(g.talker, out.gga.talker);
+        switches += last[0] != '\0' && strcmp(last, g.talker) != 0;
+        memcpy(last, g.talker, sizeof(last));
+    }
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT(2, switches);
     fx_units_free(&u);
     free(buf);
 }

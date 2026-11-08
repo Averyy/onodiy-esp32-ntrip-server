@@ -38,7 +38,8 @@
  *           (expected, never real loss). The RTCM age is stamped either way,
  *           from the frame's arrival: it was received and CRC-valid.
  *   text    STREAM and COMMAND: to the line sink. RAW: dropped.
- *   prompt  only in COMMAND with the detector armed.
+ *   prompt  only in COMMAND with the detector armed; the hit is latched
+ *           for the rest of that lease (gnss_link_core_prompt_hit).
  *
  * Events (gnss_link_core_on_event; units are events):
  *   FIFO overflow   hw_fifo_overflows += 1, reset the framer
@@ -183,6 +184,7 @@ typedef struct {
     uint32_t last_token;     /**< last token issued */
     const char *owner;       /**< label of the lease holder (not copied) */
     bool prompt_armed;
+    bool prompt_hit;         /**< the armed detector fired under the current lease (cleared by acquire and release) */
     bool hands_off;          /**< transmitting and new leases refused (receiver maintenance) */
     uint32_t baud;
     bool rx_seen;
@@ -328,6 +330,14 @@ esp_err_t gnss_link_core_release(gnss_link_core_t *c, uint32_t token, gnss_link_
 /** Arm or disarm the prompt detector (COMMAND lease only). */
 esp_err_t gnss_link_core_set_prompt(gnss_link_core_t *c, uint32_t token, bool armed);
 
+/**
+ * Did the armed detector fire (a GNSS_LINK_ROUTE_PROMPT) under the lease
+ * `token`? False for token 0 and for any token but the current lease. The
+ * hit stays latched for the rest of that lease, also once the detector is
+ * disarmed; a new lease starts without one.
+ */
+bool gnss_link_core_prompt_hit(const gnss_link_core_t *c, uint32_t token);
+
 /** Turn the report-only prompt observer on or off (its counters are kept). */
 void gnss_link_core_set_observe(gnss_link_core_t *c, bool on);
 
@@ -402,6 +412,38 @@ gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t ki
 
 /** `n` bytes were written to the receiver. */
 void gnss_link_core_on_tx(gnss_link_core_t *c, size_t n);
+
+/**
+ * The TX side of a write, behind callbacks: gnss_link.c binds them to the
+ * TX lock and the UART driver, the host tests to a recording fake. Every
+ * callback is required; the time left of the caller's timeout is the
+ * port's to track.
+ */
+typedef struct {
+    void *ctx;
+    /** Take the one-writer TX lock within the time left (false: not taken). */
+    bool (*lock)(void *ctx);
+    void (*unlock)(void *ctx);
+    /** With the lock held: may `token` write now (gnss_link_core_check and the UART open)? */
+    esp_err_t (*allowed)(void *ctx, uint32_t token);
+    /** Hand the bytes to the driver: how many it took (all of them, or < 0 when it refused the call). */
+    int (*put)(void *ctx, const void *data, size_t len);
+    /** Wait within the time left until every byte has left the UART (false: not seen). */
+    bool (*drain)(void *ctx);
+} gnss_link_tx_port_t;
+
+/**
+ * One write (gnss_link_write_ex, "Writing" in gnss_link.h): the lock, then
+ * the permission, the hand-over and the wait for TX done, all under the
+ * lock, which is given back only after that wait; nothing at all without
+ * the lock. *tx (may be NULL) gets the outcome. len 0 with permission:
+ * ESP_OK, nothing handed over.
+ * @return ESP_OK; ESP_ERR_INVALID_ARG (data NULL, len > 0); ESP_ERR_TIMEOUT
+ *         (no lock: NONE; no TX done: UNCERTAIN); allowed()'s refusal
+ *         (NONE); ESP_FAIL (the driver refused: NONE; took part: UNCERTAIN).
+ */
+esp_err_t gnss_link_core_write(const gnss_link_tx_port_t *p, uint32_t token, const void *data, size_t len,
+                               gnss_link_tx_t *tx);
 
 /** The host switched to `baud` and discarded `discarded` bytes while it settled. */
 void gnss_link_core_on_baud(gnss_link_core_t *c, uint32_t baud, size_t discarded);

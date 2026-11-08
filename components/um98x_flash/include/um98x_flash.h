@@ -27,8 +27,9 @@
  * pre-flight rule runs on that RAM copy, which is then the only copy sent:
  * block structure and header checks, payload sums and trailers, the
  * compressed sections decoded and checked, the loader baud and a known
- * partition table, the model string ("UM982" exactly, equal to the live
- * version query of this session), the UM982 product tags, a length that is
+ * partition table, the model string (one the flasher takes, "UM982" or
+ * "UM980" exactly, pkg_models in pkg_check.c, and equal to the live version
+ * query of this session), that model's product tags, a length that is
  * not a multiple of 1024, size and SHA-256 equal to the release manifest
  * entry or to what the user confirmed for an upload, and a build not lower
  * than the receiver's (a package with a different partition layout than the

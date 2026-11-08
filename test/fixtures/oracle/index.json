@@ -413,6 +413,24 @@
   "text_rules": {},
   "truncated_tail_bytes": 0
  },
+ "gpsd_trimble_nmea-rtk.log": {
+  "path": "nmea/gpsd_trimble_nmea-rtk.log",
+  "sha256": "f2197867806cbc15a64320ef5a537d2ef3564b1799c8698b9ad39fe7d2eb4af8",
+  "size": 22367,
+  "text_lines": 244,
+  "text_rules": {
+   "nmea": 244
+  }
+ },
+ "gpsd_ublox-zed-f9p-nmea_excerpt.log": {
+  "path": "nmea/gpsd_ublox-zed-f9p-nmea_excerpt.log",
+  "sha256": "6959ecf93079b56f0905b1ede3e2e8e1c6fb8f5993418acb16eb96445e2611dc",
+  "size": 6292,
+  "text_lines": 103,
+  "text_rules": {
+   "nmea": 103
+  }
+ },
  "gpsd_ublox-zed-f9t-rtcm3.log": {
   "crc_fail_candidates": 3,
   "d1033": [],

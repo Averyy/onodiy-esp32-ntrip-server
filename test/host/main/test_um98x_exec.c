@@ -98,6 +98,11 @@ typedef struct {
     int groups;                  /* signal-group query: 0 the bench body for its group, 1 refused (no such
                                     command), 2 acknowledged without a log */
     int64_t groups_log_ms;       /* its log this long after the acknowledgement (0: 20 ms) */
+    const char *mode_line;       /* MODE: this whole log line instead of one built from mode (NULL: built) */
+    int64_t prompt_at;           /* the loader prompt detector fires at this time (0: never) */
+    char prompt_after[40];       /* or prompt_delay after the first command with this prefix */
+    int64_t prompt_delay;
+    int writes;                  /* writes the host made (a lone CR LF included) */
     const char *basepos;         /* BASEPOSA: the body of its log (NULL: refused, no such command) */
     const char *sppnav;          /* SPPNAVA: likewise */
 
@@ -178,6 +183,9 @@ static void receive(sim_t *s, const char *cmd)
     r->host_baud = s->host_baud;
     r->gap = s->last_line_at == INT64_MIN ? INT64_MAX : s->now - s->last_line_at;
 
+    if (s->prompt_after[0] != '\0' && s->prompt_at == 0 && starts(cmd, s->prompt_after)) {
+        s->prompt_at = s->now + s->prompt_delay;
+    }
     if (!s->present) {
         return;
     }
@@ -255,8 +263,12 @@ static void receive(sim_t *s, const char *cmd)
     } else if (strcmp(up, "MODE") == 0) {
         char log[LINE_MAX_];
         reply(s, cmd, "OK", 30);
-        snprintf(log, sizeof(log), "MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", s->mode);
-        emit_checked(s, '#', log, 50);
+        if (s->mode_line != NULL) {
+            emit(s, s->mode_line, 50);
+        } else {
+            snprintf(log, sizeof(log), "MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;%s", s->mode);
+            emit_checked(s, '#', log, 50);
+        }
     } else if (s->um980 && strncmp(up, "CONFIG SIGNALGROUP ", 19) == 0) {
         /* One number only: anything else is refused, as the manual says. */
         if (sscanf(up, "CONFIG SIGNALGROUP %u %u", &a, &b) == 2 || sscanf(up, "CONFIG SIGNALGROUP %u", &a) != 1 ||
@@ -415,6 +427,7 @@ static int64_t p_now(void *c)
 static bool p_write(void *c, const char *data, size_t len)
 {
     sim_t *s = c;
+    s->writes++;
     advance(s, s->now + 1);
     char buf[256];
     size_t n = 0;
@@ -454,12 +467,18 @@ static void p_wait(void *c, int64_t until)
     if (until <= s->now) {
         until = s->now + 1;
     }
+    /* A prompt still to come wakes the wait, as um98x_ctl_notify_prompt does. */
+    int64_t prompt = s->prompt_at > s->now ? s->prompt_at : INT64_MAX;
     for (;;) {
         int idx = -1;
         for (int i = 0; i < s->nq; i++) {
             if (idx < 0 || s->q[i].at < s->q[idx].at) {
                 idx = i;
             }
+        }
+        if (prompt <= until && (idx < 0 || prompt <= s->q[idx].at)) {
+            advance(s, prompt);
+            return;
         }
         if (idx < 0 || s->q[idx].at > until) {
             advance(s, until);
@@ -496,7 +515,7 @@ static void p_counts(void *c, um98x_link_counts_t *out)
 static bool p_prompt(void *c)
 {
     sim_t *s = c;
-    return s->in_loader && s->host_baud == s->loader_baud;
+    return (s->in_loader && s->host_baud == s->loader_baud) || (s->prompt_at != 0 && s->now >= s->prompt_at);
 }
 
 static sim_t *sim_init(void)
@@ -1426,6 +1445,215 @@ TEST_CASE("exec: the loader prompt stops detection; its restart key brings the a
     TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_leave_loader(&s->ex, UM98X_LOADER_WAIT_MS));
 }
 
+/* ---- the loader prompt stops every call -------------------------------------------- */
+
+/* Every write the receiver got came no later than the prompt (a write that
+ * began just before it is stamped with its end). */
+static void nothing_after(const sim_t *s, int64_t prompt_at)
+{
+    for (int i = 0; i < s->nrx; i++) {
+        TEST_ASSERT_TRUE_MESSAGE(s->rx[i].at <= prompt_at, s->rx[i].cmd);
+    }
+}
+
+TEST_CASE("exec: a loader prompt during a command's ack wait ends it at once; nothing more is sent", "[um98x_exec]")
+{
+    /* Without the prompt: the ordinary timeout after 4 sends. */
+    sim_t *s = sim_init();
+    strcpy(s->drop_prefix, "MODE ROVER SURVEY");
+    s->drop_n = 100;
+    TEST_ASSERT_EQUAL(UM98X_E_TIMEOUT, um98x_exec_command(&s->ex, "MODE ROVER SURVEY", 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(4, count(s, "MODE ROVER SURVEY"));
+
+    /* The prompt 1 s into the first ack wait (3 s): the call ends there. */
+    s = sim_init();
+    strcpy(s->drop_prefix, "MODE ROVER SURVEY");
+    s->drop_n = 100;
+    int64_t t0 = s->now;
+    s->prompt_at = t0 + 1000;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_command(&s->ex, "MODE ROVER SURVEY", 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "MODE ROVER SURVEY"));
+    TEST_ASSERT_EQUAL_INT64(t0 + 1000, s->now);
+    nothing_after(s, s->prompt_at);
+
+    /* Every later call under the lease sends nothing and says so. */
+    int w = s->writes;
+    gnss_versiona_t v;
+    char body[UM98X_MODE_BODY_MAX];
+    char text[64];
+    char why[64];
+    um98x_own_fix_t fix;
+    um98x_bands_t bands;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_session_begin(&s->ex));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_command(&s->ex, "GPGGA COM1 1", 0, NULL, 0));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_version(&s->ex, false, 0, &v, NULL));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_version(&s->ex, true, s->now + 20000, &v, NULL));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_query_mode(&s->ex, body, sizeof(body)));
+    TEST_ASSERT_EQUAL_STRING("", body);
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_query(&s->ex, UM98X_QUERY_MODE, text, sizeof(text), why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING("loader prompt", why);
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_own_fix(&s->ex, UM98X_CMD_BASEPOS, &fix));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_groups(&s->ex, &bands, why, sizeof(why)));
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_sat_view(&s->ex, true, 1, why, sizeof(why)));
+    TEST_ASSERT_EQUAL_STRING("loader prompt", why);
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_reset(&s->ex));
+    TEST_ASSERT_EQUAL_INT(w, s->writes);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+
+    /* The loader's restart key is the one write that still goes out. */
+    (void)um98x_exec_leave_loader(&s->ex, 100);
+    TEST_ASSERT_EQUAL_INT(w + 1, s->writes);
+    TEST_ASSERT_EQUAL_STRING("6", s->rx[s->nrx - 1].cmd);
+}
+
+TEST_CASE("exec: a loader prompt during a resend delay stops the resend", "[um98x_exec]")
+{
+    /* A command: its first ack window ends at +3 s, the resend is due 1 s later. */
+    sim_t *s = sim_init();
+    strcpy(s->drop_prefix, "UNLOG COM1");
+    s->drop_n = 100;
+    int64_t t0 = s->now;
+    s->prompt_at = t0 + 3500;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_command(&s->ex, "UNLOG COM1", 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "UNLOG COM1"));
+    TEST_ASSERT_EQUAL_INT64(t0 + 3500, s->now);
+    nothing_after(s, s->prompt_at);
+
+    /* The mode query, likewise. */
+    s = sim_init();
+    strcpy(s->drop_prefix, "MODE");
+    s->drop_n = 100;
+    t0 = s->now;
+    s->prompt_at = t0 + 3500;
+    char body[UM98X_MODE_BODY_MAX];
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_query_mode(&s->ex, body, sizeof(body)));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "MODE"));
+    nothing_after(s, s->prompt_at);
+
+    /* The version query: in the 1 s gap after its first 2 s window. */
+    s = sim_init();
+    strcpy(s->drop_prefix, "VERSIONA");
+    s->drop_n = 100;
+    t0 = s->now;
+    s->prompt_at = t0 + 2500;
+    gnss_versiona_t v;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_version(&s->ex, false, 0, &v, NULL));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "VERSIONA"));
+    nothing_after(s, s->prompt_at);
+
+    /* After a restart (a write every second until the end): the same. */
+    s = sim_init();
+    strcpy(s->drop_prefix, "VERSIONA");
+    s->drop_n = 100;
+    t0 = s->now;
+    s->prompt_at = t0 + 2500;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_version(&s->ex, true, t0 + 20000, &v, NULL));
+    TEST_ASSERT_EQUAL_INT(3, count(s, "VERSIONA"));   /* at 0, 1 and 2 s */
+    nothing_after(s, s->prompt_at);
+}
+
+TEST_CASE("exec: a command answered before the prompt keeps its result; the next one is not sent", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    s->prompt_at = s->now + 2000;   /* well after the 30 ms acknowledgement */
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_command(&s->ex, "UNLOG COM1", 0, NULL, 0));
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_session_begin(&s->ex));
+    int w = s->writes;
+    s->now = s->prompt_at;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_command(&s->ex, "MODE ROVER SURVEY", 0, NULL, 0));
+    TEST_ASSERT_EQUAL_INT(w, s->writes);
+}
+
+TEST_CASE("exec: a loader prompt during an apply session sends nothing more, not even the rollback RESET",
+          "[um98x_exec]")
+{
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    memset(&id, 0, sizeof(id));
+    um98x_apply_result_t r;
+
+    /* Reference: the dump unanswered after UNLOG COM1 was accepted: RESET. */
+    sim_t *s = sim_init();
+    strcpy(s->drop_prefix, "CONFIG");
+    s->drop_n = 100;
+    TEST_ASSERT_EQUAL(UM98X_E_FAILED, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+
+    /* The same session with the loader prompt during the dump's ack wait. */
+    s = sim_init();
+    strcpy(s->drop_prefix, "CONFIG");
+    s->drop_n = 100;
+    memset(&id, 0, sizeof(id));
+    s->prompt_at = s->now + 1500;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+    TEST_ASSERT_EQUAL_STRING("loader prompt", r.reason);
+    nothing_after(s, s->prompt_at);
+
+    /* The RTCM restore stops at the prompt too. */
+    s = sim_init();
+    s->prompt_at = s->now + 150;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_restore_rtcm(&s->ex, &p, NULL, 0, &r));
+    nothing_after(s, s->prompt_at);
+}
+
+TEST_CASE("exec: a loader prompt while a RESET restarts ends the wait at once", "[um98x_exec]")
+{
+    sim_t *s = sim_init();
+    strcpy(s->prompt_after, "RESET");
+    s->prompt_delay = 500;   /* the banner would come after 3 s */
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_reset(&s->ex));
+    TEST_ASSERT_EQUAL_INT(1, count(s, "RESET"));
+    TEST_ASSERT_INT64_WITHIN(5, s->prompt_at, s->now);
+    nothing_after(s, s->prompt_at);
+}
+
+TEST_CASE("exec: a loader prompt during the signal-group restart is the loader, not a lost receiver", "[um98x_exec]")
+{
+    sim_t *s = sim_init();   /* a factory receiver: the session changes its signal group */
+    um98x_base_profile_t p;
+    default_profile(&p);
+    gnss_versiona_t id;
+    memset(&id, 0, sizeof(id));
+    um98x_apply_result_t r;
+    strcpy(s->prompt_after, "CONFIG SIGNALGROUP");
+    s->prompt_delay = 1000;
+    TEST_ASSERT_EQUAL(UM98X_E_PROMPT, um98x_exec_apply(&s->ex, &p, NULL, &id, 115200, &r));
+    TEST_ASSERT_TRUE(r.signal_group_sent);
+    TEST_ASSERT_FALSE(r.receiver_lost);
+    TEST_ASSERT_FALSE(r.rolled_back);
+    TEST_ASSERT_EQUAL_INT(0, count(s, "RESET"));
+    TEST_ASSERT_EQUAL_STRING("loader prompt", r.reason);
+    TEST_ASSERT_INT64_WITHIN(5, s->prompt_at, s->now);   /* no 15 s banner wait */
+    nothing_after(s, s->prompt_at);
+}
+
+TEST_CASE("exec: the mode read-back returns a rover body as the receiver sent it", "[um98x_exec]")
+{
+    /* The public rover sample: the body ends in a comma, kept as sent. */
+    sim_t *s = sim_init();
+    s->mode_line = TV_MODE_ROVER_SURVEY;
+    char body[UM98X_MODE_BODY_MAX];
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query_mode(&s->ex, body, sizeof(body)));
+    TEST_ASSERT_EQUAL_STRING("MODE ROVER SURVEY,", body);
+
+    /* A body without the comma comes back as it is too. */
+    s = sim_init();
+    strcpy(s->mode, "MODE ROVER SURVEY");
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query_mode(&s->ex, body, sizeof(body)));
+    TEST_ASSERT_EQUAL_STRING("MODE ROVER SURVEY", body);
+
+    /* A buffer shorter than the body gets it cut, NUL-terminated. */
+    s = sim_init();
+    s->mode_line = TV_MODE_ROVER_SURVEY;
+    char small[11];
+    TEST_ASSERT_EQUAL(UM98X_OK, um98x_exec_query_mode(&s->ex, small, sizeof(small)));
+    TEST_ASSERT_EQUAL_STRING("MODE ROVER", small);
+}
+
 /* "#<content>*crc32" (the reflected CRC-32 0xEDB88320, initial 0, no final XOR). */
 static void crc_log(char *out, size_t cap, const char *content)
 {
@@ -1488,8 +1716,23 @@ TEST_CASE("exec: restart evidence: banners and version logs nobody asked for", "
     TEST_ASSERT_FALSE(ev & UM98X_CHAN_RESTART);
     TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.unmatched);
     s->ch.last_version_write_ms = s->now - UM98X_UNSOLICITED_VERSION_MS - 1;
+    /* Unasked, but within 20 s of the banner's restart: that restart, counted once. */
     ev = um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l, s->now);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_RESTART);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_REPLY);   /* the receiver's own, not a reply */
+    TEST_ASSERT_EQUAL_UINT64(1, s->ch.stats.restarts);
+    ev = um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l,
+                             s->now + UM98X_RESTART_LOST_MS);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_RESTART);
+    /* Later than that: a restart of its own. */
+    ev = um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l,
+                             s->now + UM98X_RESTART_LOST_MS + 1);
     TEST_ASSERT_TRUE(ev & UM98X_CHAN_RESTART);
+    TEST_ASSERT_EQUAL_UINT64(2, s->ch.stats.restarts);
+    /* And the next one within 20 s of it is that one again. */
+    ev = um98x_chan_dispatch(&s->ch, TV_VERSIONA_UM982, strlen(TV_VERSIONA_UM982), &l,
+                             s->now + UM98X_RESTART_LOST_MS + 5000);
+    TEST_ASSERT_FALSE(ev & UM98X_CHAN_RESTART);
     TEST_ASSERT_EQUAL_UINT64(2, s->ch.stats.restarts);
 
     /* NMEA and broken lines are counted apart and say nothing about liveness. */

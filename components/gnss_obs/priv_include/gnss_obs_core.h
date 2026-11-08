@@ -345,6 +345,30 @@ size_t obs_core_sky(const obs_core_t *c, uint64_t now_ms, obs_sat_t *out, size_t
  */
 size_t obs_core_live(const obs_core_t *c, uint64_t now_ms, obs_live_sat_t *out, size_t cap, obs_live_totals_t *tot);
 
+/* ---- the solution (gnss_obs_get_solution) ------------------------------- */
+
+/** The latest GGA and GST with their arrival times (esp_timer us). */
+typedef struct {
+    obs_gga_t gga;
+    bool gga_valid;
+    int64_t gga_us;
+    gnss_obs_gst_t gst;
+    bool gst_valid;
+    int64_t gst_us;
+} obs_solution_t;
+
+/** Nothing seen (also what gnss_obs_reset() does to it). */
+void obs_solution_reset(obs_solution_t *s);
+
+/** A parsed GGA that arrived at t_us: replaces the previous one, whatever its talker. */
+void obs_solution_feed_gga(obs_solution_t *s, const obs_gga_t *g, int64_t t_us);
+
+/** A parsed GST that arrived at t_us: replaces the previous one. */
+void obs_solution_feed_gst(obs_solution_t *s, const gnss_obs_gst_t *g, int64_t t_us);
+
+/** The public snapshot at now_us (ages clamped, same_epoch). false when neither is valid. */
+bool obs_solution_get(const obs_solution_t *s, int64_t now_us, gnss_obs_solution_t *out);
+
 #ifdef __cplusplus
 }
 #endif

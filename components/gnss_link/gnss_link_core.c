@@ -76,6 +76,7 @@ esp_err_t gnss_link_core_acquire(gnss_link_core_t *c, gnss_link_mode_t mode, con
     c->mode = mode;
     c->owner = owner;
     c->prompt_armed = false;
+    c->prompt_hit = false;
     *token = next;
     return ESP_OK;
 }
@@ -134,6 +135,7 @@ esp_err_t gnss_link_core_release(gnss_link_core_t *c, uint32_t token, gnss_link_
     c->lease = 0;
     c->owner = NULL;
     c->prompt_armed = false;
+    c->prompt_hit = false;
     return ESP_OK;
 }
 
@@ -144,6 +146,11 @@ esp_err_t gnss_link_core_set_prompt(gnss_link_core_t *c, uint32_t token, bool ar
         c->prompt_armed = armed;
     }
     return err;
+}
+
+bool gnss_link_core_prompt_hit(const gnss_link_core_t *c, uint32_t token)
+{
+    return token != 0 && token == c->lease && c->prompt_hit;
 }
 
 bool gnss_link_core_on_event(gnss_link_core_t *c, gnss_link_ev_t ev)
@@ -247,6 +254,7 @@ gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t ki
         return GNSS_LINK_ROUTE_DROP;
     case GNSS_FRAME_PROMPT:
         if (c->mode == GNSS_LINK_MODE_COMMAND && c->prompt_armed) {
+            c->prompt_hit = true;
             return GNSS_LINK_ROUTE_PROMPT;
         }
         if (c->observe && (c->mode == GNSS_LINK_MODE_STREAM || c->mode == GNSS_LINK_MODE_COMMAND)) {
@@ -267,6 +275,43 @@ gnss_link_route_t gnss_link_core_route(gnss_link_core_t *c, gnss_frame_kind_t ki
 void gnss_link_core_on_tx(gnss_link_core_t *c, size_t n)
 {
     c->stats.tx_bytes += n;
+}
+
+esp_err_t gnss_link_core_write(const gnss_link_tx_port_t *p, uint32_t token, const void *data, size_t len,
+                               gnss_link_tx_t *tx)
+{
+    gnss_link_tx_t out = GNSS_LINK_TX_NONE;
+    esp_err_t err;
+    if (data == NULL && len > 0) {
+        err = ESP_ERR_INVALID_ARG;
+    } else if (!p->lock(p->ctx)) {
+        err = ESP_ERR_TIMEOUT;   /* another writer or a mode switch held the line: nothing sent */
+    } else {
+        /* Checked with the lock held: a lease granted while this writer
+         * waited refuses it here, before any byte. */
+        err = p->allowed(p->ctx, token);
+        if (err == ESP_OK && len == 0) {
+            out = GNSS_LINK_TX_DONE;
+        } else if (err == ESP_OK) {
+            int n = p->put(p->ctx, data, len);
+            if (n <= 0) {
+                err = ESP_FAIL;   /* the driver took nothing */
+            } else if ((size_t)n != len) {
+                err = ESP_FAIL;
+                out = GNSS_LINK_TX_UNCERTAIN;
+            } else if (!p->drain(p->ctx)) {
+                err = ESP_ERR_TIMEOUT;   /* in the FIFO, TX done not seen in time */
+                out = GNSS_LINK_TX_UNCERTAIN;
+            } else {
+                out = GNSS_LINK_TX_DONE;
+            }
+        }
+        p->unlock(p->ctx);
+    }
+    if (tx != NULL) {
+        *tx = out;
+    }
+    return err;
 }
 
 void gnss_link_core_on_baud(gnss_link_core_t *c, uint32_t baud, size_t discarded)

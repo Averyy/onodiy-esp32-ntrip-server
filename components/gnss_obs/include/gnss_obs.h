@@ -5,13 +5,14 @@
  * Observation summary: what the receiver is actually sending.
  *
  * Fed from the RTCM path (every CRC-valid frame, including the ones the hub
- * drops) and from the receiver's text lines (only its satellite-in-view and
- * position sentences are used). It decodes only public structures: the
+ * drops) and from the receiver's text lines (only its satellite-in-view,
+ * position and error-statistics sentences are used). It decodes only public structures: the
  * RTCM 10403 MSM header (epoch time, multiple-message bit,
  * satellite/signal/cell masks), the per-cell carrier-to-noise values of
  * MSM4 to MSM7, the antenna reference point of 1005/1006, NMEA
- * satellite-in-view sentences and the fix of NMEA position sentences
- * (gnss_obs_get_fix). From that it maintains:
+ * satellite-in-view sentences, the fix of NMEA position sentences
+ * (gnss_obs_get_fix) and the position and error-statistics sentences field
+ * by field (gnss_obs_get_solution). From that it maintains:
  *
  *   - per constellation: satellites in the latest epoch, signals (bands)
  *     present, and the mean CNR per band over the cells of the latest
@@ -75,6 +76,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "gnss_obs_nmea.h"   /* gnss_obs_gga_t, gnss_obs_gst_t */
 #include "gnss_rtcm3.h"   /* gnss_sys_t, gnss_band_t */
 #include "gnss_types.h"   /* um98x_rtcm_out_t */
 
@@ -189,7 +191,7 @@ esp_err_t gnss_obs_init(void);
 /** Every CRC-valid RTCM3 frame (GNSS RX task; never blocks). */
 void gnss_obs_feed_rtcm(const uint8_t *frame, size_t len, uint16_t msg_type);
 
-/** Every checksum-valid text line (GNSS RX task; never blocks): satellite-in-view sentences are used. */
+/** Every checksum-valid text line (GNSS RX task; never blocks): satellite-in-view, GGA and GST sentences are used. */
 void gnss_obs_feed_line(const char *line, size_t len);
 
 /**
@@ -237,8 +239,18 @@ typedef struct {
     uint32_t age_ms;               /**< since it arrived, UINT32_MAX = never */
 } gnss_obs_fix_t;
 
-/** ESP_ERR_NOT_FOUND (out->valid false) before the first one. */
+/** ESP_ERR_NOT_FOUND (out->valid false) before the first one. Kept across gnss_obs_reset(). */
 esp_err_t gnss_obs_get_fix(gnss_obs_fix_t *out);
+
+
+/**
+ * Snapshot of the solution (gnss_obs_nmea.h): both sentences copied under
+ * one lock, as they stood at one moment; any task. gnss_obs_reset() forgets
+ * both (a solution never outlives a receiver reconfiguration), unlike
+ * gnss_obs_get_fix(). ESP_ERR_NOT_FOUND (both invalid) when neither arrived
+ * since then; ESP_ERR_INVALID_ARG without out.
+ */
+esp_err_t gnss_obs_get_solution(gnss_obs_solution_t *out);
 
 /**
  * The live view: satellites sorted by constellation and satellite number
@@ -266,7 +278,11 @@ esp_err_t gnss_obs_get_1033(gnss_obs_1033_t *out);
  */
 esp_err_t gnss_obs_get_gps_time(uint32_t *tow_ms, uint32_t *age_ms);
 
-/** Forget every observation (after a receiver reconfigure or flash), the 1033 included; the expected messages stay. */
+/**
+ * Forget every observation (after a receiver reconfigure or flash), the
+ * 1033 and the solution (gnss_obs_get_solution) included; the expected
+ * messages and gnss_obs_get_fix's latest GGA stay.
+ */
 void gnss_obs_reset(void);
 
 #ifdef __cplusplus

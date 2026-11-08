@@ -22,7 +22,8 @@
  * late reply to our own retried query never counts. One restart counts
  * once: further restarting answers within 20 s of the first, and the
  * banner that ends that restart, are the same restart (the banner still
- * moves the evidence time, last_restart_ms, to the banner).
+ * moves the evidence time, last_restart_ms, to the banner); so is a
+ * version log nobody asked for within 20 s of any of this evidence.
  *
  * Every line of the command layer (acknowledgement, dump item, banner, log,
  * the restarting answer) that passes its checksum counts as "the receiver
@@ -38,6 +39,15 @@
  * identity and is not cut when the caller releases its lease). A loader
  * prompt reported by the port stops the pass at once and nothing more is
  * sent. Bytes at any baud during the pass are reported (saw_bytes).
+ *
+ * Loader prompt (every call): the port's prompt_seen() is checked before
+ * every write, while every transaction waits and while a restart's banner
+ * is waited for. Once it is true, nothing more is written (no send, no
+ * resend, no rollback RESET); the transaction in flight ends at once with
+ * UM98X_TXN_PROMPT unless it had already completed, and the call returns
+ * UM98X_E_PROMPT (an apply also when the prompt came during its rollback
+ * or where it would have reported the receiver lost). The loader's restart key
+ * (um98x_exec_leave_loader) is the one write that goes out regardless.
  *
  * Apply session (profile -> receiver; see um98x_plan.h for the order and the
  * only-on-difference rules):
@@ -215,7 +225,7 @@ typedef struct {
     /** Block until woken by a line (UM98X_CHAN_WAKE) or until until_ms; may return early. Feeds the caller's watchdog. */
     void (*wait)(void *ctx, int64_t until_ms);
     void (*counts)(void *ctx, um98x_link_counts_t *out);
-    /** The loader prompt detector fired since the current detection started. */
+    /** The armed loader prompt detector fired (under the caller's lease): nothing more may be written. */
     bool (*prompt_seen)(void *ctx);
 } um98x_port_t;
 
@@ -233,7 +243,7 @@ typedef enum {
     UM98X_E_UNSUPPORTED,   /**< receiver model not configured by this layer: nothing sent */
     UM98X_E_FAILED,        /**< a fatal apply step failed (details in the result) */
     UM98X_E_LOST,          /**< the receiver could not be found again */
-    UM98X_E_PROMPT,        /**< loader prompt seen during detection: probing stopped */
+    UM98X_E_PROMPT,        /**< loader prompt seen: nothing more was sent (detection stopped probing) */
     UM98X_E_NOT_FOUND,     /**< detection found nothing */
 } um98x_res_t;
 
@@ -255,6 +265,12 @@ um98x_txn_status_t um98x_exec_txn(um98x_exec_t *ex, um98x_txn_kind_t kind, const
 
 /** Map a finished transaction status to a result. */
 um98x_res_t um98x_res_from_txn(um98x_txn_status_t st);
+
+/**
+ * Start of a COMMAND session: a lone CR LF. OK, E_PROMPT (nothing sent) or
+ * E_LINK.
+ */
+um98x_res_t um98x_exec_session_begin(um98x_exec_t *ex);
 
 /**
  * A caller's command (normalised): the version query, the base-mode query
@@ -291,7 +307,7 @@ um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason
  * um98x_fixcheck.h): out gets the parsed solution (usable or not).
  * @return OK (a log that parsed), E_REJECTED (the receiver refused the
  *         query), E_FAILED (a log this firmware does not read), E_TIMEOUT (no
- *         log; also when the receiver acknowledged and sent none), E_LINK,
+ *         log; also when the receiver acknowledged and sent none), E_PROMPT, E_LINK,
  *         E_ARG (another command).
  */
 um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_t *out);
@@ -301,7 +317,7 @@ um98x_res_t um98x_exec_own_fix(um98x_exec_t *ex, const char *cmd, um98x_own_fix_
  * as they came ('\n'-separated, cut to fit), reason the refusal text,
  * "timeout" or "link error" ("" on success). A log query the receiver
  * acknowledged without its log ends as a timeout.
- * @return OK, E_REJECTED, E_TIMEOUT, E_LINK, E_ARG (not on the list).
+ * @return OK, E_REJECTED, E_TIMEOUT, E_PROMPT, E_LINK, E_ARG (not on the list).
  */
 um98x_res_t um98x_exec_query(um98x_exec_t *ex, unsigned q, char *text, size_t cap, char *reason, size_t reason_cap);
 
@@ -331,7 +347,8 @@ um98x_res_t um98x_exec_leave_loader(um98x_exec_t *ex, uint32_t timeout_ms);
  * @param stored_baud  gnss/baud (head of the detection list if one is needed)
  * @return OK (saved), E_UNSUPPORTED or E_TIMEOUT (identity; nothing
  *         configuring sent), E_FAILED (see r; rolled back if anything had
- *         been accepted), E_LOST, E_LINK, E_ARG.
+ *         been accepted), E_LOST, E_PROMPT (the loader prompt showed: no
+ *         rollback, nothing more sent), E_LINK, E_ARG.
  */
 um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, const um98x_apply_opts_t *opts,
                              gnss_versiona_t *identity, uint32_t stored_baud, um98x_apply_result_t *r);
@@ -341,7 +358,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
  * banner (up to 15 s), then the version polled every second until 20 s
  * after it (or after the write).
  * @return OK (it answered after the restart), E_TIMEOUT (no answer; the
- *         RESET went out), E_LINK (the write failed: nothing was sent).
+ *         RESET went out), E_PROMPT (loader prompt: before the RESET nothing
+ *         sent, after it the wait ends), E_LINK (the write failed: nothing
+ *         was sent).
  */
 um98x_res_t um98x_exec_reset(um98x_exec_t *ex);
 
@@ -351,7 +370,8 @@ um98x_res_t um98x_exec_reset(um98x_exec_t *ex);
  * in skip (the ones the failed session saw refused) are not sent: they
  * would only be refused again. They stay listed in r->rtcm_refused, with
  * any this restore sees refused.
- * @return OK if every non-optional message sent was accepted, else E_FAILED
+ * @return OK if every non-optional message sent was accepted, E_PROMPT
+ *         (the loader prompt showed: the rest was not sent), else E_FAILED
  *         (r names the first failure). r->rtcm1230_ok as in an apply (false
  *         when skipped).
  */
@@ -362,7 +382,7 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
  * Satellite-in-view output on (period_s, 1..60 s) or off, unsaved: a lone
  * CR LF, then the command with normal reply handling. reason (optional)
  * gets the receiver's rejection text, "timeout" or "link error".
- * @return OK, E_REJECTED, E_TIMEOUT, E_LINK, E_ARG (period out of range).
+ * @return OK, E_REJECTED, E_TIMEOUT, E_PROMPT, E_LINK, E_ARG (period out of range).
  */
 um98x_res_t um98x_exec_sat_view(um98x_exec_t *ex, bool on, uint16_t period_s, char *reason, size_t cap);
 

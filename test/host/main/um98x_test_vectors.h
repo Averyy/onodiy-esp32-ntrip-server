@@ -42,6 +42,9 @@
 #define TV_MODE_SURVEY "#MODEA,COM1,0,0.0,FINE,0,0.000,0,0,0;MODE BASE 1234 TIME 600 0*13"
 
 /* Public reply samples. */
+/* The rover base-mode log of test/fixtures/unicore/sparkfun_reply_samples.json
+ * ("mode_query" 0): its body ends in a comma. */
+#define TV_MODE_ROVER_SURVEY "#MODE,97,GPS,FINE,2389,337235000,0,0,18,969;MODE ROVER SURVEY,*18"
 #define TV_ACK_UNLOG    "$command,unlog,response: OK*21"
 #define TV_ACK_VERSIONA "$command,VERSIONA,response: OK*45"
 #define TV_CONFIG_SG    "$CONFIG,SIGNALGROUP,CONFIG SIGNALGROUP 3 6*01"

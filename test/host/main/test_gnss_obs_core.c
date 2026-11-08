@@ -1105,3 +1105,61 @@ TEST_CASE("obs: live view lists every satellite with its bands, CNR and position
     TEST_ASSERT_EQUAL_UINT8(0, tot.cnr_dbhz);
     TEST_ASSERT_EQUAL_UINT16(3, tot.band_sats[GNSS_BAND_L1] + tot.band_sats[GNSS_BAND_L2] + tot.band_sats[GNSS_BAND_L5]);
 }
+
+TEST_CASE("obs: the solution keeps the latest GGA and GST apart, pairs them by UTC only, and reset forgets it",
+          "[gnss_obs]")
+{
+    obs_solution_t s;
+    obs_solution_reset(&s);
+    gnss_obs_solution_t out;
+    TEST_ASSERT_FALSE(obs_solution_get(&s, 1000000, &out));
+    TEST_ASSERT_FALSE(out.gga_valid || out.gst_valid || out.same_epoch);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, out.gga_age_ms);
+    TEST_ASSERT_EQUAL_UINT32(UINT32_MAX, out.gst_age_ms);
+
+    /* Lines of test/fixtures/nmea/gpsd_ublox-zed-f9p-nmea_excerpt.log: one epoch's GGA and GST, the next GGA. */
+    static const char gga1[] = "$GNGGA,003956.00,4552.65403,S,17030.00668,E,1,12,0.64,14.2,M,1.8,M,,*56";
+    static const char gst1[] = "$GNGST,003956.00,235111,,,,2.3,3.5,4.0*46";
+    static const char gga2[] = "$GNGGA,003957.00,4552.65403,S,17030.00673,E,1,12,0.64,14.2,M,1.8,M,,*5D";
+    obs_gga_t g;
+    gnss_obs_gst_t t;
+    TEST_ASSERT_TRUE(obs_gga_parse(gga1, strlen(gga1), &g));
+    obs_solution_feed_gga(&s, &g, 1000000);
+    TEST_ASSERT_TRUE(obs_solution_get(&s, 1250000, &out));
+    TEST_ASSERT_TRUE(out.gga_valid);
+    TEST_ASSERT_FALSE(out.gst_valid);
+    TEST_ASSERT_EQUAL_INT64(1000000, out.gga_arrival_us);
+    TEST_ASSERT_EQUAL_UINT32(250, out.gga_age_ms);
+    TEST_ASSERT_EQUAL_INT64(-45877567167LL, out.gga.lat_ndeg);
+    TEST_ASSERT_FALSE(out.same_epoch);
+
+    TEST_ASSERT_TRUE(obs_gst_parse(gst1, strlen(gst1), &t));
+    obs_solution_feed_gst(&s, &t, 1300000);
+    TEST_ASSERT_TRUE(obs_solution_get(&s, 1300000, &out));
+    TEST_ASSERT_TRUE(out.same_epoch);
+    TEST_ASSERT_EQUAL_UINT32(0, out.gst_age_ms);
+
+    /* The next epoch's GGA before its GST: they no longer describe one solution. */
+    TEST_ASSERT_TRUE(obs_gga_parse(gga2, strlen(gga2), &g));
+    obs_solution_feed_gga(&s, &g, 2000000);
+    TEST_ASSERT_TRUE(obs_solution_get(&s, 2000000, &out));
+    TEST_ASSERT_FALSE(out.same_epoch);
+    TEST_ASSERT_TRUE(out.gst_valid);
+    TEST_ASSERT_EQUAL_UINT32(700, out.gst_age_ms);
+    TEST_ASSERT_EQUAL_UINT32(2397000, out.gga.utc_ms);
+    TEST_ASSERT_EQUAL_UINT32(2396000, out.gst.utc_ms);
+
+    /* SYNTHETIC: another talker replaces it; a GGA without a time never pairs. */
+    static const char gp[] = "$GPGGA,,4552.65403,S,17030.00673,E,1,12,0.64,14.2,M,1.8,M,,";
+    TEST_ASSERT_TRUE(obs_gga_parse(gp, strlen(gp), &g));
+    obs_solution_feed_gga(&s, &g, 2100000);
+    TEST_ASSERT_TRUE(obs_solution_get(&s, 2050000, &out));   /* a clock behind the arrival: age 0 */
+    TEST_ASSERT_EQUAL_STRING("GP", out.gga.talker);
+    TEST_ASSERT_EQUAL_UINT32(0, out.gga_age_ms);
+    TEST_ASSERT_FALSE(out.same_epoch);
+
+    /* Reset: nothing is kept, not even a healthy fix. */
+    obs_solution_reset(&s);
+    TEST_ASSERT_FALSE(obs_solution_get(&s, 3000000, &out));
+    TEST_ASSERT_FALSE(out.gga_valid || out.gst_valid);
+}

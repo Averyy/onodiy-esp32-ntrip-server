@@ -39,14 +39,15 @@ concurrency:
 # would have to evaluate, a workflow-level env: or defaults:. Such a change
 # there needs it taught first.
 #
-# A push to main runs firmware, host-tests and bench-tools; firmware-bench and
+# A push to main runs firmware, host-tests, external-app and bench-tools; firmware-bench and
 # the two QEMU jobs run on tags, pull requests, the weekly run and on request
 # (Actions > build > Run workflow), and a release needs every job.
 #
 # Jobs: firmware (the station image and every board's install files, uploaded), firmware-bench (the
 # sdkconfig.bench overlay built and checked like the station image, so code
 # that only bench builds compile cannot rot; nothing uploaded), host-tests,
-# bench-tools (pytest), qemu-smoke, qemu-bench-console (the bench overlay
+# external-app (another product's build of the receiver components alone,
+# docs/component-reuse.md), bench-tools (pytest), qemu-smoke, qemu-bench-console (the bench overlay
 # run in QEMU: its console answers; then installed as on the 8 MB board),
 # and release (tags only).
 # Every action is pinned to a full commit SHA, with its version tag in a
@@ -217,6 +218,31 @@ jobs:
           fi
           ./build/onodiy_host_tests.elf
 
+  # Another product's build of the receiver components (docs/component-reuse.md):
+  # examples/external-receiver copied out of the tree and built against this
+  # checkout with only board, settings, gnss_types, gnss_framing, gnss_link,
+  # gnss_obs and um98x_ctl (16 MB and 8 MB layouts, the station's strict
+  # warnings on them), and the framing code on the host compiler. A change
+  # that breaks that contract fails here first.
+  external-app:
+    name: External app (receiver components only)
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Framing code on the host compiler
+        shell: bash
+        run: tools/ci/external_host_framing.sh
+
+      - name: Build (both layouts)
+        shell: bash
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          tools/ci/external_app.sh
+
   bench-tools:
     name: Bench tools (pytest)
     runs-on: ubuntu-24.04
@@ -381,7 +407,7 @@ jobs:
   release:
     name: GitHub Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [firmware, host-tests, bench-tools, firmware-bench, qemu-smoke, qemu-bench-console]
+    needs: [firmware, host-tests, external-app, bench-tools, firmware-bench, qemu-smoke, qemu-bench-console]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -53,6 +53,24 @@
  * CONFIG dump has no end marker and completes 500 ms after its last line
  * (at most 3000 ms after the ack).
  *
+ * Loader prompt: once the link's armed loader prompt detector has fired
+ * under a COMMAND lease (gnss_link_set_prompt_detect; gnss_link_prompt_seen
+ * latches the hit until the lease is released), no call under that lease
+ * writes anything more to the receiver: no send, no resend, no session CR LF,
+ * no rollback RESET. The call in flight ends at once (it does not wait out
+ * its reply window), unless it had already completed, which keeps its
+ * result; it and every later call under the lease return ESP_ERR_NOT_ALLOWED
+ * without writing. Two calls keep their own rules: um98x_ctl_detect
+ * reports the prompt as before (ESP_ERR_INVALID_RESPONSE with out->prompt),
+ * and um98x_ctl_leave_loader sends the loader's restart key regardless (it
+ * is meant for the loader). The station arms the detector only for
+ * detection; a product that keeps it armed for a whole session gets this
+ * stop for every call of the session. With the detector disarmed nothing
+ * changes. UART completion and an acknowledgement are unrelated to it: a
+ * command acknowledged before the prompt returns ESP_OK. The latch is read
+ * right before each write and during every wait: a write already being
+ * handed to the UART when the hit comes is not recalled.
+ *
  * Boot is stream-first: the station opens the link at the stored baud in
  * STREAM mode and publishes at once; it queries the version without a lease
  * and takes a COMMAND lease only if the version or applied profile does not
@@ -64,7 +82,8 @@
  * a 2000 ms window from the end of the write; up to 3 tries, 1000 ms apart.
  * After a known receiver restart: tries every 1000 ms with 1000 ms windows
  * for up to 20 s. Only models "UM982" and "UM980" (exact; the UM980
- * UNTESTED) get configured, and only "UM982" flashed.
+ * UNTESTED) get configured. Receiver firmware updates take the same two
+ * models (um98x_flash_model_supported).
  * Every successful identity is persisted (gnss/model, gnss/fw, written only
  * when they change).
  *
@@ -72,9 +91,13 @@
  * way), the receiver's restarting answer ("The Board is resetting,...", its
  * reply to a command sent while it restarts; same terms), or a version log
  * nobody asked for (no VERSIONA written in the preceding 10 s); one restart
- * counts once. It is counted and reported through the callback set with
- * um98x_ctl_set_restart_cb(); the station posts its receiver-restarted
- * event from there. Between a restarting answer and the banner the stats
+ * counts once (evidence within 20 s of earlier evidence is the same
+ * restart). It is counted and reported through the callback set with
+ * um98x_ctl_set_restart_cb(): on the GNSS RX task (from um98x_ctl_on_line,
+ * inside the link's line sink), once per restart counted, after the line
+ * has been dispatched; it must not block. The station posts its
+ * receiver-restarted event from there. Restarts of this layer's own (a
+ * signal-group change, RESET) are not reported. Between a restarting answer and the banner the stats
  * say the receiver is restarting (um98x_ctl_stats_t.restarting): it
  * answers, it is not silent.
  *
@@ -155,8 +178,10 @@ uint32_t um98x_ctl_applied_hash(const um98x_base_profile_t *p);
 bool um98x_ctl_on_line(const char *line, size_t len, void *ctx);
 
 /**
- * The link's loader prompt detector fired (call from the on_prompt sink).
- * A running detection stops probing at once.
+ * The link's loader prompt detector fired (call from the on_prompt sink):
+ * the call in flight wakes and stops at once (see "Loader prompt"). Without
+ * it the call still stops, at its next send or the end of its current wait
+ * at the latest, from the link's latch.
  */
 void um98x_ctl_notify_prompt(void);
 
@@ -171,6 +196,9 @@ void um98x_ctl_set_restart_cb(um98x_ctl_restart_cb_t cb, void *ctx);
  * receiver's input is terminated before the first command. The apply,
  * restore and detection calls do this themselves; call it before other
  * commands sent under a fresh lease.
+ * @return ESP_OK, ESP_ERR_NOT_ALLOWED (loader prompt under this lease:
+ *         nothing sent), ESP_ERR_INVALID_STATE (no lease, link error),
+ *         ESP_ERR_TIMEOUT (another call holds the command layer).
  */
 esp_err_t um98x_ctl_session_begin(gnss_link_lease_t lease);
 
@@ -193,9 +221,9 @@ typedef struct {
  * sent), else probe "\r\nVERSIONA\r\n" twice with 2000 ms windows (any
  * acknowledgement or the version log = found; after an accepting
  * acknowledgement the log has 1000 ms more, and then gives the identity,
- * else the identity is the next query). A loader prompt reported during the pass (um98x_ctl_notify_prompt)
- * stops it before anything more is sent; one seen before the call is the
- * caller's to handle. Found -> gnss/baud persisted if it changed.
+ * else the identity is the next query). A loader prompt under this lease,
+ * reported during the pass or before it (gnss_link_prompt_seen), stops it
+ * before anything more is sent. Found -> gnss/baud persisted if it changed.
  * @return ESP_OK (found), ESP_ERR_NOT_FOUND, ESP_ERR_INVALID_RESPONSE (loader
  *         prompt seen: out->prompt), ESP_ERR_INVALID_STATE (no lease, link
  *         error).
@@ -213,11 +241,15 @@ esp_err_t um98x_ctl_leave_loader(gnss_link_lease_t lease);
 /**
  * Version query (identity). lease == NULL while streaming, or with the
  * COMMAND lease. after_restart: poll every second until 20 s after the
- * latest restart evidence (or from now). On success the identity is stored
- * (um98x_ctl_get_info) and persisted on change; the model gate is the
- * caller's (um98x_ctl_model_supported).
+ * latest restart evidence (or from now): the way to wait out a receiver
+ * restart reported by the restart callback without a new detection pass.
+ * On success the identity is stored (um98x_ctl_get_info) and persisted on
+ * change (gnss/model, gnss/fw); the model gate is the caller's
+ * (um98x_ctl_model_supported).
  * @return ESP_OK, ESP_ERR_INVALID_RESPONSE (acknowledged but no version log:
- *         not ready), ESP_ERR_TIMEOUT (no answer), ESP_ERR_INVALID_STATE.
+ *         not ready), ESP_ERR_TIMEOUT (no answer), ESP_ERR_NOT_ALLOWED
+ *         (loader prompt under this lease: nothing more sent),
+ *         ESP_ERR_INVALID_STATE.
  */
 esp_err_t um98x_ctl_query_version(gnss_link_lease_t lease, bool after_restart, um98x_info_t *out);
 
@@ -242,9 +274,23 @@ bool um98x_ctl_is_um980(void);
 void um98x_ctl_target_group(const um98x_base_profile_t *p, uint8_t *master, uint8_t *slave);
 
 /**
- * Base-mode query (lease == NULL while streaming, or COMMAND): the body of
- * the receiver's base-mode log, e.g. "MODE BASE 1234 TIME 600 0". Used while
- * a survey runs (um98x_survey_on_mode) and for the antenna-moved check.
+ * Mode read-back (lease == NULL while streaming, or COMMAND): the body of
+ * the receiver's mode log (MODE / MODEA), whatever mode it runs: the text
+ * between the header's ';' and the '*' of its checksum, exactly as sent,
+ * cut to len - 1 characters (at most 127) and NUL-terminated; "" for a log
+ * without a body. A survey-in base gives e.g. "MODE BASE 1234 TIME 600 0";
+ * the station uses it while a survey runs
+ * (um98x_survey_on_mode) and for the antenna-moved check. Rover modes come
+ * back the same way: the public reply sample's rover log
+ * (test/fixtures/unicore/sparkfun_reply_samples.json) gives
+ * "MODE ROVER SURVEY," with a trailing comma, which is kept; a caller that
+ * compares the mode allows for it (end of body, ',' or ' ' after the
+ * words). Host-tested from that sample (test_um98x_exec.c); not yet seen
+ * from a station receiver on hardware.
+ * @return ESP_OK, ESP_ERR_TIMEOUT (no log), ESP_FAIL (refused),
+ *         ESP_ERR_NOT_ALLOWED (loader prompt under this lease: nothing more
+ *         sent), ESP_ERR_INVALID_ARG (body NULL or len 0),
+ *         ESP_ERR_INVALID_STATE (link or lease).
  */
 esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
 
@@ -254,8 +300,9 @@ esp_err_t um98x_ctl_query_mode(gnss_link_lease_t lease, char *body, size_t len);
  * the parsed solution, usable or not (um98x_own_fix_usable).
  * @return ESP_OK (a log that parsed), ESP_ERR_NOT_SUPPORTED (the receiver
  *         refused the query), ESP_ERR_INVALID_RESPONSE (a log this firmware
- *         does not read), ESP_ERR_TIMEOUT (no log), ESP_ERR_INVALID_STATE
- *         (link or lease: nothing sent, or a link error).
+ *         does not read), ESP_ERR_TIMEOUT (no log), ESP_ERR_NOT_ALLOWED
+ *         (loader prompt under this lease), ESP_ERR_INVALID_STATE (link or
+ *         lease: nothing sent, or a link error).
  */
 esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_own_fix_t *out);
 
@@ -265,9 +312,10 @@ esp_err_t um98x_ctl_query_own_fix(gnss_link_lease_t lease, bool sppnav, um98x_ow
  * text gets the reply lines as the receiver sent them ('\n'-separated, cut
  * to fit), reason the refusal text, "timeout" or "link error".
  * @return ESP_OK, ESP_FAIL (refused), ESP_ERR_TIMEOUT (no answer, or no log
- *         after the acknowledgement), ESP_ERR_INVALID_ARG (not on the
- *         list), ESP_ERR_INVALID_STATE (no lease where one is needed, a link
- *         error, another call holds the command layer).
+ *         after the acknowledgement), ESP_ERR_NOT_ALLOWED (loader prompt
+ *         under this lease; reason "loader prompt"), ESP_ERR_INVALID_ARG
+ *         (not on the list), ESP_ERR_INVALID_STATE (no lease where one is
+ *         needed, a link error, another call holds the command layer).
  */
 esp_err_t um98x_ctl_query(gnss_link_lease_t lease, unsigned q, char *text, size_t cap, char *reason, size_t reason_len);
 
@@ -281,9 +329,11 @@ esp_err_t um98x_ctl_query(gnss_link_lease_t lease, unsigned q, char *text, size_
  * @param timeout_ms per-send ack timeout, 0 = the default (3000 ms,
  *                   SAVECONFIG 5000 ms); ignored for VERSIONA.
  * @return ESP_OK on positive ack (or complete data), ESP_FAIL on a negative
- *         reply, ESP_ERR_TIMEOUT, ESP_ERR_INVALID_ARG for an unusable command,
- *         ESP_ERR_INVALID_STATE for anything but the read-only queries above
- *         without a lease (and for a link error).
+ *         reply, ESP_ERR_TIMEOUT, ESP_ERR_NOT_ALLOWED (loader prompt under
+ *         this lease: no further send, see "Loader prompt"),
+ *         ESP_ERR_INVALID_ARG for an unusable command, ESP_ERR_INVALID_STATE
+ *         for anything but the read-only queries above without a lease (and
+ *         for a link error).
  */
 esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *reply, size_t reply_len,
                             uint32_t timeout_ms);
@@ -335,6 +385,9 @@ esp_err_t um98x_ctl_command(gnss_link_lease_t lease, const char *cmd, char *repl
  *         (model is not UM982: nothing configuring sent); ESP_ERR_TIMEOUT
  *         (identity unknown and no version log: nothing configuring sent);
  *         ESP_ERR_NOT_FOUND (receiver lost after a restart or baud change);
+ *         ESP_ERR_NOT_ALLOWED (loader prompt under this lease: the session
+ *         stopped, also during a restart wait, no rollback RESET once it
+ *         showed, nothing persisted);
  *         ESP_ERR_INVALID_ARG; ESP_ERR_INVALID_STATE (no lease, link error).
  */
 esp_err_t um98x_ctl_apply_profile(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
@@ -357,7 +410,8 @@ size_t um98x_ctl_apply_preview(const um98x_base_profile_t *profile, uint32_t lin
  * refused there (failed->rtcm_refused) are left out, since they would only
  * be refused again. result may be the same object as failed.
  * @return ESP_OK if every message sent except the optional ones (1230, NavIC
- *         MSMs) was accepted, else ESP_FAIL.
+ *         MSMs) was accepted, ESP_ERR_NOT_ALLOWED (loader prompt under this
+ *         lease: the rest not sent), else ESP_FAIL.
  */
 esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_profile_t *profile,
                                    const um98x_apply_result_t *failed, um98x_apply_result_t *result);
@@ -369,8 +423,10 @@ esp_err_t um98x_ctl_restore_output(gnss_link_lease_t lease, const um98x_base_pro
  * reported as an unsolicited restart. Waits for the banner (up to 15 s) and
  * polls the version every second until 20 s after it.
  * @return ESP_OK (it answered after the restart), ESP_ERR_TIMEOUT (no answer;
- *         the RESET went out), ESP_ERR_INVALID_STATE (nothing sent: no lease,
- *         a link error, or another call holds the command layer).
+ *         the RESET went out), ESP_ERR_NOT_ALLOWED (loader prompt under this
+ *         lease: before the RESET, nothing sent; after it, the wait ends at
+ *         once), ESP_ERR_INVALID_STATE (nothing sent: no lease, a link
+ *         error, or another call holds the command layer).
  */
 esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease);
 
@@ -383,9 +439,10 @@ esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease);
  * to be confirmed on hardware.
  * @param reason optional: the receiver's rejection text, "timeout" or
  *               "link error"
- * @return ESP_OK, ESP_FAIL (rejected), ESP_ERR_TIMEOUT, ESP_ERR_INVALID_ARG
- *         (period), ESP_ERR_INVALID_STATE (no lease, link error, another
- *         call holds the command layer).
+ * @return ESP_OK, ESP_FAIL (rejected), ESP_ERR_TIMEOUT, ESP_ERR_NOT_ALLOWED
+ *         (loader prompt under this lease), ESP_ERR_INVALID_ARG (period),
+ *         ESP_ERR_INVALID_STATE (no lease, link error, another call holds
+ *         the command layer).
  */
 esp_err_t um98x_ctl_sat_view(gnss_link_lease_t lease, bool on, uint16_t period_s, char *reason, size_t reason_len);
 

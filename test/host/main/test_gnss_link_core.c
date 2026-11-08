@@ -184,6 +184,281 @@ TEST_CASE("link core: the prompt detector needs the COMMAND lease and the releas
     TEST_ASSERT_FALSE(c.prompt_armed);
 }
 
+TEST_CASE("link core: a prompt hit is latched for the rest of its lease, never for the next", "[gnss_link]")
+{
+    gnss_link_core_t c;
+    open_link(&c);
+    uint32_t cmd = 0;
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, 0));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "rover", &cmd));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, cmd));
+
+    /* Not armed: a prompt goes nowhere and latches nothing. */
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_DROP, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, cmd));
+
+    /* Armed: the hit stays latched, also once disarmed. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, cmd, true));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_PROMPT, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
+    TEST_ASSERT_TRUE(gnss_link_core_prompt_hit(&c, cmd));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_prompt(&c, cmd, false));
+    TEST_ASSERT_TRUE(gnss_link_core_prompt_hit(&c, cmd));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, 0));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, cmd + 1));
+
+    /* Released: the stale token has none, and the next lease starts without one. */
+    uint32_t old = cmd;
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, cmd, NULL));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, old));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "rover", &cmd));
+    TEST_ASSERT_NOT_EQUAL(old, cmd);
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, cmd));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, old));
+
+    /* The report-only observer never latches. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&c, cmd, NULL));
+    gnss_link_core_set_observe(&c, true);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&c, GNSS_LINK_MODE_COMMAND, "watch", &cmd));
+    TEST_ASSERT_EQUAL(GNSS_LINK_ROUTE_OBSERVE, gnss_link_core_route(&c, GNSS_FRAME_PROMPT, T0_US, T0_US));
+    TEST_ASSERT_FALSE(gnss_link_core_prompt_hit(&c, cmd));
+}
+
+/* ---- the write sequence (gnss_link_core_write) ----------------------------------------- */
+
+/* A recording fake of the TX lock and the driver over a real core. */
+typedef struct {
+    gnss_link_core_t c;
+    bool open;              /* the UART driver is installed */
+    bool lock_ok;
+    int put_ret;            /* < 0 refused, else bytes taken (-2: all of them) */
+    bool drain_ok;
+    bool locked;
+    char log[64];           /* L lock, A allowed, P put, D drain, U unlock */
+    size_t put_len;
+    /* A mode switch that won the lock while this writer waited (run in lock()). */
+    void (*meanwhile)(gnss_link_core_t *c);
+} tx_fake_t;
+
+static void tx_note(tx_fake_t *f, char ch)
+{
+    size_t n = strlen(f->log);
+    TEST_ASSERT_LESS_THAN(sizeof(f->log) - 1, n);
+    f->log[n] = ch;
+    f->log[n + 1] = '\0';
+}
+
+static bool tx_f_lock(void *ctx)
+{
+    tx_fake_t *f = ctx;
+    if (f->meanwhile != NULL) {
+        f->meanwhile(&f->c);
+    }
+    tx_note(f, 'L');
+    if (f->lock_ok) {
+        TEST_ASSERT_FALSE(f->locked);
+        f->locked = true;
+    }
+    return f->lock_ok;
+}
+
+static void tx_f_unlock(void *ctx)
+{
+    tx_fake_t *f = ctx;
+    tx_note(f, 'U');
+    TEST_ASSERT_TRUE(f->locked);
+    f->locked = false;
+}
+
+static esp_err_t tx_f_allowed(void *ctx, uint32_t token)
+{
+    tx_fake_t *f = ctx;
+    tx_note(f, 'A');
+    TEST_ASSERT_TRUE(f->locked);
+    esp_err_t err = gnss_link_core_check(&f->c, GNSS_LINK_OP_WRITE, token);
+    return (err == ESP_OK && !f->open) ? ESP_ERR_INVALID_STATE : err;
+}
+
+static int tx_f_put(void *ctx, const void *data, size_t len)
+{
+    tx_fake_t *f = ctx;
+    (void)data;
+    tx_note(f, 'P');
+    TEST_ASSERT_TRUE(f->locked);
+    f->put_len = len;
+    return f->put_ret == -2 ? (int)len : f->put_ret;
+}
+
+static bool tx_f_drain(void *ctx)
+{
+    tx_fake_t *f = ctx;
+    tx_note(f, 'D');
+    TEST_ASSERT_TRUE(f->locked);
+    return f->drain_ok;
+}
+
+static tx_fake_t s_txf;
+
+static tx_fake_t *tx_fake(void)
+{
+    tx_fake_t *f = &s_txf;
+    memset(f, 0, sizeof(*f));
+    open_link(&f->c);
+    f->open = true;
+    f->lock_ok = true;
+    f->put_ret = -2;
+    f->drain_ok = true;
+    return f;
+}
+
+static esp_err_t tx_run(tx_fake_t *f, uint32_t token, size_t len, gnss_link_tx_t *tx)
+{
+    static const uint8_t frame[1029] = { 0xD3 };
+    f->log[0] = '\0';
+    const gnss_link_tx_port_t port = {
+        .ctx = f,
+        .lock = tx_f_lock,
+        .unlock = tx_f_unlock,
+        .allowed = tx_f_allowed,
+        .put = tx_f_put,
+        .drain = tx_f_drain,
+    };
+    *tx = (gnss_link_tx_t)99;
+    esp_err_t err = gnss_link_core_write(&port, token, frame, len, tx);
+    TEST_ASSERT_FALSE(f->locked);   /* never left held */
+    return err;
+}
+
+TEST_CASE("link core: a lease-free write in STREAM is sent whole, under the lock until TX done", "[gnss_link]")
+{
+    tx_fake_t *f = tx_fake();
+    gnss_link_tx_t tx;
+    TEST_ASSERT_EQUAL(ESP_OK, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_DONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAPDU", f->log);
+    TEST_ASSERT_EQUAL_UINT(1029, f->put_len);
+
+    /* Nothing to send: allowed, nothing handed over. */
+    TEST_ASSERT_EQUAL(ESP_OK, tx_run(f, 0, 0, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_DONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+
+    /* data NULL with a length: refused before the lock. */
+    const gnss_link_tx_port_t port = { f, tx_f_lock, tx_f_unlock, tx_f_allowed, tx_f_put, tx_f_drain };
+    f->log[0] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, gnss_link_core_write(&port, 0, NULL, 5, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("", f->log);
+}
+
+TEST_CASE("link core: write refusals by mode, lease, hands off and a closed UART send nothing", "[gnss_link]")
+{
+    tx_fake_t *f = tx_fake();
+    gnss_link_tx_t tx;
+    uint32_t cmd = 0;
+    uint32_t raw = 0;
+
+    /* COMMAND: only its own lease writes. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&f->c, GNSS_LINK_MODE_COMMAND, "cmd", &cmd));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, 0, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+    TEST_ASSERT_EQUAL(ESP_OK, tx_run(f, cmd, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_DONE, tx);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&f->c, cmd, NULL));
+
+    /* A stale lease after the release; lease-free works again. */
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, cmd, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL(ESP_OK, tx_run(f, 0, 100, &tx));
+
+    /* RAW: likewise. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&f->c, GNSS_LINK_MODE_RAW, "flash", &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, 0, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, cmd, 100, &tx));
+    TEST_ASSERT_EQUAL(ESP_OK, tx_run(f, raw, 100, &tx));
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(&f->c, raw, NULL));
+
+    /* Hands off: nothing, with or without a lease. */
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&f->c, true));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, 0, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_set_hands_off(&f->c, false));
+
+    /* A closed UART (the reopen schedule owns it). */
+    f->open = false;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, 0, 100, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+}
+
+TEST_CASE("link core: write timeouts: before the hand-over nothing, after it uncertain", "[gnss_link]")
+{
+    tx_fake_t *f = tx_fake();
+    gnss_link_tx_t tx;
+
+    /* Another writer kept the lock: nothing sent, nothing to give back. */
+    f->lock_ok = false;
+    TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("L", f->log);
+
+    /* In the FIFO, TX done not seen in time: the lock goes back only after the wait. */
+    f->lock_ok = true;
+    f->drain_ok = false;
+    TEST_ASSERT_EQUAL(ESP_ERR_TIMEOUT, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_UNCERTAIN, tx);
+    TEST_ASSERT_EQUAL_STRING("LAPDU", f->log);
+
+    /* The driver refused the call: nothing sent. */
+    f->drain_ok = true;
+    f->put_ret = -1;
+    TEST_ASSERT_EQUAL(ESP_FAIL, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAPU", f->log);
+
+    /* It took part of them: uncertain, no wait for TX done. */
+    f->put_ret = 512;
+    TEST_ASSERT_EQUAL(ESP_FAIL, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_UNCERTAIN, tx);
+    TEST_ASSERT_EQUAL_STRING("LAPU", f->log);
+}
+
+static void grant_command(gnss_link_core_t *c)
+{
+    uint32_t t = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(c, GNSS_LINK_MODE_COMMAND, "rover", &t));
+}
+
+static uint32_t s_race_token;
+
+static void release_lease(gnss_link_core_t *c)
+{
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_release(c, s_race_token, NULL));
+}
+
+TEST_CASE("link core: a mode switch that wins the lock refuses the waiting writer before any byte",
+          "[gnss_link]")
+{
+    /* A lease-free writer waits while a COMMAND lease is granted. */
+    tx_fake_t *f = tx_fake();
+    gnss_link_tx_t tx;
+    f->meanwhile = grant_command;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, 0, 1029, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+    TEST_ASSERT_EQUAL(GNSS_LINK_MODE_COMMAND, f->c.mode);
+
+    /* A lease holder's writer waits while its lease is released: stale. */
+    f = tx_fake();
+    TEST_ASSERT_EQUAL(ESP_OK, gnss_link_core_acquire(&f->c, GNSS_LINK_MODE_COMMAND, "rover", &s_race_token));
+    f->meanwhile = release_lease;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, tx_run(f, s_race_token, 64, &tx));
+    TEST_ASSERT_EQUAL(GNSS_LINK_TX_NONE, tx);
+    TEST_ASSERT_EQUAL_STRING("LAU", f->log);
+}
+
 TEST_CASE("link core: RTCM is published only in STREAM and counted as held under a lease", "[gnss_link]")
 {
     gnss_link_core_t c;

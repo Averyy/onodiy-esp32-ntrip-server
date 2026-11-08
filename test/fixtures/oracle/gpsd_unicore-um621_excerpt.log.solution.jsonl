@@ -1,0 +1,7 @@
+{"n":1,"kind":"GGA","talker":"GN","time":"00:06:53","lat":44.0688323333,"lon":-121.3141021667,"quality":1,"numSV":29,"HDOP":0.69,"alt":1109.2,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":47,"kind":"GGA","talker":"GN","time":"00:06:54","lat":44.0688321667,"lon":-121.3141026667,"quality":1,"numSV":29,"HDOP":0.63,"alt":1109.3,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":91,"kind":"GGA","talker":"GN","time":"00:06:55","lat":44.0688321667,"lon":-121.3141026667,"quality":1,"numSV":29,"HDOP":0.6,"alt":1109.3,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":135,"kind":"GGA","talker":"GN","time":"00:06:56","lat":44.068832,"lon":-121.3141035,"quality":1,"numSV":29,"HDOP":0.62,"alt":1109.3,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":179,"kind":"GGA","talker":"GN","time":"00:06:57","lat":44.0688318333,"lon":-121.314104,"quality":1,"numSV":29,"HDOP":0.62,"alt":1109.4,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":223,"kind":"GGA","talker":"GN","time":"00:06:58","lat":44.0688315,"lon":-121.314104,"quality":1,"numSV":29,"HDOP":0.6,"alt":1109.3,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":267,"kind":"GGA","talker":"GN","time":"00:06:59","lat":44.0688316667,"lon":-121.3141038333,"quality":1,"numSV":29,"HDOP":0.62,"alt":1109.3,"altUnit":"M","sep":null,"sepUnit":"M","diffAge":null,"diffStation":null}

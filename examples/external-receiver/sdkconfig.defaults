@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+#
+# What the receiver components need from an application's configuration
+# (docs/component-reuse.md). The flash size and the partition table come
+# from the station layout (CMakeLists.txt).
+CONFIG_IDF_TARGET="esp32s3"
+
+# Required: gnss_link parks and wakes its RX task on its own notification
+# slot (index 1) and refuses to build with fewer than two.
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+
+# As the station builds them (the configuration the components are tested
+# in): a 1 ms tick, and the UART interrupt in IRAM (gnss_link stamps each
+# received chunk from it; esp_timer is then in IRAM too, which gnss_link
+# checks).
+CONFIG_FREERTOS_HZ=1000
+CONFIG_UART_ISR_IN_IRAM=y

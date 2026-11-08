@@ -174,10 +174,15 @@ unsigned um98x_chan_dispatch(um98x_chan_t *ch, const char *line, size_t len, con
         return ev;
     }
     /* A version log nobody waits for: a late reply to our own query if we
-     * wrote one recently, otherwise the receiver announced a restart. */
+     * wrote one recently, otherwise the receiver announced a restart, unless
+     * other evidence of a restart (its banner, its restarting answer, another
+     * such log) came within 20 s: that restart, counted once. */
     if (l->kind == UM98X_LINE_VERSION && !ch->expect_restart &&
         (ch->last_version_write_ms == UM98X_NONE_MS ||
          now_ms - ch->last_version_write_ms > UM98X_UNSOLICITED_VERSION_MS)) {
+        if (ch->last_restart_ms != UM98X_NONE_MS && now_ms - ch->last_restart_ms <= UM98X_RESTART_LOST_MS) {
+            return ev;   /* the receiver's own, unasked */
+        }
         ch->stats.restarts++;
         ch->last_restart_ms = now_ms;
         return ev | UM98X_CHAN_RESTART;
@@ -198,9 +203,37 @@ um98x_res_t um98x_res_from_txn(um98x_txn_status_t st)
         return UM98X_E_REJECTED;
     case UM98X_TXN_LINK_ERROR:
         return UM98X_E_LINK;
+    case UM98X_TXN_PROMPT:
+        return UM98X_E_PROMPT;
     default:
         return UM98X_E_TIMEOUT;
     }
+}
+
+/* ---- the loader prompt -------------------------------------------------- */
+
+/* The armed loader prompt detector fired (under this lease, as the port
+ * reports it). Called without the channel lock: the port may take its own. */
+static bool prompted(um98x_exec_t *ex)
+{
+    return ex->port->prompt_seen(ex->port->ctx);
+}
+
+/* Every write of this layer goes through here: once the loader prompt has
+ * shown, nothing more is sent (false, as a failed write). The loader's
+ * restart key alone (um98x_exec_leave_loader) writes past it. */
+static bool send_bytes(um98x_exec_t *ex, const char *data, size_t len)
+{
+    if (prompted(ex)) {
+        return false;
+    }
+    return ex->port->write(ex->port->ctx, data, len);
+}
+
+/* Why a write outside a transaction failed. */
+static const char *write_why(um98x_exec_t *ex)
+{
+    return prompted(ex) ? "loader prompt" : "link error";
 }
 
 um98x_txn_status_t um98x_exec_txn(um98x_exec_t *ex, um98x_txn_kind_t kind, const char *cmd,
@@ -238,13 +271,16 @@ um98x_txn_status_t um98x_exec_txn(um98x_exec_t *ex, um98x_txn_kind_t kind, const
 
     for (;;) {
         int64_t wake = 0;
-        /* Detection must stop sending as soon as the loader prompt shows. */
-        bool stop = (kind == UM98X_TXN_PROBE) && pt->prompt_seen(pt->ctx);
+        /* Nothing more goes out once the loader prompt shows, and the
+         * transaction ends at once instead of waiting out its reply window
+         * (a receiver at its loader answers no command). A transaction that
+         * completed first keeps its result. */
+        bool stop = prompted(ex);
         now = now_ms(ex);
         lock(ex);
         um98x_txn_action_t act = um98x_txn_poll(&ch->txn, now, &wake);
-        if (act == UM98X_TXN_ACT_SEND && stop) {
-            um98x_txn_abort(&ch->txn, now);
+        if (act != UM98X_TXN_ACT_DONE && stop) {
+            um98x_txn_stop_prompt(&ch->txn, now);
             act = UM98X_TXN_ACT_DONE;
         }
         if (act == UM98X_TXN_ACT_DONE) {
@@ -256,6 +292,9 @@ um98x_txn_status_t um98x_exec_txn(um98x_exec_t *ex, um98x_txn_kind_t kind, const
         unlock(ex);
 
         if (act == UM98X_TXN_ACT_SEND) {
+            if (prompted(ex)) {
+                continue;   /* it showed meanwhile: the check above ends the transaction */
+            }
             bool ok = fits && pt->write(pt->ctx, out, (size_t)n);
             int64_t t = now_ms(ex);
             lock(ex);
@@ -333,12 +372,30 @@ um98x_res_t um98x_exec_query_mode(um98x_exec_t *ex, char *body, size_t cap)
 
 /* ---- raw writes and waits ----------------------------------------------- */
 
-/* One line without a transaction (no reply expected or awaited). */
-static bool raw_line(um98x_exec_t *ex, const char *text)
+/* One line without a transaction (no reply expected or awaited). Refused
+ * once the loader prompt has shown, unless past_prompt (the loader's own
+ * restart key). */
+static bool line_out(um98x_exec_t *ex, const char *text, bool past_prompt)
 {
     char out[UM98X_CMD_MAX + 4];
     int n = snprintf(out, sizeof(out), "%s\r\n", text);
-    return n > 0 && (size_t)n < sizeof(out) && ex->port->write(ex->port->ctx, out, (size_t)n);
+    if (n <= 0 || (size_t)n >= sizeof(out)) {
+        return false;
+    }
+    return past_prompt ? ex->port->write(ex->port->ctx, out, (size_t)n) : send_bytes(ex, out, (size_t)n);
+}
+
+static bool raw_line(um98x_exec_t *ex, const char *text)
+{
+    return line_out(ex, text, false);
+}
+
+um98x_res_t um98x_exec_session_begin(um98x_exec_t *ex)
+{
+    if (prompted(ex)) {
+        return UM98X_E_PROMPT;
+    }
+    return send_bytes(ex, "\r\n", 2) ? UM98X_OK : (prompted(ex) ? UM98X_E_PROMPT : UM98X_E_LINK);
 }
 
 static void sleep_until(um98x_exec_t *ex, int64_t until_ms)
@@ -377,13 +434,14 @@ static uint64_t banner_count(um98x_exec_t *ex)
     return b;
 }
 
+/* False also when the loader prompt shows: nothing more is waited for. */
 static bool wait_banner(um98x_exec_t *ex, uint64_t before, int64_t until_ms)
 {
     for (;;) {
         if (banner_count(ex) != before) {
             return true;
         }
-        if (now_ms(ex) >= until_ms) {
+        if (now_ms(ex) >= until_ms || prompted(ex)) {
             return false;
         }
         ex->port->wait(ex->port->ctx, until_ms);
@@ -475,7 +533,7 @@ um98x_res_t um98x_exec_leave_loader(um98x_exec_t *ex, uint32_t timeout_ms)
     um98x_link_counts_t c;
     pt->counts(pt->ctx, &c0);
     uint64_t banners0 = banner_count(ex);
-    if (!raw_line(ex, LOADER_RESTART_KEY)) {
+    if (!line_out(ex, LOADER_RESTART_KEY, true)) {   /* the one write meant for the loader */
         return UM98X_E_LINK;
     }
     int64_t until = now_ms(ex) + timeout_ms;
@@ -547,6 +605,9 @@ static void fail_txn(session_t *s, const char *cmd, um98x_txn_status_t st)
     case UM98X_TXN_LINK_ERROR:
         reason = "link error";
         break;
+    case UM98X_TXN_PROMPT:
+        reason = "loader prompt";
+        break;
     default:
         reason = "timeout";
         break;
@@ -574,6 +635,9 @@ static void txn_reason(um98x_exec_t *ex, um98x_txn_status_t st, char *out, size_
         break;
     case UM98X_TXN_LINK_ERROR:
         copy_str(out, cap, "link error");
+        break;
+    case UM98X_TXN_PROMPT:
+        copy_str(out, cap, "loader prompt");
         break;
     default:
         copy_str(out, cap, "timeout");
@@ -695,7 +759,7 @@ um98x_res_t um98x_exec_groups(um98x_exec_t *ex, um98x_bands_t *out, char *reason
          * silence. Nothing at all: unknown. */
         out->state = acked ? UM98X_BANDS_UNREAD : UM98X_BANDS_UNKNOWN;
         txn_reason(ex, st, reason, cap);
-        return st == UM98X_TXN_LINK_ERROR ? UM98X_E_LINK : UM98X_E_TIMEOUT;
+        return um98x_res_from_txn(st);
     }
 }
 
@@ -779,6 +843,12 @@ static um98x_res_t signal_group(session_t *s)
     uint64_t banners0 = banner_count(ex);
     um98x_txn_status_t st;
     (void)step(s, UM98X_TXN_COMMAND, cmd, true, false, &st);
+    if (st == UM98X_TXN_PROMPT) {
+        /* At its loader: no restart to wait for, nothing more to send. */
+        fail_txn(s, cmd, st);
+        set_expect_restart(ex, false);
+        return UM98X_E_PROMPT;
+    }
     if (st == UM98X_TXN_REJECTED || st == UM98X_TXN_LINK_ERROR) {
         fail_txn(s, cmd, st);
         /* The receiver said no to this pair: nothing changed, no restart. */
@@ -812,6 +882,10 @@ static um98x_res_t signal_group(session_t *s)
     }
     um98x_res_t res = um98x_exec_version(ex, true, end, NULL, NULL);
     set_expect_restart(ex, false);
+    if (res == UM98X_E_PROMPT) {
+        fail(s, cmd, "loader prompt");
+        return UM98X_E_PROMPT;   /* at its loader, not lost: nothing more is sent */
+    }
     if (res != UM98X_OK) {
         /* It came back at its saved baud, which this session was not
          * running at: look for it without leaving the session. */
@@ -889,7 +963,7 @@ static um98x_res_t baud_change(session_t *s)
     for (unsigned attempt = 0; attempt < UM98X_BAUD_ATTEMPTS; attempt++) {
         pace(ex);
         if (!raw_line(ex, cmd)) {
-            fail(s, cmd, "link error");
+            fail(s, cmd, write_why(ex));
             return UM98X_E_FAILED;
         }
         s->accepted = true;   /* the receiver may have switched */
@@ -948,7 +1022,7 @@ static um98x_res_t reset_wait(um98x_exec_t *ex, uint32_t listen_baud, bool *sent
     *sent = false;
     uint64_t banners0 = banner_count(ex);
     pace(ex);
-    if (!pt->write(pt->ctx, "\r\n", 2) || !raw_line(ex, UM98X_CMD_RESET)) {
+    if (!send_bytes(ex, "\r\n", 2) || !raw_line(ex, UM98X_CMD_RESET)) {
         return UM98X_E_LINK;
     }
     *sent = true;
@@ -1228,9 +1302,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
     session_t s = { .ex = ex, .p = p, .r = r, .stored_baud = stored_baud, .saved_baud = r->baud, .accepted = false };
 
     /* Terminate whatever partial line the receiver may hold. */
-    if (!pt->write(pt->ctx, "\r\n", 2)) {
-        fail(&s, "", "link error");
-        return UM98X_E_LINK;
+    if (!send_bytes(ex, "\r\n", 2)) {
+        fail(&s, "", write_why(ex));
+        return prompted(ex) ? UM98X_E_PROMPT : UM98X_E_LINK;
     }
 
     /* Identity: only the supported model is configured. Unknown: asked
@@ -1239,8 +1313,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
     if (identity->model[0] == '\0') {
         um98x_res_t res = um98x_exec_version(ex, false, 0, identity, NULL);
         if (res != UM98X_OK) {
-            fail(&s, UM98X_CMD_VERSION, res == UM98X_E_LINK ? "link error" : "no version log");
-            return res == UM98X_E_LINK ? UM98X_E_LINK : UM98X_E_TIMEOUT;
+            fail(&s, UM98X_CMD_VERSION,
+                 res == UM98X_E_LINK ? "link error" : res == UM98X_E_PROMPT ? "loader prompt" : "no version log");
+            return (res == UM98X_E_LINK || res == UM98X_E_PROMPT) ? res : UM98X_E_TIMEOUT;
         }
         queried = true;
     }
@@ -1258,7 +1333,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
      * restores the quieted outputs without restarting the receiver. */
     bool refused_kept = r->signal_group_refused_plain && !r->um980 &&
                         (r->sg_before.known || (opts != NULL && opts->sg_fallback));
-    if (res != UM98X_OK && res != UM98X_E_LOST && s.accepted && !refused_kept) {
+    /* At the loader prompt nothing more is sent: no RESET either. */
+    bool at_loader = res != UM98X_OK && prompted(ex);
+    if (res != UM98X_OK && res != UM98X_E_LOST && s.accepted && !refused_kept && !at_loader) {
         rollback(&s);
     }
     r->baud = pt->get_baud(pt->ctx);
@@ -1291,6 +1368,9 @@ um98x_res_t um98x_exec_apply(um98x_exec_t *ex, const um98x_base_profile_t *p, co
             r->settings.mask_ddeg = (int16_t)(p->elevation_mask_deg * 10);
         }
     }
+    if (res != UM98X_OK && prompted(ex)) {
+        return UM98X_E_PROMPT;   /* also a "lost" receiver found at its loader, or a prompt during the rollback */
+    }
     if (res == UM98X_OK || res == UM98X_E_LOST) {
         return res;
     }
@@ -1305,6 +1385,9 @@ um98x_res_t um98x_exec_reset(um98x_exec_t *ex)
     bool sent = false;
     um98x_res_t res = reset_wait(ex, 0, &sent);
     set_expect_restart(ex, false);
+    if (res != UM98X_OK && prompted(ex)) {
+        return UM98X_E_PROMPT;   /* before the RESET (not sent) or while waiting after it */
+    }
     if (!sent) {
         return UM98X_E_LINK;
     }
@@ -1340,9 +1423,9 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
         return UM98X_E_ARG;
     }
     session_t s = { .ex = ex, .p = p, .r = r, .stored_baud = r->baud, .saved_baud = r->baud, .accepted = false };
-    if (!pt->write(pt->ctx, "\r\n", 2)) {
-        fail(&s, "", "link error");
-        return UM98X_E_LINK;
+    if (!send_bytes(ex, "\r\n", 2)) {
+        fail(&s, "", write_why(ex));
+        return prompted(ex) ? UM98X_E_PROMPT : UM98X_E_LINK;
     }
     um98x_res_t out = UM98X_OK;
     for (size_t i = 0; i < plan.count; i++) {
@@ -1362,6 +1445,9 @@ um98x_res_t um98x_exec_restore_rtcm(um98x_exec_t *ex, const um98x_base_profile_t
         if (tst == UM98X_TXN_REJECTED) {
             note_rtcm_refused(r, st->msg);
         }
+        if (tst == UM98X_TXN_PROMPT) {
+            return UM98X_E_PROMPT;   /* at the loader: nothing more is sent */
+        }
         if (res != UM98X_OK && st->fatal) {
             out = UM98X_E_FAILED;   /* keep going: every output that works helps */
         }
@@ -1379,11 +1465,11 @@ um98x_res_t um98x_exec_sat_view(um98x_exec_t *ex, bool on, uint16_t period_s, ch
         return UM98X_E_ARG;
     }
     /* Terminate whatever partial line the receiver may hold. */
-    if (!ex->port->write(ex->port->ctx, "\r\n", 2)) {
+    if (!send_bytes(ex, "\r\n", 2)) {
         if (reason != NULL && cap > 0) {
-            copy_str(reason, cap, "link error");
+            copy_str(reason, cap, write_why(ex));
         }
-        return UM98X_E_LINK;
+        return prompted(ex) ? UM98X_E_PROMPT : UM98X_E_LINK;
     }
     /* Fewer sends than a configuring step: the lease holds RTCM back, and
      * one toggle without an answer must stay under a caster's stall limit. */

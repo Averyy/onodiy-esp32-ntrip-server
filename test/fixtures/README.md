@@ -41,6 +41,8 @@ correction service, and must not be served as one (see the notice).
 | File | Source | License | Receiver | What it exercises |
 |---|---|---|---|---|
 | `gpsd_unicore-um621_excerpt.log` | gpsd @ 22ada91, `test/daemon/unicore-um621.log`, its first 297 lines | BSD-2-Clause | Unicore UM621 (R6.0.0.0Build2810) | a real Unicore NMEA capture: 151 satellite-in-view sentences from GP (with **SBAS numbers 33-64 among the GPS ones**), GL, GA and GB talkers, NMEA 4.11 signal IDs (GPS 1 and 8, Galileo 1 and 7, BeiDou 1 and 5), empty C/N0 fields; the gpsd `#` header lines carry no checksum |
+| `gpsd_trimble_nmea-rtk.log` | gpsd @ 22ada91, `test/daemon/nmea-rtk.log`, the whole file | BSD-2-Clause | a Trimble receiver (not named further in the file) | position sentences from **GN and GP talkers** in one stream: differential (quality 2) and **RTK fixed (quality 4)** solutions with 8 minute decimals, a negative geoidal separation, **the age of the differential data** and the reference station ID |
+| `gpsd_ublox-zed-f9p-nmea_excerpt.log` | gpsd @ 22ada91, `test/daemon/ublox-zed-f9p-nmea.log`, its first 115 lines | BSD-2-Clause | u-blox ZED-F9P (firmware HPG 1.11) | three epochs of NMEA, each with its position sentence and then its **error-statistics sentence (GST)**, whose error-ellipse fields are **empty**; empty geoid and differential fields in GGA |
 
 ### Receiver replies and logs (`unicore/`)
 
@@ -80,6 +82,14 @@ Decoded by programs that share no code with ours:
   of checksum-valid text lines (`text_lines`: a line from `$` or `#` to CR or
   LF that verifies under the NMEA XOR, the lead-inclusive XOR or the CRC-32;
   for the NMEA sentences the same set pynmeagps finds).
+- `<file>.solution.jsonl` (the three NMEA captures): every position (GGA) and
+  error-statistics (GST) sentence decoded by pynmeagps 1.1.7 with its checksum
+  verified, keyed by `n`, its index among the file's checksum-valid lines (the
+  framer's unit index there): talker, time, and the sentence's fields under
+  pynmeagps' names (`lat`, `lon`, `quality`, `numSV`, `HDOP`, `alt`,
+  `altUnit`, `sep`, `sepUnit`, `diffAge`, `diffStation`; `rangeRms`,
+  `stdMajor`, `stdMinor`, `orient`, `stdLat`, `stdLong`, `stdAlt`); `null` =
+  empty field. pynmeagps gives latitude and longitude to 10 decimals.
 - `gpsd_unicore-um621_excerpt.log.gsv.jsonl`: every satellite-in-view
   sentence decoded by pynmeagps with its checksum verified: talker, sentence
   count and number, satellites in view, the satellite blocks
@@ -100,7 +110,8 @@ Where our parsers and the oracle differ by design:
 ## Regenerating
 
 The oracles were produced on 2026-10-10 with pyrtcm 1.2.0 and pynmeagps
-1.1.7 (Python 3.14) from exactly these files. To check a file against its
+1.1.7 (Python 3.14) from exactly these files; the `.solution.jsonl` ones on
+2026-11-07 with pynmeagps 1.1.7. To check a file against its
 upstream copy, compare the SHA-256 in `index.json`. A new fixture needs its
 license notice here and in `LICENSES/`, an entry in `index.json` and, for
 RTCM, an `.msm.jsonl` in the format above.

@@ -1,0 +1,6 @@
+{"n":2,"kind":"GGA","talker":"GN","time":"00:39:56","lat":-45.8775671667,"lon":170.5001113333,"quality":1,"numSV":12,"HDOP":0.64,"alt":14.2,"altUnit":"M","sep":1.8,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":32,"kind":"GST","talker":"GN","time":"00:39:56","rangeRms":235111.0,"stdMajor":null,"stdMinor":null,"orient":null,"stdLat":2.3,"stdLong":3.5,"stdAlt":4.0}
+{"n":37,"kind":"GGA","talker":"GN","time":"00:39:57","lat":-45.8775671667,"lon":170.5001121667,"quality":1,"numSV":12,"HDOP":0.64,"alt":14.2,"altUnit":"M","sep":1.8,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":67,"kind":"GST","talker":"GN","time":"00:39:57","rangeRms":348874.0,"stdMajor":null,"stdMinor":null,"orient":null,"stdLat":2.3,"stdLong":3.5,"stdAlt":4.0}
+{"n":72,"kind":"GGA","talker":"GN","time":"00:39:58","lat":-45.8775671667,"lon":170.500112,"quality":1,"numSV":12,"HDOP":0.71,"alt":14.2,"altUnit":"M","sep":1.8,"sepUnit":"M","diffAge":null,"diffStation":null}
+{"n":102,"kind":"GST","talker":"GN","time":"00:39:58","rangeRms":43.0,"stdMajor":null,"stdMinor":null,"orient":null,"stdLat":2.3,"stdLong":3.5,"stdAlt":4.0}

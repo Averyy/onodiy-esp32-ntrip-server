@@ -43,6 +43,8 @@ static obs_1033_t s_1033_rx;   /* decode scratch: GNSS RX task only (the only fe
 static obs_gga_t s_fix;
 static bool s_fix_valid;
 static int64_t s_fix_us;
+/* The solution (gnss_obs_get_solution): cleared by gnss_obs_reset, unlike s_fix. */
+static obs_solution_t s_sol;
 
 static uint64_t now_ms(void)
 {
@@ -98,12 +100,19 @@ void gnss_obs_feed_line(const char *line, size_t len)
     obs_gsv_t g;
     if (!obs_gsv_parse(line, len, &g)) {
         obs_gga_t fix;
+        gnss_obs_gst_t gst;
         if (obs_gga_parse(line, len, &fix)) {
             int64_t t_us = esp_timer_get_time();
             portENTER_CRITICAL(&s_lock);
             s_fix = fix;
             s_fix_valid = true;
             s_fix_us = t_us;
+            obs_solution_feed_gga(&s_sol, &fix, t_us);
+            portEXIT_CRITICAL(&s_lock);
+        } else if (obs_gst_parse(line, len, &gst)) {
+            int64_t t_us = esp_timer_get_time();
+            portENTER_CRITICAL(&s_lock);
+            obs_solution_feed_gst(&s_sol, &gst, t_us);
             portEXIT_CRITICAL(&s_lock);
         }
         return;
@@ -112,6 +121,18 @@ void gnss_obs_feed_line(const char *line, size_t len)
     portENTER_CRITICAL(&s_lock);
     obs_core_feed_gsv(&s_core, &g, t);
     portEXIT_CRITICAL(&s_lock);
+}
+
+esp_err_t gnss_obs_get_solution(gnss_obs_solution_t *out)
+{
+    if (out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    obs_solution_t snap;
+    portENTER_CRITICAL(&s_lock);
+    snap = s_sol;
+    portEXIT_CRITICAL(&s_lock);
+    return obs_solution_get(&snap, esp_timer_get_time(), out) ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t gnss_obs_get_fix(gnss_obs_fix_t *out)
@@ -370,5 +391,6 @@ void gnss_obs_reset(void)
     memset(&s_1033, 0, sizeof(s_1033));
     s_1033_valid = false;
     s_1033_us = 0;
+    obs_solution_reset(&s_sol);   /* gnss_obs_get_fix keeps its latest GGA */
     portEXIT_CRITICAL(&s_lock);
 }

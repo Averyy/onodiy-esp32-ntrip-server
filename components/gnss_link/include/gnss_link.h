@@ -141,11 +141,13 @@
  * Nothing may select() on the receiver's UART: VFS select installs its own
  * select notification on the port and would replace the stamp callback.
  *
- * Writers: only the station supervisor and the command layer it drives write
- * to the wire. Other readers of this header (health, web) use the counters
- * only; gnss_link_write(NULL, ...) cannot tell a query from a configuring
- * command, so "only the station configures the receiver" holds by
- * convention here; the command layer enforces its read-only allow-list.
+ * Writers: in the station only the supervisor and the command layer it
+ * drives write to the wire. Other readers of this header (health, web) use
+ * the counters only; gnss_link_write(NULL, ...) cannot tell a query from a
+ * configuring command, so "only the station configures the receiver" holds
+ * by convention here; the command layer enforces its read-only allow-list.
+ * Another product may use the lease-free write for correction ingress (see
+ * "Writing" at gnss_link_write_ex).
  *
  * Uninitialised (safe mode skips gnss_link_init): gnss_link_get_stats(),
  * gnss_link_get_mode() and gnss_link_get_baud() still work and report the
@@ -188,7 +190,8 @@ typedef struct gnss_link_lease *gnss_link_lease_t;
 /**
  * Where framed data goes. Called from the RX task: must not block, allocate
  * or log (copy and return). Any member may be NULL. From a sink only the
- * getters of this header work (gnss_link_get_stats/_mode/_baud); everything
+ * getters of this header work (gnss_link_get_stats/_mode/_baud and
+ * gnss_link_prompt_seen); everything
  * else returns ESP_ERR_INVALID_STATE there, so a sink signals its own task
  * instead of acting. `frame` and `line` are valid only during the call;
  * `line` is not NUL-terminated.
@@ -273,8 +276,10 @@ gnss_link_mode_t gnss_link_get_mode(void);
 /**
  * Take exclusive COMMAND or RAW access.
  *
- * Blocks up to timeout_ms while another lease is held. Only the station
- * supervisor is expected to call this; other components go through it.
+ * Blocks up to timeout_ms while another lease is held. In the station only
+ * the supervisor calls this; other components go through it. Before the
+ * grant, a lease-free write in flight finishes, and bytes still leaving the
+ * UART get up to 500 ms (see "Writing" at gnss_link_write_ex).
  *
  * @param owner short label for logs/status (not copied: use a literal).
  * @return ESP_ERR_TIMEOUT if another lease is held (or a NULL-lease write
@@ -300,13 +305,24 @@ esp_err_t gnss_link_release(gnss_link_lease_t lease);
 
 /**
  * Arm or disarm the framer's loader prompt detector (COMMAND lease
- * required). Armed only while the station looks for the receiver
- * (detection); a hit reaches the on_prompt sink. Releasing the lease disarms
- * it. RAW sessions never use it (see RAW above). ESP_ERR_TIMEOUT if the RX
- * task did not take the request within 1 s (nothing changed). PROVISIONAL,
- * to be confirmed on hardware.
+ * required). The station arms it only while it looks for the receiver
+ * (detection); another product may keep it armed for a whole COMMAND
+ * session. A hit reaches the on_prompt sink and is latched for the rest of
+ * the lease (gnss_link_prompt_seen), also after the detector is disarmed.
+ * Releasing the lease disarms it. RAW sessions never use it (see RAW
+ * above). ESP_ERR_TIMEOUT if the RX task did not take the request within
+ * 1 s (nothing changed). PROVISIONAL, to be confirmed on hardware.
  */
 esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed);
+
+/**
+ * Did the armed loader prompt detector fire under this lease? True from the
+ * hit (before its on_prompt sink is called) until the lease is released;
+ * false for NULL, a stale lease and a lease without a hit. Any task, also a
+ * sink. um98x_ctl reads it: once true, its calls under that lease send
+ * nothing more (um98x_ctl.h, "Loader prompt").
+ */
+bool gnss_link_prompt_seen(gnss_link_lease_t lease);
 
 /**
  * Change the host UART baud rate (COMMAND or RAW lease required; one of
@@ -371,22 +387,80 @@ uint32_t gnss_link_get_baud(void);
  */
 esp_err_t gnss_link_set_hands_off(bool on);
 
+/** What a write did on the wire (gnss_link_write_ex). */
+typedef enum {
+    GNSS_LINK_TX_NONE = 0,   /**< refused before any byte reached the UART driver: nothing was sent */
+    GNSS_LINK_TX_DONE,       /**< every byte left the UART (TX done; for len 0, nothing to send) */
+    GNSS_LINK_TX_UNCERTAIN,  /**< the driver took bytes but TX done was not seen in time (or it took only
+                                  part): some or all of them may reach the receiver */
+} gnss_link_tx_t;
+
 /**
- * Write bytes to the receiver.
+ * Write bytes to the receiver; gnss_link_write_ex() with tx == NULL.
  *
- * lease == NULL is allowed in STREAM mode only, for short read-only queries
- * while RTCM keeps flowing (VERSIONA, MODE). Anything that changes receiver
- * configuration, and the configuration dump CONFIG, goes through the station
- * supervisor with a COMMAND lease. This rule is by convention here (the
- * bytes are not inspected); um98x_ctl_command() enforces it.
- * Writers are serialised internally. Returns once the bytes have left the
- * UART (TX done), so reply timeouts can be measured from the return.
+ * lease == NULL is allowed in STREAM mode only: in the station for short
+ * read-only queries while RTCM keeps flowing (VERSIONA, MODE); another
+ * product may also send complete RTCM correction frames this way (see
+ * "Writing" below). Anything that changes receiver configuration, and the
+ * configuration dump CONFIG, goes through a COMMAND lease. This rule is by
+ * convention here (the bytes are not inspected); um98x_ctl_command()
+ * enforces it for its callers.
  *
- * @return ESP_ERR_TIMEOUT if another writer held the line, or the bytes did
- *         not leave, within timeout_ms; ESP_ERR_INVALID_STATE for a stale
- *         lease, lease == NULL outside STREAM, or hands off.
+ * @return ESP_OK once every byte has left the UART (TX done), so reply
+ *         timeouts can be measured from the return; ESP_ERR_TIMEOUT if
+ *         another writer held the line, or the bytes did not leave, within
+ *         timeout_ms; ESP_ERR_INVALID_STATE for a stale lease, lease == NULL
+ *         outside STREAM, hands off, a closed UART, before gnss_link_init()
+ *         and from a sink; ESP_ERR_INVALID_ARG for data == NULL with len > 0;
+ *         ESP_FAIL if the driver refused the bytes.
  */
 esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms);
+
+/**
+ * Writing, the contract (gnss_link_write and this):
+ *
+ *  - Context: any task except the RX task (a sink gets
+ *    ESP_ERR_INVALID_STATE); never from an interrupt. The call blocks.
+ *  - Serialisation: one writer at a time, on one TX lock that baud changes,
+ *    breaks, restarts and lease grants take too, so the bytes of one call
+ *    are contiguous on the wire: they never interleave with another write
+ *    or a command. Permission (mode, lease, hands off, the UART open) is
+ *    checked once that lock is held, so a mode switch that won the lock
+ *    first refuses a waiting writer before anything is sent.
+ *  - Mode switches: gnss_link_acquire() takes the same lock before it
+ *    grants, so a lease-free write in flight finishes first; it then waits
+ *    up to 500 ms for any bytes still leaving the UART (those of a write
+ *    that returned a timeout) before COMMAND or RAW starts. A lease-free
+ *    write after the grant is refused (ESP_ERR_INVALID_STATE, nothing
+ *    sent); after the release it is allowed again. RAW and COMMAND accept
+ *    only their own lease; a stale one is refused.
+ *  - Completion: ESP_OK (GNSS_LINK_TX_DONE) means the last bit left the
+ *    ESP32's UART. It is not a receiver acknowledgement: whether the
+ *    receiver took or used the bytes is unknown here.
+ *  - Timeout: timeout_ms bounds the wait for the TX lock and for TX done.
+ *    The driver has no TX ring buffer: handing the bytes over blocks until
+ *    all of them are in the 128-byte hardware FIFO, about (len - 128) byte
+ *    times (89 ms for 1029 B at 115200 Bd), and that wait is not cut by
+ *    timeout_ms. A timeout after the hand-over is GNSS_LINK_TX_UNCERTAIN:
+ *    the bytes are in the FIFO and normally still leave.
+ *  - Outcome (*tx, may be NULL): GNSS_LINK_TX_NONE for every refusal before
+ *    the hand-over (ESP_ERR_INVALID_ARG, ESP_ERR_INVALID_STATE, a lock
+ *    timeout, the driver refusing the call); GNSS_LINK_TX_UNCERTAIN for a
+ *    timeout after it, or a partial hand-over (ESP_FAIL; not seen with this
+ *    driver, which takes all or nothing); GNSS_LINK_TX_DONE with ESP_OK.
+ *    There is no retry or replay inside: a caller that cannot tell a whole
+ *    frame from a cut one at the receiver treats UNCERTAIN as possibly
+ *    delivered, never as safe to send again.
+ *  - Correction ingress (lease-free, STREAM): the caller sends complete
+ *    frames, one per call (a frame cut by a refusal never starts on the
+ *    wire), and owns everything above the wire: framing and validating
+ *    input, flushing partial input, session and generation checks, queue
+ *    expiry, and closing its admission before it takes a lease. Writes are
+ *    refused while a lease is held and while hands off is on; nothing is
+ *    queued for later.
+ */
+esp_err_t gnss_link_write_ex(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms,
+                             gnss_link_tx_t *tx);
 
 /**
  * RAW mode: read up to len bytes, waiting up to timeout_ms for the first,

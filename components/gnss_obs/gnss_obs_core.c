@@ -743,3 +743,52 @@ size_t obs_core_live(const obs_core_t *c, uint64_t now_ms, obs_live_sat_t *out, 
     tot->cnr_dbhz = all_n ? (uint8_t)((all_sum + all_n / 2u) / all_n) : 0;
     return written;
 }
+
+/* ---- the solution --------------------------------------------------------- */
+
+void obs_solution_reset(obs_solution_t *s)
+{
+    memset(s, 0, sizeof(*s));
+}
+
+void obs_solution_feed_gga(obs_solution_t *s, const obs_gga_t *g, int64_t t_us)
+{
+    s->gga = *g;
+    s->gga_valid = true;
+    s->gga_us = t_us;
+}
+
+void obs_solution_feed_gst(obs_solution_t *s, const gnss_obs_gst_t *g, int64_t t_us)
+{
+    s->gst = *g;
+    s->gst_valid = true;
+    s->gst_us = t_us;
+}
+
+static uint32_t sol_age(int64_t at_us, int64_t now_us)
+{
+    int64_t ms = (now_us - at_us) / 1000;
+    return ms < 0 ? 0 : (ms >= (int64_t)UINT32_MAX ? UINT32_MAX - 1u : (uint32_t)ms);
+}
+
+bool obs_solution_get(const obs_solution_t *s, int64_t now_us, gnss_obs_solution_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->gga_age_ms = UINT32_MAX;
+    out->gst_age_ms = UINT32_MAX;
+    if (s->gga_valid) {
+        out->gga_valid = true;
+        out->gga = s->gga;
+        out->gga_arrival_us = s->gga_us;
+        out->gga_age_ms = sol_age(s->gga_us, now_us);
+    }
+    if (s->gst_valid) {
+        out->gst_valid = true;
+        out->gst = s->gst;
+        out->gst_arrival_us = s->gst_us;
+        out->gst_age_ms = sol_age(s->gst_us, now_us);
+    }
+    out->same_epoch = out->gga_valid && out->gst_valid && out->gga.utc_valid && out->gst.utc_valid &&
+                      out->gga.utc_ms == out->gst.utc_ms;
+    return out->gga_valid || out->gst_valid;
+}

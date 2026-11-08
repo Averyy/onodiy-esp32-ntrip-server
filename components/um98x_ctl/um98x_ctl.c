@@ -39,7 +39,7 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_wake;    /* a line for the waiting executor */
 static SemaphoreHandle_t s_call;    /* one blocking call at a time */
 static volatile bool s_inited;
-static volatile bool s_prompt;      /* loader prompt seen (station's on_prompt sink) */
+static volatile bool s_prompt;      /* loader prompt reported during this call (um98x_ctl_notify_prompt) */
 
 static um98x_ctl_restart_cb_t s_restart_cb;   /* under s_lock */
 static void *s_restart_ctx;
@@ -128,10 +128,12 @@ static void p_counts(void *ctx, um98x_link_counts_t *out)
     }
 }
 
+/* The loader prompt under this call's lease: the link's latch (it holds for
+ * the whole lease, from the hit on), or a report during the call. */
 static bool p_prompt(void *ctx)
 {
-    (void)ctx;
-    return s_prompt;
+    const port_ctx_t *pc = ctx;
+    return s_prompt || (pc->lease != NULL && gnss_link_prompt_seen(pc->lease));
 }
 
 /* One executor per call, bound to the caller's lease. */
@@ -183,7 +185,7 @@ static esp_err_t call_begin(gnss_link_lease_t lease, const char *cmd)
         return ESP_ERR_TIMEOUT;   /* another session runs */
     }
     (void)xSemaphoreTake(s_wake, 0);   /* drop a stale wake-up */
-    s_prompt = false;                  /* only a hit during this call counts */
+    s_prompt = false;                  /* a hit under the lease before this call: the link's latch */
     return ESP_OK;
 }
 
@@ -338,7 +340,7 @@ static esp_err_t to_esp_err(um98x_res_t res)
     case UM98X_E_NOT_FOUND:
         return ESP_ERR_NOT_FOUND;
     case UM98X_E_PROMPT:
-        return ESP_ERR_INVALID_RESPONSE;
+        return ESP_ERR_NOT_ALLOWED;   /* the loader prompt showed: nothing more sent (detection: see there) */
     case UM98X_E_LINK:
     default:
         return ESP_ERR_INVALID_STATE;
@@ -429,9 +431,11 @@ esp_err_t um98x_ctl_session_begin(gnss_link_lease_t lease)
         return err;
     }
     /* Terminates whatever partial line the receiver may hold. */
-    err = gnss_link_write(lease, "\r\n", 2, WRITE_TIMEOUT_MS);
+    call_t c;
+    call_setup(&c, lease);
+    um98x_res_t res = um98x_exec_session_begin(&c.ex);
     call_end();
-    return err == ESP_OK ? ESP_OK : ESP_ERR_INVALID_STATE;
+    return res == UM98X_OK ? ESP_OK : to_esp_err(res);
 }
 
 esp_err_t um98x_ctl_detect(gnss_link_lease_t lease, bool full_list, um98x_detect_result_t *out)
@@ -474,6 +478,9 @@ esp_err_t um98x_ctl_detect(gnss_link_lease_t lease, bool full_list, um98x_detect
         ESP_LOGW(TAG, "detection stopped: link write or baud switch failed");
     } else {
         ESP_LOGW(TAG, "receiver not found (%s)", d.saw_bytes ? "bytes but nothing valid" : "no bytes at all");
+    }
+    if (res == UM98X_E_PROMPT) {
+        return ESP_ERR_INVALID_RESPONSE;   /* detection's own word for it (out->prompt), as before */
     }
     return to_esp_err(res);
 }
@@ -767,6 +774,9 @@ esp_err_t um98x_ctl_reset_receiver(gnss_link_lease_t lease)
     call_setup(&c, lease);
     um98x_res_t res = um98x_exec_reset(&c.ex);
     call_end();
+    if (res == UM98X_E_PROMPT) {
+        return ESP_ERR_NOT_ALLOWED;   /* at the loader: no RESET sent */
+    }
     if (res == UM98X_E_LINK) {
         return ESP_ERR_INVALID_STATE;
     }

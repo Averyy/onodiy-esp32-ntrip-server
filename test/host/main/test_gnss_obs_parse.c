@@ -439,3 +439,218 @@ TEST_CASE("obs parse: position sentences give the fix quality and the satellites
         TEST_ASSERT_EQUAL_UINT8(0, f.satellites);
     }
 }
+
+/* ---- position and error statistics, field by field ------------------------- */
+
+TEST_CASE("obs parse: an RTK-fixed GGA of a real capture, every field", "[gnss_obs]")
+{
+    /* test/fixtures/nmea/gpsd_trimble_nmea-rtk.log (gpsd, a Trimble receiver):
+     * 8 minute decimals, a negative geoidal separation, the age of the
+     * differential data and the reference station. */
+    static const char l[] =
+        "$GNGGA,133859.80,4134.50180205,N,09345.03586649,W,4,19,0.7,280.827,M,-31.442,M,5.8,0002*6D";
+    obs_gga_t g;
+    TEST_ASSERT_TRUE(obs_gga_parse(l, strlen(l), &g));
+    TEST_ASSERT_EQUAL_STRING("GN", g.talker);
+    TEST_ASSERT_EQUAL_UINT8(4, g.quality);
+    TEST_ASSERT_EQUAL_UINT8(19, g.satellites);
+    TEST_ASSERT_TRUE(g.utc_valid);
+    TEST_ASSERT_EQUAL_UINT32(((13u * 60u + 38u) * 60u + 59u) * 1000u + 800u, g.utc_ms);
+    TEST_ASSERT_TRUE(g.position_valid);
+    TEST_ASSERT_EQUAL_INT64(41575030034LL, g.lat_ndeg);    /* 41 + 34.50180205 / 60 */
+    TEST_ASSERT_EQUAL_INT64(-93750597775LL, g.lon_ndeg);   /* west */
+    TEST_ASSERT_TRUE(g.hdop_valid);
+    TEST_ASSERT_EQUAL_UINT16(70, g.hdop_c);
+    TEST_ASSERT_TRUE(g.altitude_valid);
+    TEST_ASSERT_EQUAL_INT32(2808270, g.altitude_01mm);
+    TEST_ASSERT_TRUE(g.geoid_valid);
+    TEST_ASSERT_EQUAL_INT32(-314420, g.geoid_01mm);
+    TEST_ASSERT_TRUE(g.diff_age_valid);
+    TEST_ASSERT_EQUAL_UINT32(5800, g.diff_age_ms);
+    TEST_ASSERT_TRUE(g.diff_station_valid);
+    TEST_ASSERT_EQUAL_UINT16(2, g.diff_station);
+}
+
+TEST_CASE("obs parse: GGA without a fix, empty fields and absent values are never zeros", "[gnss_obs]")
+{
+    obs_gga_t g;
+    /* No sky (the form the station's own receivers send without an antenna). */
+    static const char none[] = "$GPGGA,000000.00,,,,,0,00,99.99,,,,,,*48";
+    TEST_ASSERT_TRUE(obs_gga_parse(none, strlen(none), &g));
+    TEST_ASSERT_TRUE(g.utc_valid);
+    TEST_ASSERT_EQUAL_UINT32(0, g.utc_ms);
+    TEST_ASSERT_FALSE(g.position_valid);
+    TEST_ASSERT_TRUE(g.hdop_valid);
+    TEST_ASSERT_EQUAL_UINT16(9999, g.hdop_c);
+    TEST_ASSERT_FALSE(g.altitude_valid);
+    TEST_ASSERT_FALSE(g.geoid_valid);
+    TEST_ASSERT_FALSE(g.diff_age_valid);
+    TEST_ASSERT_FALSE(g.diff_station_valid);
+
+    /* SYNTHETIC: quality 0 with a position in the fields: no position, no heights. */
+    static const char stale[] = "$GPGGA,123519,4807.038,N,01131.000,E,0,08,0.9,545.4,M,46.9,M,,";
+    TEST_ASSERT_TRUE(obs_gga_parse(stale, strlen(stale), &g));
+    TEST_ASSERT_FALSE(g.position_valid);
+    TEST_ASSERT_EQUAL_INT64(0, g.lat_ndeg);
+    TEST_ASSERT_FALSE(g.altitude_valid);
+    TEST_ASSERT_FALSE(g.geoid_valid);
+    TEST_ASSERT_TRUE(g.hdop_valid);
+
+    /* SYNTHETIC: every field but quality and satellites empty. */
+    static const char empty[] = "$GNGGA,,,,,,1,05,,,,,,,";
+    TEST_ASSERT_TRUE(obs_gga_parse(empty, strlen(empty), &g));
+    TEST_ASSERT_FALSE(g.utc_valid || g.position_valid || g.hdop_valid || g.altitude_valid || g.geoid_valid ||
+                      g.diff_age_valid || g.diff_station_valid);
+
+    /* SYNTHETIC: an age of 0.0 s is zero, an empty one is absent. */
+    static const char zero[] = "$GNGGA,123519,4807.038,N,01131.000,E,4,12,0.8,100.0,M,10.0,M,0.0,0005";
+    TEST_ASSERT_TRUE(obs_gga_parse(zero, strlen(zero), &g));
+    TEST_ASSERT_TRUE(g.diff_age_valid);
+    TEST_ASSERT_EQUAL_UINT32(0, g.diff_age_ms);
+    TEST_ASSERT_EQUAL_UINT16(5, g.diff_station);
+    static const char absent[] = "$GNGGA,123519,4807.038,N,01131.000,E,4,12,0.8,100.0,M,10.0,M,,0005";
+    TEST_ASSERT_TRUE(obs_gga_parse(absent, strlen(absent), &g));
+    TEST_ASSERT_FALSE(g.diff_age_valid);
+    TEST_ASSERT_TRUE(g.diff_station_valid);
+}
+
+TEST_CASE("obs parse: GGA field rules: UTC fractions, units, ranges, rounding", "[gnss_obs]")
+{
+    obs_gga_t g;
+    char l[128];
+    /* SYNTHETIC lines, one field changed at a time. */
+    static const struct {
+        const char *utc;
+        bool ok;
+        uint32_t ms;
+    } k_utc[] = {
+        { "123519", true, 45319000u },     { "123519.5", true, 45319500u }, { "123519.123456", true, 45319123u },
+        { "123519.", true, 45319000u },    { "235960.00", true, 86400000u }, { "246000", false, 0 },
+        { "123460", false, 0 },            { "235860", false, 0 },
+        { "126000", false, 0 },            { "1235", false, 0 },            { "12a519", false, 0 },
+        { "123519.5x", false, 0 },
+    };
+    for (size_t i = 0; i < sizeof(k_utc) / sizeof(k_utc[0]); i++) {
+        snprintf(l, sizeof(l), "$GNGGA,%s,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,,", k_utc[i].utc);
+        TEST_ASSERT_TRUE_MESSAGE(obs_gga_parse(l, strlen(l), &g), l);
+        TEST_ASSERT_EQUAL_MESSAGE(k_utc[i].ok, g.utc_valid, k_utc[i].utc);
+        if (k_utc[i].ok) {
+            TEST_ASSERT_EQUAL_UINT32_MESSAGE(k_utc[i].ms, g.utc_ms, k_utc[i].utc);
+        }
+    }
+
+    /* Latitude and longitude: minutes below 60, at most 90 / 180 degrees, a hemisphere. */
+    static const struct {
+        const char *lat;
+        const char *lon;
+        bool ok;
+    } k_pos[] = {
+        { "4807.038,N", "01131.000,E", true },  { "9000.000,S", "18000.000,W", true },
+        { "4860.000,N", "01131.000,E", false }, { "9000.001,N", "01131.000,E", false },
+        { "4807.038,N", "18000.001,E", false }, { "4807.038,X", "01131.000,E", false },
+        { "4807.038,", "01131.000,E", false },  { "4807.038,N", "01131.000,N", false },
+        { "-4807.038,N", "01131.000,E", false }, { ",N", "01131.000,E", false },
+        { "4807.038,N", "131.000,E", true },     { "07.038,N", "01131.000,E", false },
+        { "8959.999999995,N", "01131.000,E", true }, { "8959.999999995,N", "17959.999999995,E", true },
+    };
+    for (size_t i = 0; i < sizeof(k_pos) / sizeof(k_pos[0]); i++) {
+        snprintf(l, sizeof(l), "$GNGGA,123519,%s,%s,1,08,0.9,545.4,M,46.9,M,,", k_pos[i].lat, k_pos[i].lon);
+        TEST_ASSERT_TRUE_MESSAGE(obs_gga_parse(l, strlen(l), &g), l);
+        TEST_ASSERT_EQUAL_MESSAGE(k_pos[i].ok, g.position_valid, l);
+    }
+    snprintf(l, sizeof(l), "$GNGGA,123519,9000.000,S,18000.000,W,1,08,0.9,545.4,M,46.9,M,,");
+    TEST_ASSERT_TRUE(obs_gga_parse(l, strlen(l), &g));
+    TEST_ASSERT_EQUAL_INT64(-90000000000LL, g.lat_ndeg);
+    TEST_ASSERT_EQUAL_INT64(-180000000000LL, g.lon_ndeg);
+    /* A rounding carry into the next degree: 12 deg 59.999999995 min is 13 deg. */
+    snprintf(l, sizeof(l), "$GNGGA,123519,1259.999999995,N,01259.9999999,E,1,08,0.9,545.4,M,46.9,M,,");
+    TEST_ASSERT_TRUE(obs_gga_parse(l, strlen(l), &g));
+    TEST_ASSERT_TRUE(g.position_valid);
+    TEST_ASSERT_EQUAL_INT64(13000000000LL, g.lat_ndeg);
+    TEST_ASSERT_EQUAL_INT64(12999999998LL, g.lon_ndeg);   /* 59.9999999 min: below the degree */
+
+    /* Heights only with their unit M; half away from zero at the dropped digit. */
+    static const struct {
+        const char *alt;
+        bool ok;
+        int32_t v;
+    } k_alt[] = {
+        { "545.4,M", true, 5454000 }, { "1.00005,M", true, 10001 }, { "-1.00005,M", true, -10001 },
+        { "1.00004,M", true, 10000 }, { "545.4,F", false, 0 },      { "545.4,", false, 0 },
+        { ",M", false, 0 },           { "5x5.4,M", false, 0 },      { "214749.0,M", false, 0 },
+    };
+    for (size_t i = 0; i < sizeof(k_alt) / sizeof(k_alt[0]); i++) {
+        snprintf(l, sizeof(l), "$GNGGA,123519,4807.038,N,01131.000,E,1,08,0.9,%s,46.9,M,,", k_alt[i].alt);
+        TEST_ASSERT_TRUE_MESSAGE(obs_gga_parse(l, strlen(l), &g), l);
+        TEST_ASSERT_EQUAL_MESSAGE(k_alt[i].ok, g.altitude_valid, l);
+        if (k_alt[i].ok) {
+            TEST_ASSERT_EQUAL_INT32_MESSAGE(k_alt[i].v, g.altitude_01mm, l);
+        }
+        TEST_ASSERT_TRUE(g.geoid_valid);   /* one bad field never costs another */
+    }
+
+    /* A field that cannot be read does not refuse the sentence. */
+    snprintf(l, sizeof(l), "$GNGGA,123519,4807.038,N,01131.000,E,1,08,x.9,545.4,M,46.9,M,1.0,4096");
+    TEST_ASSERT_TRUE(obs_gga_parse(l, strlen(l), &g));
+    TEST_ASSERT_FALSE(g.hdop_valid);
+    TEST_ASSERT_TRUE(g.diff_age_valid);
+    TEST_ASSERT_FALSE(g.diff_station_valid);   /* above 4095 */
+    snprintf(l, sizeof(l), "$GNGGA,123519,4807.038,N,01131.000,E,1,08,0.9,545.4,M,46.9,M,1.0,12.5");
+    TEST_ASSERT_TRUE(obs_gga_parse(l, strlen(l), &g));
+    TEST_ASSERT_FALSE(g.diff_station_valid);
+}
+
+TEST_CASE("obs parse: GST of a real capture with empty ellipse fields; zero and absent apart", "[gnss_obs]")
+{
+    gnss_obs_gst_t g;
+    /* test/fixtures/nmea/gpsd_ublox-zed-f9p-nmea_excerpt.log (gpsd, a u-blox
+     * ZED-F9P): the ellipse fields empty, the RMS field as that firmware sent it. */
+    static const char ub[] = "$GNGST,003956.00,235111,,,,2.3,3.5,4.0*46";
+    TEST_ASSERT_TRUE(obs_gst_parse(ub, strlen(ub), &g));
+    TEST_ASSERT_EQUAL_STRING("GN", g.talker);
+    TEST_ASSERT_TRUE(g.utc_valid);
+    TEST_ASSERT_EQUAL_UINT32((39u * 60u + 56u) * 1000u, g.utc_ms);
+    TEST_ASSERT_TRUE(g.rms_valid);
+    TEST_ASSERT_EQUAL_UINT32(2351110000u, g.rms_01mm);
+    TEST_ASSERT_FALSE(g.major_valid);
+    TEST_ASSERT_FALSE(g.minor_valid);
+    TEST_ASSERT_FALSE(g.orient_valid);
+    TEST_ASSERT_TRUE(g.lat_sd_valid && g.lon_sd_valid && g.alt_sd_valid);
+    TEST_ASSERT_EQUAL_UINT32(23000, g.lat_sd_01mm);
+    TEST_ASSERT_EQUAL_UINT32(35000, g.lon_sd_01mm);
+    TEST_ASSERT_EQUAL_UINT32(40000, g.alt_sd_01mm);
+
+    /* SYNTHETIC: every field, millimetre values, an orientation. */
+    static const char full[] = "$GPGST,172814.0,0.006,0.023,0.020,273.6,0.0234,0.020,0.031";
+    TEST_ASSERT_TRUE(obs_gst_parse(full, strlen(full), &g));
+    TEST_ASSERT_EQUAL_UINT32(60, g.rms_01mm);
+    TEST_ASSERT_EQUAL_UINT32(230, g.major_01mm);
+    TEST_ASSERT_EQUAL_UINT32(200, g.minor_01mm);
+    TEST_ASSERT_TRUE(g.orient_valid);
+    TEST_ASSERT_EQUAL_UINT16(27360, g.orient_cdeg);
+    TEST_ASSERT_EQUAL_UINT32(234, g.lat_sd_01mm);
+    TEST_ASSERT_EQUAL_UINT32(310, g.alt_sd_01mm);
+
+    /* SYNTHETIC: a zero deviation is a zero, an empty one is absent; out of range is absent. */
+    static const char zero[] = "$GNGST,172814.0,0.000,,,361.0,0.000,,0.031";
+    TEST_ASSERT_TRUE(obs_gst_parse(zero, strlen(zero), &g));
+    TEST_ASSERT_TRUE(g.rms_valid);
+    TEST_ASSERT_EQUAL_UINT32(0, g.rms_01mm);
+    TEST_ASSERT_TRUE(g.lat_sd_valid);
+    TEST_ASSERT_EQUAL_UINT32(0, g.lat_sd_01mm);
+    TEST_ASSERT_FALSE(g.lon_sd_valid);
+    TEST_ASSERT_FALSE(g.orient_valid);   /* above 360 degrees */
+    static const char huge[] = "$GNGST,172814.0,429497.0,,,,1,1,1";
+    TEST_ASSERT_TRUE(obs_gst_parse(huge, strlen(huge), &g));
+    TEST_ASSERT_FALSE(g.rms_valid);   /* beyond what 0.1 mm in 32 bits holds */
+
+    /* Not a GST, or one without its 8 fields. */
+    static const char *const bad[] = {
+        "$GNGST,172814.0,0.006,0.023,0.020,273.6,0.023,0.020", "$GNGGA,172814.0,0.006,0.023,0.020,273.6,0.023,0.020,0.031",
+        "$XXGST,172814.0,0.006,0.023,0.020,273.6,0.023,0.020,0.031", "$GNGST",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(obs_gst_parse(bad[i], strlen(bad[i]), &g), bad[i]);
+        TEST_ASSERT_FALSE(g.utc_valid);
+    }
+}

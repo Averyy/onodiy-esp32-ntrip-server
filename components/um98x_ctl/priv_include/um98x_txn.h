@@ -127,6 +127,7 @@ typedef enum {
     UM98X_TXN_REJECTED,    /**< negative reply, final */
     UM98X_TXN_TIMEOUT,     /**< nothing (complete) after the last send */
     UM98X_TXN_LINK_ERROR,  /**< the write failed */
+    UM98X_TXN_PROMPT,      /**< ended by the loader prompt: nothing more was sent (um98x_txn_stop_prompt) */
 } um98x_txn_status_t;
 
 typedef enum {
@@ -179,8 +180,11 @@ void um98x_txn_set_end(um98x_txn_t *t, int64_t end_ms);
 /** What to do now. *wake_ms is set for WAIT (UM98X_NEVER cannot happen: every state has a deadline). */
 um98x_txn_action_t um98x_txn_poll(um98x_txn_t *t, int64_t now_ms, int64_t *wake_ms);
 
-/** End a pending transaction now (status TIMEOUT), e.g. when detection must stop sending. */
+/** End a pending transaction now (status TIMEOUT). */
 void um98x_txn_abort(um98x_txn_t *t, int64_t now_ms);
+
+/** End a pending transaction now because the loader prompt showed (status PROMPT): no further send. */
+void um98x_txn_stop_prompt(um98x_txn_t *t, int64_t now_ms);
 
 /** True if the write starts with an extra CR LF (version kinds). */
 bool um98x_txn_leading_crlf(const um98x_txn_t *t);

@@ -86,7 +86,7 @@ _Static_assert(SOC_UART_FIFO_LEN == GNSS_LINK_HW_FIFO_LEN, "the full-ring mark a
 #define OPEN_TASK_STACK 4096
 #define REQ_PICKUP_MS   1000    /* the RX task looks at the mailbox at least every 20 ms */
 #define TX_LOCK_MS      1000    /* line reconfiguration waits this long for a writer to finish */
-#define TX_DRAIN_MS     500     /* pending TX before a baud switch or break (commands are < 128 B) */
+#define TX_DRAIN_MS     500     /* pending TX before a baud switch, break or lease grant: at most the 128 B FIFO */
 #define FLUSH_LIMIT     ((size_t)CONFIG_GNSS_LINK_RX_BUF_SIZE + 4096u)
 
 _Static_assert(CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2,
@@ -1425,10 +1425,15 @@ esp_err_t gnss_link_acquire(gnss_link_mode_t mode, const char *owner, uint32_t t
     if (xSemaphoreTake(s_slot, total) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
     }
-    /* No NULL-lease write may still be on the wire when STREAM ends. */
+    /* No NULL-lease write may still be on the wire when STREAM ends: one in
+     * flight holds the lock until its TX done, and the bytes of one that
+     * timed out get their time to leave. */
     if (xSemaphoreTake(s_tx, ticks_left(start, total)) != pdTRUE) {
         xSemaphoreGive(s_slot);
         return ESP_ERR_TIMEOUT;
+    }
+    if (driver_ok()) {
+        (void)uart_wait_tx_done(s_port, pdMS_TO_TICKS(TX_DRAIN_MS));
     }
     req_t r = { .op = REQ_ENTER, .mode = mode, .owner = owner };
     esp_err_t err = run_req(&r);
@@ -1481,6 +1486,15 @@ esp_err_t gnss_link_set_prompt_detect(gnss_link_lease_t lease, bool armed)
     }
     req_t r = { .op = REQ_PROMPT, .token = token, .armed = armed };
     return run_req(&r);
+}
+
+bool gnss_link_prompt_seen(gnss_link_lease_t lease)
+{
+    uint32_t token = token_of(lease);
+    taskENTER_CRITICAL(&s_lock);
+    bool hit = gnss_link_core_prompt_hit(&s_core, token);
+    taskEXIT_CRITICAL(&s_lock);
+    return hit;
 }
 
 esp_err_t gnss_link_set_baud(gnss_link_lease_t lease, uint32_t baud)
@@ -1615,39 +1629,80 @@ uint32_t gnss_link_get_baud(void)
     return off ? gnss_link_core_open_baud(ESP_FAIL, 0, CONFIG_GNSS_LINK_DEFAULT_BAUD) : baud;
 }
 
-esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms)
+/* The write's port onto the TX lock and the driver (gnss_link_core_write). */
+typedef struct {
+    TickType_t start;
+    TickType_t total;
+} tx_ctx_t;
+
+static bool tx_lock(void *ctx)
 {
+    const tx_ctx_t *c = ctx;
+    return xSemaphoreTake(s_tx, ticks_left(c->start, c->total)) == pdTRUE;
+}
+
+static void tx_unlock(void *ctx)
+{
+    (void)ctx;
+    xSemaphoreGive(s_tx);
+}
+
+static esp_err_t tx_allowed(void *ctx, uint32_t token)
+{
+    (void)ctx;
+    esp_err_t err = check(GNSS_LINK_OP_WRITE, token);
+    if (err == ESP_OK && !driver_ok()) {
+        err = ESP_ERR_INVALID_STATE;
+    }
+    return err;
+}
+
+static int tx_put(void *ctx, const void *data, size_t len)
+{
+    (void)ctx;
+    /* No TX ring buffer: blocks until every byte is in the hardware FIFO. */
+    int n = uart_write_bytes(s_port, data, len);
+    if (n > 0) {
+        taskENTER_CRITICAL(&s_lock);
+        gnss_link_core_on_tx(&s_core, (size_t)n);
+        taskEXIT_CRITICAL(&s_lock);
+    }
+    return n;
+}
+
+static bool tx_drain(void *ctx)
+{
+    const tx_ctx_t *c = ctx;
+    return uart_wait_tx_done(s_port, ticks_left(c->start, c->total)) == ESP_OK;
+}
+
+esp_err_t gnss_link_write_ex(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms,
+                             gnss_link_tx_t *tx)
+{
+    if (tx != NULL) {
+        *tx = GNSS_LINK_TX_NONE;
+    }
     if (data == NULL && len > 0) {
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_inited || in_rx_task()) {
         return ESP_ERR_INVALID_STATE;
     }
-    uint32_t token = token_of(lease);
-    TickType_t start = xTaskGetTickCount();
-    TickType_t total = ms_to_ticks(timeout_ms);
-    if (xSemaphoreTake(s_tx, total) != pdTRUE) {
-        return ESP_ERR_TIMEOUT;
-    }
-    esp_err_t err = check(GNSS_LINK_OP_WRITE, token);
-    if (err == ESP_OK && !driver_ok()) {
-        err = ESP_ERR_INVALID_STATE;
-    }
-    if (err == ESP_OK && len > 0) {
-        int n = uart_write_bytes(s_port, data, len);
-        if (n > 0) {
-            taskENTER_CRITICAL(&s_lock);
-            gnss_link_core_on_tx(&s_core, (size_t)n);
-            taskEXIT_CRITICAL(&s_lock);
-        }
-        if (n < 0 || (size_t)n != len) {
-            err = ESP_FAIL;
-        } else if (uart_wait_tx_done(s_port, ticks_left(start, total)) != ESP_OK) {
-            err = ESP_ERR_TIMEOUT;
-        }
-    }
-    xSemaphoreGive(s_tx);
-    return err;
+    tx_ctx_t c = { .start = xTaskGetTickCount(), .total = ms_to_ticks(timeout_ms) };
+    const gnss_link_tx_port_t port = {
+        .ctx = &c,
+        .lock = tx_lock,
+        .unlock = tx_unlock,
+        .allowed = tx_allowed,
+        .put = tx_put,
+        .drain = tx_drain,
+    };
+    return gnss_link_core_write(&port, token_of(lease), data, len, tx);
+}
+
+esp_err_t gnss_link_write(gnss_link_lease_t lease, const void *data, size_t len, uint32_t timeout_ms)
+{
+    return gnss_link_write_ex(lease, data, len, timeout_ms, NULL);
 }
 
 #if CONFIG_GNSS_LINK_BENCH_HOOKS
