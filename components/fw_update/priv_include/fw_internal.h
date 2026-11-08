@@ -59,6 +59,8 @@ typedef struct {
     esp_err_t last_err;
     uint8_t progress_pct;
     bool busy;                    /**< a job or a manual upload runs (one at a time) */
+    bool cancellable;             /**< the job's download may still be cancelled: from its queueing to its last byte */
+    bool cancel_req;              /**< the user cancelled it (fw_update_cancel): the download stops before its next read */
     bool have_manifest;           /**< `manifest` was accepted during this boot, or by the last check before it (ota/manifest) */
     bool manifest_saved;          /**< ota/manifest holds `manifest` */
     fw_manifest_t manifest;
@@ -111,6 +113,16 @@ void fw_set_state(fw_update_state_t state, esp_err_t err);
 
 /** Set the download progress (call unlocked). */
 void fw_set_progress(uint8_t pct);
+
+/** The user cancelled the running download (call unlocked). */
+bool fw_cancel_requested(void);
+
+/**
+ * The download's last byte is in (or it ended): from now on a cancel is
+ * refused. Call unlocked, once the transfer is over.
+ * @return true when a cancel came first: the job ends cancelled.
+ */
+bool fw_cancel_close(void);
 
 /**
  * "owner/name" of the repository serving releases, chosen at init:
@@ -197,7 +209,8 @@ fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap,
 
 /**
  * Download `file` from `url` into pkg_store (size and SHA-256 checked there).
- * ESP_ERR_NOT_ALLOWED when a hop is refused (FW_HTTP_UNTRUSTED).
+ * ESP_ERR_NOT_ALLOWED when a hop is refused (FW_HTTP_UNTRUSTED),
+ * FW_UPDATE_ERR_CANCELLED when the user cancelled it (the slot left empty).
  */
 esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *file, const char *label);
 
@@ -209,7 +222,8 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
  * project, then activate it. ESP_ERR_NOT_ALLOWED when a hop is refused
  * (FW_HTTP_UNTRUSTED), ESP_ERR_INVALID_SIZE / ESP_ERR_INVALID_CRC when the bytes
  * are not the manifest's, ESP_ERR_INVALID_VERSION for another release or
- * project.
+ * project, FW_UPDATE_ERR_CANCELLED when the user cancelled it before its last
+ * byte (nothing activated).
  */
 esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, const char *version);
 

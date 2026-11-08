@@ -100,8 +100,12 @@ function lastOutcomeMsg(last, onDismiss) {
     } }, '×'));
 }
 
-/* Uploads the station did not take because they wait for the user's answer: nothing failed. */
-const NOT_INSTALLED = ['same_image', 'rolled_back_ack_required'];
+/* Updates the station did not install because the user stopped the download, or an upload waits for the user's
+ * answer: nothing failed. */
+const NOT_INSTALLED = ['same_image', 'rolled_back_ack_required', 'cancelled'];
+
+/* A receiver package download the user cancelled (an update, or the package again for an interrupted one). */
+const RX_CANCELLED = 'Download cancelled. Nothing was sent to the receiver.';
 
 function resultText(m) {
   if (m.outcome && m.outcome !== 'none') return outcomeText(m);
@@ -426,7 +430,8 @@ const updatesPart = {
         rflow = { state: last.outcome === 'success' ? 'installed' : last.outcome === 'checked' ? 'checked' : 'refused',
           tone: outcomeTone(last.outcome), text: outcomeText(last), upload: !!(rflow && rflow.upload) };
       } else if (lr && lr.job === 'gnss_update' && lr.result !== 'ok' && lr.result !== 'not_available_yet' && resultKey(lr) !== attempt.download) {
-        rflow = { state: 'failed', tone: resultTone(lr), text: 'Receiver package: ' + resultText(lr) + '.' };
+        rflow = lr.result === 'cancelled' ? { state: 'cancelled', tone: 'info', text: RX_CANCELLED } :
+          { state: 'failed', tone: resultTone(lr), text: 'Receiver package: ' + resultText(lr) + '.' };
       } else if (attempt.terminal) {
         rflow = attempt.terminal;   /* a final WS outcome is evidence too, even without a trusted clock */
       } else {
@@ -481,6 +486,29 @@ const updatesPart = {
       }
     }
 
+    /* The user stops the download running (the app image or a receiver package) before its last byte: the station
+     * ends it as "cancelled" (the final progress message and last_result say so). */
+    async function cancelDownload(button, body, out) {
+      const ok = await dialog({ title: 'Cancel the download?', ok: 'Cancel download', cancel: 'Keep downloading', body: body });
+      if (!ok) return;
+      out.hidden = true;
+      try {
+        await busy(button, () => api('POST', '/api/update/cancel'));
+      } catch (e) {
+        showErr(e, out);
+      }
+      load().catch(() => {});
+    }
+
+    function cancelApp(button) {
+      const a = u.app || {};
+      const rb = a.rollback_available && a.rollback_version && a.rollback_version !== a.running;
+      return cancelDownload(button, [
+        h('p', null, 'The station stops downloading and keeps running ' + (a.running || 'this version') + '. Nothing is installed.'),
+        rb ? h('p', { class: 'muted' }, 'Once a download has started, Revert to ' + a.rollback_version +
+          ' is no longer offered: the download writes over it.') : null], appErr);
+    }
+
     /* The user ends the new version's first checks (it works): receiver updates are possible at once. */
     async function finishChecks(button) {
       const ok = await dialog({
@@ -505,6 +533,10 @@ const updatesPart = {
       const a = u.app || {};
       const trial = a.trial || {};
       const lr = u.last_result;
+      /* An app download queued or running (cancellable to its last byte), its checks, an upload, the restart: Cancel while
+       * that is possible, else no button (the station would refuse a second install as busy). */
+      const appCancellable = !!u.cancellable && !u.gnss_job_active;
+      const appBusy = appCancellable || ['downloading_app', 'uploading_app', 'reboot_pending'].includes(u.state);
       let text, b = null;
       if (a.available && a.latest && !(a.reverted_in_stage1 && a.reverted === a.latest)) {
         text = a.latest + ' is available.';
@@ -519,10 +551,12 @@ const updatesPart = {
         text = a.dev_build ? 'Development build: no newer release.' : a.latest ? 'Up to date.' : 'No release information yet.';
       }
       if (trial.stage && trial.stage !== 'none') text += ' ' + trialText(trial);
-      if (!b && firstChecks(trial)) b = btn('Finish checks now', () => finishChecks(b));
+      if (appBusy) b = appCancellable ? btn('Cancel', () => cancelApp(b)) : null;
+      if (!b && !appBusy && firstChecks(trial)) b = btn('Finish checks now', () => finishChecks(b));
       appMain = !!b && b.classList.contains('primary');
       mount(appBox, settingRow('App ' + (a.running || ''), text, b),
-        lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
+        /* The attempt before: not while a new one runs (its progress says what happens). */
+        !appBusy && lr && ['app_update', 'app_upload', 'rollback'].indexOf(lr.job) >= 0 && lr.result !== 'ok' ?
           h('p', { class: 'muted small' }, 'Last attempt: ' + resultText(lr)) : null,
         P.app_update.el, appErr);
       /* The version the station would start: the other app slot's, else (unreadable) the one before this. */
@@ -600,6 +634,9 @@ const updatesPart = {
       const updating = (!!rflow && ['download', 'install', 'check'].includes(rflow.state)) || !!(flash && flash.journal === 'running');
       const upd = pick && !xlRefused && !updating ? btn(g.flash_available ? 'Update receiver' : 'Download and verify', () => updateReceiver(upd, pick), appMain ? '' : 'primary',
         { disabled: held }) : null;
+      /* While the package downloads (queued, or before its last byte): Cancel in the button's place. */
+      const cancelRx = updating && u.cancellable && u.gnss_job_active ? btn('Cancel', () => cancelDownload(cancelRx,
+        h('p', null, 'The station stops downloading the receiver package. Nothing is sent to the receiver.'), gnssErr)) : null;
       const choose = offers.length > 1 && !updating ? selectInput(offers.map(o => [o.build, fwText(o.version, o.build)]), pick.build,
         { 'aria-label': 'Receiver firmware to install', disabled: held }) : null;
       if (choose) {
@@ -619,13 +656,13 @@ const updatesPart = {
           offers.length > 1 ? offers.length + ' newer builds are available.' + (g.flash_available ? '' : ' This build can only download and check them.') :
           g.available ? fwText(g.latest, g.latest_build) + ' is available.' + (g.flash_available ? '' : ' This build can only download and check it.') :
             !g.running ? (((S.status || {}).receiver || {}).rx_maintenance ? NOT_CHECKED + '.' : 'Its firmware shows once the station finds it.') :
-            gnssReleaseText(g, u.app || {}), choose ? h('div', { class: 'form-actions pick' }, choose, upd) : upd),
+            gnssReleaseText(g, u.app || {}), choose ? h('div', { class: 'form-actions pick' }, choose, upd) : upd || cancelRx),
         xlRefused && !updating ? crossLayoutMsg(false) : null,
         blocked && !running && upd ? msg('warn', 'Not possible right now: ' + lbl(L.gnssBlock, g.blocked).toLowerCase() +
           (g.blocked_left_s ? ' (about ' + fmt.dur(g.blocked_left_s) + ' left).' : '.'),
           g.blocked === 'app_trial' && firstChecks((u.app || {}).trial) ?
             [' ', fin = btn('Finish checks now', () => finishChecks(fin), 'small')] : null) : null,
-        rflow && rflow.state !== 'unknown' ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
+        rflow && rflow.state !== 'unknown' && rflow.state !== 'cancelled' ? receiverSteps(rflow.state, rflow.upload, !g.flash_available) : null,
         P.gnss_update.el,
         P.gnss_check.el,
         P.gnss_flash.el,
@@ -1045,6 +1082,9 @@ const updatesPart = {
         renderStaged();
       }
       if (u.state === 'downloading_app') P.app_update.set({ job: 'app_update', phase: 'downloading', pct: u.progress_pct, done: false });
+      /* A cancelled app download says so in its row (Last attempt), also when no final progress message came. */
+      else if (u.state === 'failed' && !u.cancellable && u.last_result && u.last_result.job === 'app_update' &&
+        u.last_result.result === 'cancelled') P.app_update.hide();
       const key = JSON.stringify([u, flash, rflow, flashFresh, flashReadError]);
       if (periodic && (key === shownKey || interacting(updCard) || interacting(sessionCard))) return;
       shownKey = key;
@@ -1073,7 +1113,7 @@ const updatesPart = {
         }
       }
       const w = P[m.job];
-      if (m.job === 'check' && m.done) {
+      if (m.done && (m.job === 'check' || m.result === 'cancelled')) {
         if (w) w.hide();   /* the result shows once, as the row's own message */
       } else if (w) {
         w.set(m);
@@ -1087,7 +1127,8 @@ const updatesPart = {
         } else if (m.result === 'ok') {
           rflow = { state: 'install' };
         } else {
-          rflow = { state: 'failed', tone: 'bad', text: 'The receiver package could not be prepared: ' + resultText(m) + '. Nothing on the receiver changed.' };
+          rflow = m.result === 'cancelled' ? { state: 'cancelled', tone: 'info', text: RX_CANCELLED } :
+            { state: 'failed', tone: 'bad', text: 'The receiver package could not be prepared: ' + resultText(m) + '. Nothing on the receiver changed.' };
           attempt.terminal = rflow;
           attempt.done = true;
         }

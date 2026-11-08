@@ -89,7 +89,7 @@ refused receiver maintenance (`receiver_session`, `live_view_output`).
 | 403 | `forbidden` (Origin or CSRF check failed, public status off), `wrong_password`, `not_on_setup_ap` |
 | 404 | `not_found`, `nothing_staged`, `no_journal`, `no_coredump`, `nothing_pending` |
 | 405 | `method_not_allowed` |
-| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware`, `no_app_check`, `report_not_failed` |
+| 409 | state conflicts: `busy`, `journal_open`, `package_needed` (a retry needs the interrupted update's package uploaded again: PSRAM staging), `not_waiting`, `app_trial`, `app_update`, `safe_mode`, `not_in_safe_mode`, `receiver_not_streaming`, `unsupported_model`, `package_pinned`, `manifest_changed`, `not_offered`, `rolled_back_ack_required`, `reboot_inhibited`, `settings_unavailable`, `no_position_yet`, `caster_policy`, `sha256_mismatch`, `downgrade`, `no_rollback_image`, `admin_already_set`, `admin_not_set`, `receiver_maintenance`, `not_in_maintenance`, `live_view_closed`, `not_no_receiver`, `no_receiver`, `same_image`, `slot_disabled`, `signal_test_running`, `signal_test_idle`, `signal_test_not_deciding`, `first_apply_held`, `autocfg_off`, `identity_unconfirmed`, `config_failed`, `position_not_locked`, `query_running`, `needs_firmware`, `no_app_check`, `report_not_failed`, `not_cancellable` |
 | 411 | `length_required` (no `Content-Length`: an upload without one, or a body sent in chunks on any route that takes a body) |
 | 413 | `too_large` |
 | 415 | `unsupported_media_type` |
@@ -405,6 +405,7 @@ status is on, **adm** = admin session, **claim** = section 3.
 | POST | `/api/update/check` | adm | Check now (never installs) | `fw_update_check` |
 | POST | `/api/update/app` | adm | Install the offered app | `fw_update_install_app` |
 | POST | `/api/update/gnss` | adm | Receiver update to an offered build | `fw_update_install_gnss` |
+| POST | `/api/update/cancel` | adm | Stop the running download (app or receiver package) | `fw_update_cancel` |
 | POST | `/api/update/rollback` | adm | Back to the previous app | `fw_update_rollback` |
 | POST | `/api/update/accept` | adm | End a new app's first checks now | `fw_update_trial_accept` |
 | POST | `/api/upload/app` | adm | Manual app image | `fw_update_upload_app_*` |
@@ -732,9 +733,9 @@ waits 300 ms for the rest and reloads, or warns, once.
 | `job` | Phases |
 |---|---|
 | `check` | `checking` |
-| `app_update` | `downloading` → `rebooting` |
+| `app_update` | `downloading` → `rebooting`; a download the user cancelled ends with `result` `cancelled` |
 | `app_upload` | `receiving` → `verifying` → `rebooting` |
-| `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows (without flashing in the build: `not_available_yet`, and a `gnss_check` job follows) |
+| `gnss_update` | `downloading`; when it ends with `ok` the station took the request and the `gnss_flash` job follows (without flashing in the build: `not_available_yet`, and a `gnss_check` job follows); a download the user cancelled ends with `cancelled` and nothing follows |
 | `gnss_check` | builds without receiver flashing: `checking`, then the final message with `result` `ok` (the package passes every rule; nothing was sent) or `package_rejected` (`failed_rule`, `reason`) |
 | `gnss_upload` | `receiving` → `inspecting` |
 | `gnss_flash` | the flash phases (`um98x_flash_phase_t`): `checking`, `entering`, `transferring`, `committing`, `finishing`, `done`, `failed`, `needs_user`, with `bytes_sent`, `bytes_total`, `retries`, `transfers`, `failure`, `frames_acked`, `frames_total`, `frames_sent`, `entry_attempts`, `journal_state` (`um98x_journal_state_t`, `null` before the journal opens). `finishing` covers leaving the loader, the version check and the profile's re-apply and its check (a window with RTCM, waited for up to 120 s after the re-apply); the journal closes after that. `failed` with `"done": false` is a transfer that failed after the point of no return while the session goes on (back to the loader, the same package again within the caps, or a stop for the user's decision); only the final message ends the job |
@@ -2256,7 +2257,7 @@ until a newer version appears; the server keeps no "later" state.
 
 ```json
 {
-  "state": "idle", "gnss_job_active": false, "progress_pct": 0, "checks_enabled": true,
+  "state": "idle", "gnss_job_active": false, "cancellable": false, "progress_pct": 0, "checks_enabled": true,
   "release_repo": "Averyy/onodiy-esp32-ntrip-server", "signed_manifests": false, "last_check_unix": 1760080000,
   "last_attempt_unix": 1760080000, "last_check_result": "ok", "last_http_status": 200, "next_check_in_s": 86100,
   "app_max_bytes": 4194304, "pkg_max_bytes": 6287360,
@@ -2281,6 +2282,7 @@ until a newer version appears; the server keeps no "later" state.
 |---|---|
 | `state` | `fw_update_state_t` |
 | `gnss_job_active` | a receiver-package download or restaging worker job is queued or running; copied with `state` under the updater lock. True before the worker enters `downloading_gnss`, and until after it hands the package to the station or fails. It does not cover the subsequent receiver session or package check; use `session_running` and `check_running` from `/api/gnss/flash` |
+| `cancellable` | a download is queued or running that `POST /api/update/cancel` stops: an app image (`state` `downloading_app`; while queued, still the state before), or a receiver package (`gnss_job_active` true). From the request that queued it until its last byte is in; `false` during the checks, the activation or the handoff to the station that follow, and once a cancel was asked for |
 | `checks_enabled` | `false` when the build cannot check: no valid release repository, or it requires signed manifests and none of its keys is usable (manual uploads still work) |
 | `release_repo` | `owner/name` whose GitHub releases the station reads (`CONFIG_FW_UPDATE_GITHUB_REPO`; `null` if unset) |
 | `signed_manifests` | `true` when the build has a manifest key and accepts signed manifests only |
@@ -2324,7 +2326,9 @@ pre-flight rule; with `failed_rule`, 1-12 as numbered in `um98x_flash.h`,
 and `cross_layout`), `same_image` (an app upload of the image already
 running, sent without `X-Reinstall`: nothing was written),
 `rolled_back_ack_required` (an app upload of a rolled-back version sent
-without `rolled_back_ack=1`: nothing was written), `failed` (anything else;
+without `rolled_back_ack=1`: nothing was written), `cancelled` (`app_update`,
+`gnss_update`: the user stopped the download, `POST /api/update/cancel`;
+`message` is `ESP_ERR_NOT_FINISHED`), `failed` (anything else;
 `message` has the `esp_err_t`).
 
 ### `POST /api/update/check` (adm)
@@ -2385,6 +2389,29 @@ is not, or no longer, offered, or nothing is), `409
 receiver_maintenance`, `409 app_trial` (`retry_in_s` = time left), `409
 app_update`, `409 journal_open`, `409 receiver_not_streaming`, `409
 unsupported_model`, `409 safe_mode`, `409 package_pinned`, `409 busy`.
+
+### `POST /api/update/cancel` (adm)
+
+Empty body. Stops the download running: the app image of `POST
+/api/update/app`, the receiver package of `POST /api/update/gnss`, or the
+package downloaded again for an interrupted receiver update (`POST
+/api/gnss/flash/retry` on a board that stages it in PSRAM); also while it
+is still queued. Possible while `cancellable` (`GET /api/update`) is true:
+from the request that queued it until its last byte is in. The station
+stops before its next read (a read or connection attempt under way
+finishes first: on a stalled network up to the HTTP timeout, 15 s, each),
+closes the connection and drops what it wrote (the app
+slot's partial image, or the package slot left empty). Nothing is
+installed or sent to the receiver, and no restart follows. The job ends
+with `result` `cancelled` (final progress message and `last_result`),
+`state` `failed`. Once an app download has opened the update slot it has
+written over the image a rollback would start (there is no factory slot),
+so a cancel (or a failure) after that leaves `app.rollback_available`
+`false`. An interrupted
+receiver update stays open, waiting for its package. `202 {"accepted":
+true}` (also when asked again while it stops). Errors: `409
+not_cancellable` (no download runs, or its last byte is in: the checks,
+the activation or the handoff to the station run to their end).
 
 ### `POST /api/update/rollback` (adm)
 
@@ -3053,7 +3080,7 @@ by `kind` (integers; only a `wifi_disconnect` entry's `b` can be `null`):
 | `session` | previous session uptime s (-1 unknown) | raw reset reason |
 | `reboot` | reason | — |
 | `ladder_step` | ladder (0 GNSS, 1 network, 2 caster) | `(outcome << 8) \| code` (outcome 0 started, 1 healthy again, 2 failed or refused, 3 abandoned, 4 not run because of the recovery mode, 5 held; network: `(reason << 16) \| ...`, and code 0 = a pass started with the trigger bits as the reason: 1 protected caster down, 2 associated without an IP, 4 a slot not reaching its caster). GNSS code 9 with outcome 5: the ESP32 restart is held back for now, `b = (hold << 16) \| (5 << 8) \| 9` with the hold bits 1 `setup`, 2 `ap_client`, 4 `admin`, 8 `power_on` (as `health.reboot_hold`). GNSS code 9 with outcome 0: the restart was blocked, `b = (why << 16) \| 9` with `why` 1 the hourly limit of the reboot cap (at most one an hour), 2 its daily limit (at most 3 in 24 hours), 3 a restart lock (another job, such as an update, holds restarts back), 0 not recorded (a record from an older build); codes 6 and 8 with outcome 0 keep their meaning; see `diag.h`, `network.h` |
-| `app_update` | result (`esp_err_t`) | — |
+| `app_update` | result (`esp_err_t`; `ESP_ERR_NOT_FINISHED`, 268, when the user cancelled the download) | — |
 | `app_revert` | trial stage that gave the image up (`fw_update_trial_t`; 0 = the user's rollback) | 1 = the user's rollback; a stage-1 rollback the bootloader did: the attempt (1, 2) |
 | `gnss_flash` | the session's outcome (`station_flash_outcome_t`), written when its journal closes | transfers under the journal |
 | `safe_mode` | episode | — |
@@ -3336,7 +3363,7 @@ boot), and a journal in state `unknown` allows no receiver update action.
   host), one kept free by closing an idle connection, never one with a
   request waiting unread in its socket,
   `max_uri_handlers` 84 (`WEB_MAX_URI_HANDLERS`; a static assertion keeps
-  the API routes, `/ws` and the catch-all within it: 69 routes today, 71
+  the API routes, `/ws` and the catch-all within it: 80 routes today, 82
   handlers) with wildcard matching for `/api/casters/*`,
   `max_req_hdr_len` 2048 (cookies and long browser headers), receive
   timeout 4 s (a client that sends nothing that long is dropped while it

@@ -739,7 +739,17 @@ TEST_CASE("update snapshots expose queued receiver jobs before their visible pha
     TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
     TEST_ASSERT_EQUAL_STRING("idle", at(root, "state")->valuestring);
     TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "gnss_job_active")));
+    TEST_ASSERT_TRUE(cJSON_IsFalse(at(root, "cancellable")));
     cJSON_Delete(root);
+    /* Queued, its download not started: the user may cancel it already. */
+    s_snap.fw.cancellable = true;
+    wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
+    web_build_update(&w, &u);
+    root = cJSON_Parse(s_out);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, s_out);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(at(root, "cancellable")));
+    cJSON_Delete(root);
+    s_snap.fw.cancellable = false;
     s_snap.fw.gnss_job_active = false;
     wj_init(&w, s_out, sizeof(s_out), NULL, NULL);
     web_build_update(&w, &u);
@@ -904,6 +914,11 @@ TEST_CASE("update job results map the esp_err_t", "[web_build]")
     TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("app_update", ESP_ERR_NOT_ALLOWED));
     TEST_ASSERT_EQUAL_STRING("untrusted_host", web_result_code("gnss_update", ESP_ERR_NOT_ALLOWED));
     TEST_ASSERT_EQUAL_STRING("failed", web_result_code("app_upload", ESP_ERR_NOT_ALLOWED));
+    /* The user's Cancel during a download (fw_update_cancel); no other job is cancelled. */
+    TEST_ASSERT_EQUAL_STRING("cancelled", web_result_code("app_update", FW_UPDATE_ERR_CANCELLED));
+    TEST_ASSERT_EQUAL_STRING("cancelled", web_result_code("gnss_update", FW_UPDATE_ERR_CANCELLED));
+    TEST_ASSERT_EQUAL_STRING("failed", web_result_code("check", FW_UPDATE_ERR_CANCELLED));
+    TEST_ASSERT_EQUAL_STRING("failed", web_result_code("app_upload", FW_UPDATE_ERR_CANCELLED));
 }
 
 TEST_CASE("signals: per-band CNR null when unknown, messages merged with the profile", "[web_build]")

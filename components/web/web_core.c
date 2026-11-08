@@ -94,6 +94,8 @@ static const err_row_t s_errors[WEB_ERR_COUNT] = {
     [WEB_ERR_QUERY_RUNNING] = { "query_running", 409, "A receiver query runs: wait for its answer" },
     [WEB_ERR_REPORT_NOT_FAILED] = { "report_not_failed", 409,
                                      "Refresh is available after a failed Onocoy report check" },
+    [WEB_ERR_NOT_CANCELLABLE] = { "not_cancellable", 409,
+                                   "No download runs that can be cancelled (none, or its last byte is in)" },
 };
 
 const char *web_err_code(web_err_t e)

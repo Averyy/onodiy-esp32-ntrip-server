@@ -6,6 +6,19 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Firmware: add LG290P receiver packages 01.06 and 02.02 with SHA-256 checksums;
+  not yet validated on hardware.
+
+- Updates: an app or receiver package download can be cancelled until its last
+  byte is in; the row's button turns into Cancel while it downloads. Nothing is
+  installed or sent to the receiver. Once the download is complete the install
+  runs to its end. New `POST /api/update/cancel`, `cancellable` in
+  `GET /api/update`, result `cancelled`. Pending: tested in QEMU only (app
+  download cancelled while queued, at 10 % and refused at 100 %), not yet
+  tested on hardware; the receiver package cancel not yet tested at all.
+- Updates: while an app download, upload or restart runs, the app row no longer
+  offers Update (the station refused it as busy) or shows the attempt before
+  as "Last attempt". Pending: not yet tested on hardware.
 - Reuse: the receiver components (board, settings, gnss_types, gnss_framing,
   gnss_link, gnss_obs, um98x_ctl) are documented for use by another ESP-IDF
   application in `docs/component-reuse.md`: SDK settings, partition tables,

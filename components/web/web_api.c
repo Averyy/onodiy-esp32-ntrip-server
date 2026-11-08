@@ -2154,6 +2154,16 @@ static esp_err_t h_update_accept(web_req_t *r)
     return accepted(r->req);
 }
 
+/* The user stops the download running (an app image or a receiver package) before its last byte: nothing is
+ * installed or sent to the receiver. The job ends with the result "cancelled". */
+static esp_err_t h_update_cancel(web_req_t *r)
+{
+    if (fw_update_cancel() != ESP_OK) {
+        return web_send_err(r->req, WEB_ERR_NOT_CANCELLABLE);
+    }
+    return accepted(r->req);
+}
+
 static esp_err_t h_update_rollback(web_req_t *r)
 {
     web_bad_t b = { 0 };
@@ -2839,6 +2849,7 @@ const web_route_t web_api_routes[] = {
     ROUTE("/api/update/check", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_check),
     ROUTE("/api/update/app", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_app),
     ROUTE("/api/update/gnss", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_gnss),
+    ROUTE("/api/update/cancel", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_cancel),
     ROUTE("/api/update/rollback", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_rollback),
     ROUTE("/api/update/accept", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_update_accept),
     ROUTE("/api/upload/app", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_UPLOAD, h_upload_app),

@@ -132,6 +132,22 @@
  * failed validation releases it at once, and so does a station that does
  * not take the request.
  *
+ * Cancel (fw_update_cancel): the user may stop a download, an app image or
+ * a receiver package (the first one or the one again for an interrupted
+ * receiver update), from the click that queued it until its last byte is
+ * in. The worker stops before its next read (a read or connection attempt
+ * under way finishes first: on a stalled network up to
+ * CONFIG_FW_UPDATE_HTTP_TIMEOUT_MS each), closes the connection, drops what
+ * it wrote (esp_ota_abort; pkg_store_abort, the package slot left empty) and
+ * ends the job FW_UPDATE_FAILED with FW_UPDATE_ERR_CANCELLED; an app
+ * download also releases the update slot and the reboot inhibit. Nothing
+ * was activated and nothing was sent to the receiver. Once the last byte is
+ * in, the checks, the activation or the handoff to the station run to their
+ * end: a cancel is refused then. An app download erases the previous image's
+ * entry in otadata when it opens the inactive slot (esp_ota_begin with app
+ * rollback on), so after a cancelled or failed app download no rollback is
+ * offered.
+ *
  * Safe mode: the update check, the banner and user-initiated app installs
  * keep working (a fix must be able to arrive); receiver updates are off
  * because the station does not run there (see station.h).
@@ -167,7 +183,7 @@ typedef enum {
     FW_UPDATE_DOWNLOADING_APP,
     FW_UPDATE_DOWNLOADING_GNSS,
     FW_UPDATE_REBOOT_PENDING,   /**< new app activated (or rolled back), reboot scheduled */
-    FW_UPDATE_FAILED,           /**< the last check or install failed: last_err */
+    FW_UPDATE_FAILED,           /**< the last check or install failed, or the user cancelled its download: last_err */
     FW_UPDATE_UPLOADING_APP,    /**< a manual app upload is being written */
 } fw_update_state_t;
 
@@ -201,6 +217,9 @@ typedef enum {
     FW_CHECK_RESULT_BAD_MANIFEST,     /**< an answer, but no manifest this build accepts */
 } fw_update_check_result_t;
 
+/** last_err of a job whose download the user cancelled (fw_update_cancel). */
+#define FW_UPDATE_ERR_CANCELLED ESP_ERR_NOT_FINISHED
+
 /** Versions kept on the rolled-back list (ota/bad_ver). */
 #define FW_UPDATE_ROLLED_BACK_MAX 8
 
@@ -211,6 +230,7 @@ typedef enum {
 typedef struct {
     fw_update_state_t state;
     bool gnss_job_active;         /**< receiver download/restage job queued or running, through its handoff to station */
+    bool cancellable;             /**< a download is queued or running that fw_update_cancel stops (false once cancelled) */
     char running_version[32];
     fw_update_trial_t trial;
     uint32_t trial_left_s;         /**< remaining time of the current trial stage */
@@ -374,6 +394,17 @@ esp_err_t fw_update_restage_gnss(void);
 
 /** The release manifest has the package an open journal waits for (fw_update_restage_gnss would download it). */
 bool fw_update_has_journal_package(void);
+
+/**
+ * The user cancels the download of the job queued or running
+ * (fw_update_install_app, fw_update_install_gnss, fw_update_restage_gnss).
+ * The worker stops before its next read and ends the job with
+ * FW_UPDATE_ERR_CANCELLED (async; see "Cancel" above). Asking again while it
+ * stops is ESP_OK too.
+ * @return ESP_ERR_INVALID_STATE when no download runs, or its last byte is
+ *         in (the checks, activation or handoff run to their end).
+ */
+esp_err_t fw_update_cancel(void);
 
 /**
  * The user says the new app version works: its first checks (confirming the

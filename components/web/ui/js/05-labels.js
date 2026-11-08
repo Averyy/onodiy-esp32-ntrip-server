@@ -222,6 +222,7 @@ const L = {
     signature_failed: 'Signature check failed',
     untrusted_host: 'Refused: GitHub sent the download somewhere this firmware does not trust',
     package_rejected: 'Package refused',
+    cancelled: 'Cancelled',
     failed: 'Failed',
   },
   probe: { none: 'Not checked', ok: 'OK', no_ip: 'No IP', dns_failed: 'DNS failed', no_upstream: 'No internet' },

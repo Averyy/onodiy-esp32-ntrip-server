@@ -3869,6 +3869,36 @@ def test_new_app_first_checks_can_be_finished_early():
     assert "trial" not in texts.lower()
 
 
+def test_an_app_download_can_be_cancelled_until_its_last_byte():
+    """Settings, Updates: while the app downloads (cancellable), the app row's button is Cancel instead of Update; it asks
+    ("Keep downloading" or "Cancel download", and that Revert goes once a download has started), then posts
+    /api/update/cancel. Past the last byte (the image's checks) the row has no button at all: the station would refuse a
+    second install. A cancelled download says so once, as the row's last attempt, without an error code or progress;
+    the next download hides that line while it runs."""
+    app = {**SET_UPDATE["app"], "latest": "v0.3.1", "available": True, "rollback_version": "v0.2.9"}
+    last = {"job": "app_update", "result": "cancelled", "message": "ESP_ERR_NOT_FINISHED"}
+    downloading = {**SET_UPDATE, "app": app, "state": "downloading_app", "progress_pct": 25, "cancellable": True,
+                   "last_result": last}
+    checking = {**downloading, "progress_pct": 100, "cancellable": False}
+    cancelled = {**SET_UPDATE, "app": app, "state": "failed", "cancellable": False, "last_result": last}
+    base = {"fn": "settings_page", "status": st_status(), "wifi": SET_WIFI}
+    down, past, after = run_editor([{**base, "update": downloading, "press": "Cancel"}, {**base, "update": checking},
+                                    {**base, "update": cancelled}])
+    assert ["App v0.3.0", "v0.3.1 is available."] in down["settings"]
+    assert "Cancel" in down["buttons"] and "Update" not in down["buttons"]
+    assert ["App update: Downloading 25%", "bar "] in down["progress"]
+    assert not [line for line in down["lines"] + past["lines"] if line.startswith("Last attempt")]
+    assert down["dialog"]["buttons"] == ["Keep downloading", "Cancel download"]
+    assert down["dialog"]["lines"] == [
+        "The station stops downloading and keeps running v0.3.0. Nothing is installed.",
+        "Once a download has started, Revert to v0.2.9 is no longer offered: the download writes over it."]
+    assert down["posts"] == [["/api/update/cancel", None]]
+    assert "Cancel" not in past["buttons"] and "Update" not in past["buttons"]
+    assert "Update" in after["buttons"] and "Cancel" not in after["buttons"]
+    assert "Last attempt: Cancelled" in after["lines"]
+    assert "ESP_ERR" not in json.dumps(after) and after["progress"] == []
+
+
 def test_open_session_message_is_hidden_while_the_receiver_update_runs():
     """Settings, Updates: while this receiver update runs its own open session blocks a second one; "Not possible right
     now: a receiver update session is open" is not shown then (the steps already say what runs), only when it waits."""
@@ -4077,6 +4107,31 @@ def test_update_poll_reconciles_download_flash_and_completion_without_websocket_
     assert [x[0] for x in r["states"][2]["progress"]] == ["Receiver update: Transferring 70%"]
     assert r["states"][3]["progress"] == []
     assert "Updated: the receiver runs R4.10Build25735." in update_messages(r["states"][3])
+
+
+def test_a_receiver_package_download_can_be_cancelled():
+    """Settings, Updates: while the receiver package downloads, Cancel stands in the receiver row's button place; it asks,
+    posts /api/update/cancel, and the download's end as "cancelled" (the final progress message, or only the next
+    snapshot) shows one sentence: no steps, no progress, no error code, the offer's button back."""
+    downloading = update_snapshot(worker=True, pct=40)
+    downloading["update"]["cancellable"] = True
+    result = {"job": "gnss_update", "result": "cancelled", "message": "ESP_ERR_NOT_FINISHED"}
+    cancelled = update_snapshot(result=result)
+    cancelled["update"]["state"] = "failed"
+    done = {"job": "gnss_update", "phase": "downloading", "done": True, "result": "cancelled",
+            "message": "ESP_ERR_NOT_FINISHED"}
+    by_event, by_poll = run_editor([
+        update_flow(downloading, [{"press": "Cancel"}, {"snapshot": cancelled, "event": done}]),
+        update_flow(downloading, [{"snapshot": cancelled, "reload": 1}])])
+    running = by_event["states"][0]
+    assert ["Cancel", False] in running["actions"] and "Update receiver" not in [a for a, _ in running["actions"]]
+    assert running["steps"] == ["1. Download and verify", "2. Install on the receiver"]
+    assert ["POST", "/api/update/cancel"] in by_event["requests"][1]
+    for ended in (by_event["states"][2], by_poll["states"][1]):
+        assert ["info", "Download cancelled. Nothing was sent to the receiver."] in ended["msgs"]
+        assert ended["steps"] == [] and ended["progress"] == []
+        assert ["Update receiver", False] in ended["actions"] and "Cancel" not in [a for a, _ in ended["actions"]]
+        assert "ESP_ERR" not in json.dumps(ended)
 
 
 def test_queued_update_and_queued_flash_remain_active_before_phase_and_journal():

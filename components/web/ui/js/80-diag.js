@@ -1125,7 +1125,9 @@ function journalDetail(e) {
       return step + (out !== '' ? ': ' + out : '') + (a === 1 && why ? ' (' + (J.netWhy[why] || why) + ')' : '');
     }
     case 'app_update':
-      return a === 0 ? 'Installed; the station restarted into it' : 'Not installed: ' + espErr(a);
+      /* a: esp_err_t; 268 (ESP_ERR_NOT_FINISHED) is FW_UPDATE_ERR_CANCELLED, the user's Cancel during the download. */
+      return a === 0 ? 'Installed; the station restarted into it' : a === 268 ? 'Not installed: you cancelled the download' :
+        'Not installed: ' + espErr(a);
     case 'app_revert':
       /* a: the trial stage that gave the image up, 0 = the user (b = 1 since this build). */
       if (a === 0) return 'Rolled back by you';

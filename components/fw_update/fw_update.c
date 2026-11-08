@@ -98,6 +98,23 @@ void fw_set_progress(uint8_t pct)
     fw_unlock();
 }
 
+bool fw_cancel_requested(void)
+{
+    fw_lock();
+    bool req = g_fw.cancel_req;
+    fw_unlock();
+    return req;
+}
+
+bool fw_cancel_close(void)
+{
+    fw_lock();
+    bool req = g_fw.cancel_req;
+    g_fw.cancellable = false;
+    fw_unlock();
+    return req;
+}
+
 /* Pick the repository once, at init (after load_trust). */
 static void select_repo(void)
 {
@@ -464,12 +481,16 @@ static void run_job(const fw_job_t *job)
         err = fw_install_gnss_restage_job();
         break;
     }
-    if (err != ESP_OK) {
+    if (err == FW_UPDATE_ERR_CANCELLED) {
+        ESP_LOGW(TAG, "update cancelled by the user during its download");
+    } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "update failed: %s", esp_err_to_name(err));
     }
     fw_lock();
     g_fw.busy = false;
     g_fw.job = 0;
+    g_fw.cancellable = false;
+    g_fw.cancel_req = false;
     fw_unlock();
 }
 
@@ -515,6 +536,9 @@ static esp_err_t queue_job_locked(const fw_job_t *job)
     }
     g_fw.busy = true;
     g_fw.job = job->kind;
+    /* Every job but the check is a download first: cancellable from now to its last byte. */
+    g_fw.cancellable = job->kind != FW_JOB_CHECK;
+    g_fw.cancel_req = false;
     return ESP_OK;
 }
 
@@ -766,6 +790,24 @@ esp_err_t fw_update_restage_gnss(void)
     return err;
 }
 
+esp_err_t fw_update_cancel(void)
+{
+    if (g_fw.mtx == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    fw_lock();
+    bool ok = g_fw.busy && g_fw.cancellable;
+    bool again = ok && g_fw.cancel_req;
+    if (ok) {
+        g_fw.cancel_req = true;
+    }
+    fw_unlock();
+    if (ok && !again) {
+        ESP_LOGW(TAG, "download cancelled by the user: it stops before its next read");
+    }
+    return ok ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 esp_err_t fw_update_get_status(fw_update_status_t *out)
 {
     if (out == NULL) {
@@ -794,6 +836,7 @@ esp_err_t fw_update_get_status(fw_update_status_t *out)
     fw_lock();
     out->state = g_fw.state;
     out->gnss_job_active = g_fw.busy && (g_fw.job == FW_JOB_INSTALL_GNSS || g_fw.job == FW_JOB_RESTAGE_GNSS);
+    out->cancellable = g_fw.busy && g_fw.cancellable && !g_fw.cancel_req;
     out->last_err = g_fw.last_err;
     out->progress_pct = g_fw.progress_pct;
     out->last_check_unix = g_fw.last_check_unix;

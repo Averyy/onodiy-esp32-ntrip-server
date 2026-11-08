@@ -2266,6 +2266,11 @@ const char *web_result_code(const char *job, esp_err_t err)
                    : "failed";
     case ESP_ERR_INVALID_SIZE:
         return "size_mismatch";
+    case FW_UPDATE_ERR_CANCELLED:
+        /* fw_update_cancel: the user stopped the download before its last byte. */
+        return (strcmp(job != NULL ? job : "", "app_update") == 0 || strcmp(job != NULL ? job : "", "gnss_update") == 0)
+                   ? "cancelled"
+                   : "failed";
     case ESP_ERR_INVALID_VERSION:
     case WEB_ESP_ERR_OTA_VALIDATE_FAILED:
         return app ? "invalid_image" : (is_gnss_job(job) ? "package_rejected" : "failed");
@@ -2288,6 +2293,7 @@ void web_build_update(wj_t *w, const web_update_snap_t *u)
     wj_obj_open(w, NULL);
     wj_str(w, "state", web_fw_state_name(f->state));
     wj_bool(w, "gnss_job_active", f->gnss_job_active);
+    wj_bool(w, "cancellable", f->cancellable);
     wj_uint(w, "progress_pct", f->progress_pct);
     wj_bool(w, "checks_enabled", u->checks_enabled);
     wj_str_or_null(w, "release_repo", u->release_repo);

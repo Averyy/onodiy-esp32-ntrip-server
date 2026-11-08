@@ -285,12 +285,19 @@ fw_http_result_t fw_http_fetch(const char *url, const char *etag_in, size_t cap,
 }
 
 /* Open an asset download: redirects, status 200 and a Content-Length that
- * fits the manifest. `what` names it in the logs. */
+ * fits the manifest. `what` names it in the logs. A cancel before or during
+ * the connection ends it (FW_UPDATE_ERR_CANCELLED). */
 static esp_err_t open_asset(esp_http_client_handle_t c, const fw_manifest_file_t *file, const char *what)
 {
+    if (fw_cancel_requested()) {
+        return FW_UPDATE_ERR_CANCELLED;   /* cancelled while queued: nothing connects */
+    }
     int status = 0;
     int64_t length = -1;
     fw_http_result_t r = open_follow(c, NULL, &status, &length);
+    if (fw_cancel_requested()) {
+        return FW_UPDATE_ERR_CANCELLED;
+    }
     if (r == FW_HTTP_UNTRUSTED) {
         return ESP_ERR_NOT_ALLOWED;
     }
@@ -340,6 +347,10 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
     }
     uint32_t total = 0;
     while (err == ESP_OK) {
+        if (fw_cancel_requested()) {
+            err = FW_UPDATE_ERR_CANCELLED;
+            break;
+        }
         int n = esp_http_client_read(c, (char *)buf, CHUNK);
         if (n < 0) {
             err = ESP_ERR_TIMEOUT;
@@ -359,6 +370,10 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
     esp_http_client_close(c);
     esp_http_client_cleanup(c);
     free(buf);
+    /* The transfer is over: a cancel is refused from now on, one that came first wins. */
+    if (fw_cancel_close()) {
+        err = FW_UPDATE_ERR_CANCELLED;
+    }
     if (w != NULL) {
         if (err == ESP_OK) {
             pkg_store_info_t info;
@@ -367,7 +382,9 @@ esp_err_t fw_http_download_package(const char *url, const fw_manifest_file_t *fi
             pkg_store_abort(w);
         }
     }
-    if (err != ESP_OK) {
+    if (err == FW_UPDATE_ERR_CANCELLED) {
+        ESP_LOGW(TAG, "receiver package download cancelled: nothing staged");
+    } else if (err != ESP_OK) {
         ESP_LOGE(TAG, "receiver package not staged: %s", esp_err_to_name(err));
     }
     return err;
@@ -430,6 +447,10 @@ esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, 
         err = esp_ota_begin(part, OTA_WITH_SEQUENTIAL_WRITES, &ota);
     }
     while (err == ESP_OK) {
+        if (fw_cancel_requested()) {
+            err = FW_UPDATE_ERR_CANCELLED;
+            break;
+        }
         int n = esp_http_client_read(c, (char *)buf, CHUNK);
         if (n < 0) {
             err = ESP_ERR_TIMEOUT;
@@ -451,6 +472,11 @@ esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, 
     esp_http_client_close(c);
     esp_http_client_cleanup(c);
     free(buf);
+    /* The transfer is over: the checks and the activation below run to their
+     * end, a cancel is refused from now on; one that came first wins. */
+    if (fw_cancel_close()) {
+        err = FW_UPDATE_ERR_CANCELLED;
+    }
     if (err == ESP_OK) {
         /* What arrived: exactly the manifest's size and SHA-256. */
         err = asset_err(fw_asset_check_finish(&check));
@@ -495,6 +521,10 @@ esp_err_t fw_http_download_app(const char *url, const fw_manifest_file_t *file, 
         }
         return err;
     }
-    ESP_LOGE(TAG, "app download failed: %s", esp_err_to_name(err));
+    if (err == FW_UPDATE_ERR_CANCELLED) {
+        ESP_LOGW(TAG, "app download cancelled: nothing installed");
+    } else {
+        ESP_LOGE(TAG, "app download failed: %s", esp_err_to_name(err));
+    }
     return err;
 }
