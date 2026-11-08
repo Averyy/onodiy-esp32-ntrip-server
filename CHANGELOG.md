@@ -6,6 +6,9 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Reuse: move product-neutral web cores into the layer-3 `web_shell`
+  component; station API adapters and server code stay in `web`.
+
 - Firmware: add LG290P receiver packages 01.06 and 02.02 with SHA-256 checksums;
   not yet validated on hardware.
 

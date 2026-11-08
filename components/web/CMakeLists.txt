@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Avery L.
 # SPDX-License-Identifier: MIT
 #
-# web_json.c, web_core.c, web_conn.c, web_pw.c, web_enums.c, web_build.c,
-# web_parse.c and web_assets.c are pure logic (no RTOS or driver calls) and
-# are also compiled into the host test app; web.c, web_api.c, web_auth.c,
-# web_ws.c and web_worker.c are the server around them.
-#
-# mbedtls provides psa/crypto.h (PBKDF2-HMAC-SHA256 for the admin password).
+# Product-specific pure cores are also compiled into the host test app.
+# web_shell holds the reusable JSON, connection, password, asset and helper
+# cores; web.c, web_api.c, web_auth.c, web_ws.c and web_worker.c stay here.
 # um98x_ctl (profile codec, WGS84/ECEF) and um98x_flash (package facts) are
 # lower layers the API needs directly.
 idf_component_register(
@@ -16,18 +13,15 @@ idf_component_register(
         "web_auth.c"
         "web_ws.c"
         "web_worker.c"
-        "web_json.c"
         "web_core.c"
-        "web_conn.c"
-        "web_pw.c"
         "web_enums.c"
         "web_build.c"
         "web_build_diag.c"
         "web_parse.c"
-        "web_assets.c"
     INCLUDE_DIRS "include"
     PRIV_INCLUDE_DIRS "priv_include"
     PRIV_REQUIRES
+        web_shell
         esp_http_server
         esp_app_format
         app_update
@@ -64,7 +58,7 @@ idf_component_register(
 # Browser UI (ui/): tools/ui_bundle.py checks the page, the scripts and the
 # styles (structure, and what the Content-Security-Policy would block), joins
 # ui/js/*.js into app.js without their comments, gzips every asset and
-# writes the asset table (priv_include/web_assets.h) as a C file into the
+# writes the asset table (web_shell/include/web_assets.h) as a C file into the
 # build directory. Any check failing, or the compressed UI growing past
 # UI_GZ_BUDGET bytes, fails the build. Adding a file under ui/js/
 # reconfigures (CONFIGURE_DEPENDS).

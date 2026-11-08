@@ -6,8 +6,8 @@
  * need (pure logic, no IDF includes, host-testable).
  *
  * The build generates the table (components/web/tools/ui_bundle.py, run by
- * this component's CMakeLists.txt): every asset gzip-compressed, in flash,
- * served with Content-Encoding: gzip. The names are fixed (API.md, request
+ * components/web/CMakeLists.txt): every asset gzip-compressed, in flash,
+ * served with Content-Encoding: gzip. The names are fixed (components/web/API.md, request
  * checks):
  *
  *   /index.html   the page; also served for "/"
@@ -15,8 +15,8 @@
  *   /app.css      styles
  *   /favicon.svg  icon
  *
- * The UI routes with the URL fragment (/#/casters), so no other path is a
- * UI asset. Conditional requests use the ETag the server chooses (API.md:
+ * The UI routes with the URL fragment (/#/settings), so no other path is a
+ * UI asset. Conditional requests use the ETag the server chooses (components/web/API.md:
  * the app version and web_ui_digest, quoted); web_etag_match() evaluates
  * If-None-Match against it. web_ui_digest identifies the bundle itself (first
  * 16 hex digits of a SHA-256 over the compressed assets), so a development

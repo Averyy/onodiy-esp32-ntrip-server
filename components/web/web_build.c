@@ -216,63 +216,6 @@ static void str_arr(wj_t *w, const char *key, const char *s, size_t cap)
     wj_strn(w, key, s, strnlen(s, cap));
 }
 
-static void str_arr_or_null(wj_t *w, const char *key, const char *s, size_t cap)
-{
-    size_t n = strnlen(s, cap);
-    if (n == 0) {
-        wj_null(w, key);
-    } else {
-        wj_strn(w, key, s, n);
-    }
-}
-
-static void ladder_triggers(wj_t *w, const char *key, uint32_t bits)
-{
-    wj_arr_open(w, key);
-    for (uint32_t bit = 1; bit != 0 && bit < 0x100; bit <<= 1) {
-        if ((bits & bit) != 0) {
-            const char *name = web_ladder_trigger_name(bit);
-            if (name != NULL) {
-                wj_str(w, NULL, name);
-            }
-        }
-    }
-    wj_arr_close(w);
-}
-
-/* "no_ip", "auth_failed", or NULL (null) when the credentials were not reverted. */
-static const char *cred_revert_name(const network_status_t *n)
-{
-    if (!n->cred_reverted) {
-        return NULL;
-    }
-    switch (n->cred_reverted_why) {
-    case NETWORK_CRED_REVERT_NO_IP:
-        return "no_ip";
-    case NETWORK_CRED_REVERT_AUTH:
-        return "auth_failed";
-    default:
-        return NULL;
-    }
-}
-
-/* Changed Wi-Fi credentials on trial, pending, or reverted (status network section and /api/wifi). */
-static void cred_fields(wj_t *w, const network_status_t *n)
-{
-    wj_bool(w, "cred_trial", n->cred_trial);
-    wj_uint(w, "cred_trial_left_s", n->cred_trial ? n->cred_trial_left_s : 0);
-    wj_bool(w, "cred_pending", n->cred_pending);
-    str_arr_or_null(w, "pending_ssid", (n->cred_pending || n->cred_trial) ? n->pending_ssid : "", sizeof(n->pending_ssid));
-    wj_bool(w, "cred_reverted", n->cred_reverted);
-    wj_str(w, "cred_reverted_why", cred_revert_name(n));
-}
-
-/* Seconds until the AP closes: null while it is down or nothing is scheduled. */
-static void ap_close_in(wj_t *w, const char *key, const network_status_t *n)
-{
-    wj_u32_or_null(w, key, n->setup_ap_active ? n->ap_close_in_s : UINT32_MAX);
-}
-
 /* ---- status ------------------------------------------------------------------------------- */
 
 static const char *const s_section_names[WEB_SEC_COUNT] = {
@@ -409,22 +352,6 @@ static void sec_safe_mode(wj_t *w, const web_status_snap_t *s, bool pub)
     wj_obj_close(w);
 }
 
-static void ap_reasons(wj_t *w, const char *key, bool active, uint32_t reasons)
-{
-    wj_arr_open(w, key);
-    if (active) {
-        for (uint32_t bit = 1; bit != 0 && bit < 0x100; bit <<= 1) {
-            if ((reasons & bit) != 0) {
-                const char *name = web_ap_reason_name(bit);
-                if (name != NULL) {
-                    wj_str(w, NULL, name);
-                }
-            }
-        }
-    }
-    wj_arr_close(w);
-}
-
 static void sec_network(wj_t *w, const web_status_snap_t *s)
 {
     const network_status_t *n = &s->net;
@@ -442,12 +369,12 @@ static void sec_network(wj_t *w, const web_status_snap_t *s)
     wj_u32_or_null(w, "probe_age_s", n->probe_age_s == UINT32_MAX ? UINT32_MAX : n->probe_age_s / 60u * 60u);
     wj_uint(w, "offline_s", n->offline_s);
     wj_bool(w, "ap_active", n->setup_ap_active);
-    ap_reasons(w, "ap_reasons", n->setup_ap_active, n->ap_reasons);
-    ap_close_in(w, "ap_close_in_s", n);
-    str_arr_or_null(w, "mdns_host", n->mdns_host, sizeof(n->mdns_host));
+    web_build_ap_reasons(w, "ap_reasons", n->setup_ap_active, n->ap_reasons);
+    web_build_ap_close_in(w, "ap_close_in_s", n);
+    web_build_str_arr_or_null(w, "mdns_host", n->mdns_host, sizeof(n->mdns_host));
     wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
-    ladder_triggers(w, "ladder_triggers", n->ladder_triggers);
-    cred_fields(w, n);
+    web_build_ladder_triggers(w, "ladder_triggers", n->ladder_triggers);
+    web_build_cred_fields(w, n);
     wj_obj_close(w);
 }
 
@@ -1015,7 +942,7 @@ static void apply_step(wj_t *w, const char *key, bool sent, bool ok, const char 
     wj_obj_open(w, key);
     wj_bool(w, "sent", sent);
     wj_bool(w, "ok", sent && ok);
-    str_arr_or_null(w, "reply", (sent && !ok) ? reply : "", cap);
+    web_build_str_arr_or_null(w, "reply", (sent && !ok) ? reply : "", cap);
     wj_obj_close(w);
 }
 
@@ -1099,7 +1026,7 @@ static void rx_bands(wj_t *w, const station_status_t *st)
         wj_obj_close(w);
     }
     wj_arr_close(w);
-    str_arr_or_null(w, "reply", asked ? st->rx_bands_reply : "", sizeof(st->rx_bands_reply));
+    web_build_str_arr_or_null(w, "reply", asked ? st->rx_bands_reply : "", sizeof(st->rx_bands_reply));
     wj_obj_close(w);
 }
 
@@ -1770,7 +1697,7 @@ void web_build_live_window(wj_t *w, const char *key, const station_live_status_t
     wj_str(w, "sky_why", web_live_why_name(win->sky_why));
     wj_uint(w, "sky_period_s", win->sky_period_s);
     wj_str(w, "last_end", web_live_end_name(win->last_end));
-    str_arr_or_null(w, "sky_reply", win->sky_reply, sizeof(win->sky_reply));
+    web_build_str_arr_or_null(w, "sky_reply", win->sky_reply, sizeof(win->sky_reply));
     wj_obj_close(w);
 }
 
@@ -2098,91 +2025,6 @@ void web_build_local_caster(wj_t *w, const local_caster_cfg_t *cfg, const local_
 }
 
 /* ---- Wi-Fi, system, updates --------------------------------------------------------------------- */
-
-void web_build_wifi(wj_t *w, const web_wifi_snap_t *s)
-{
-    const network_status_t *n = s->net;
-    wj_obj_open(w, NULL);
-    str_arr_or_null(w, "mdns_host", n->mdns_host, sizeof(n->mdns_host));
-    wj_bool(w, "configured", n->sta_configured);
-    wj_bool(w, "credentials_unreadable", n->sta_credentials_unreadable);
-    wj_str_or_null(w, "ssid", n->sta_configured ? n->ssid : NULL);
-    wj_bool(w, "online", n->online);
-    wj_bool(w, "associated", n->associated);
-    wj_str_or_null(w, "ip", n->online ? n->ip : NULL);
-    if (n->associated) {
-        wj_int(w, "rssi", n->rssi);
-        wj_uint(w, "channel", n->channel);
-    } else {
-        wj_null(w, "rssi");
-        wj_null(w, "channel");
-    }
-    char bssid[18] = "";
-    if (n->associated && n->bssid_known) {
-        snprintf(bssid, sizeof(bssid), "%02X:%02X:%02X:%02X:%02X:%02X", n->bssid[0], n->bssid[1], n->bssid[2],
-                 n->bssid[3], n->bssid[4], n->bssid[5]);
-    }
-    wj_str_or_null(w, "bssid", bssid);
-    if (n->associated && n->tx_power_known) {
-        wj_double(w, "tx_power_dbm", (double)n->tx_power_qdbm / 4.0, 2);
-    } else {
-        wj_null(w, "tx_power_dbm");
-    }
-    if (n->ap_steering == NETWORK_AP_STEERING_NEVER) {
-        /* left out: this build never reads it (null would read as "not yet") */
-    } else if (n->associated && n->ap_steering >= 0) {
-        wj_bool(w, "ap_steering", n->ap_steering > 0);
-    } else {
-        wj_null(w, "ap_steering");
-    }
-    wj_bool(w, "time_synced", n->time_synced);
-    wj_str(w, "upstream", web_probe_name(n->probe));
-    wj_u32_or_null(w, "probe_age_s", n->probe_age_s);
-    wj_uint(w, "reconnects", n->reconnects);
-    wj_uint(w, "connect_failures", n->connect_failures);
-    wj_uint(w, "roams", n->roams);
-    wj_uint(w, "offline_s", n->offline_s);
-    wj_uint(w, "retry_in_s", n->retry_in_s);
-    if (n->last_disconnect_reason != 0) {
-        wj_uint(w, "last_disconnect_reason", n->last_disconnect_reason);
-    } else {
-        wj_null(w, "last_disconnect_reason");
-    }
-    wj_bool(w, "fallback_dns", n->fallback_dns);
-    wj_uint(w, "assoc_no_ip_s", n->assoc_no_ip_s);
-    cred_fields(w, n);
-    wj_obj_open(w, "ladder");
-    wj_bool(w, "active", n->ladder_active);
-    wj_uint(w, "rung", n->ladder_rung);
-    wj_str(w, "withheld", web_ladder_why_name(n->ladder_withheld));
-    ladder_triggers(w, "triggers", n->ladder_triggers);
-    wj_uint(w, "actions", n->ladder_actions);
-    wj_obj_close(w);
-    wj_obj_open(w, "ap");
-    wj_bool(w, "active", n->setup_ap_active);
-    wj_str_or_null(w, "ssid", n->ap_ssid);
-    ap_reasons(w, "reasons", n->setup_ap_active, n->ap_reasons);
-    wj_uint(w, "clients", n->ap_clients);
-    wj_uint(w, "recovery_left_s", n->recovery_ap_left_s);
-    ap_close_in(w, "close_in_s", n);
-    wj_bool(w, "password_set", s->ap_password_set);
-    wj_obj_close(w);
-    wj_obj_open(w, "scan");
-    wj_bool(w, "running", s->scan_running);
-    wj_u32_or_null(w, "age_s", s->scan_age_s);
-    wj_arr_open(w, "results");
-    for (size_t i = 0; s->scan != NULL && i < s->scan_count && i < NETWORK_SCAN_MAX; i++) {
-        wj_obj_open(w, NULL);
-        wj_str(w, "ssid", s->scan[i].ssid);
-        wj_int(w, "rssi", s->scan[i].rssi);
-        wj_uint(w, "channel", s->scan[i].channel);
-        wj_bool(w, "secured", s->scan[i].secured);
-        wj_obj_close(w);
-    }
-    wj_arr_close(w);
-    wj_obj_close(w);
-    wj_obj_close(w);
-}
 
 void web_build_system(wj_t *w, const web_system_snap_t *s)
 {
@@ -2623,7 +2465,7 @@ void web_build_health(wj_t *w, const web_health_snap_t *h)
     wj_bool(w, "active", n->ladder_active);
     wj_uint(w, "rung", n->ladder_rung);
     wj_str(w, "withheld", web_ladder_why_name(n->ladder_withheld));
-    ladder_triggers(w, "triggers", n->ladder_triggers);
+    web_build_ladder_triggers(w, "triggers", n->ladder_triggers);
     wj_uint(w, "actions", n->ladder_actions);
     wj_obj_close(w);
     wj_obj_close(w);
@@ -2872,7 +2714,7 @@ static void conn_entry(wj_t *w, const diag_journal_entry_t *e, const ntrip_caste
         size_t slot = a & 0xFFu;
         wj_uint(w, "slot", slot);
         if (cfg != NULL && slot < slots) {
-            str_arr_or_null(w, "slot_name", cfg[slot].name, sizeof(cfg[slot].name));
+            web_build_str_arr_or_null(w, "slot_name", cfg[slot].name, sizeof(cfg[slot].name));
         } else {
             wj_null(w, "slot_name");
         }
@@ -2931,39 +2773,6 @@ void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count,
         conn_entry(w, &e[i], cfg, slots);
     }
     wj_arr_close(w);
-    wj_obj_close(w);
-}
-
-void web_build_tasks(wj_t *w, const diag_task_info_t *t, size_t count)
-{
-    wj_obj_open(w, NULL);
-    wj_arr_open(w, "tasks");
-    for (size_t i = 0; t != NULL && i < count; i++) {
-        wj_obj_open(w, NULL);
-        wj_strn(w, "name", t[i].name, strnlen(t[i].name, sizeof(t[i].name)));
-        wj_uint(w, "priority", t[i].priority);
-        if (t[i].core < 0) {
-            wj_null(w, "core");
-        } else {
-            wj_int(w, "core", t[i].core);
-        }
-        wj_uint(w, "stack_free_min", t[i].stack_free_min);
-        wj_uint(w, "cpu_pct", t[i].cpu_pct);
-        wj_obj_close(w);
-    }
-    wj_arr_close(w);
-    wj_obj_close(w);
-}
-
-void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len,
-                    const char *level_max)
-{
-    wj_obj_open(w, NULL);
-    wj_uint(w, "cursor", cursor);
-    wj_bool(w, "more", more);
-    wj_bool(w, "gap", gap);
-    wj_str(w, "level_max", level_max != NULL ? level_max : "info");
-    wj_strn(w, "text", text != NULL ? text : "", text != NULL ? len : 0);
     wj_obj_close(w);
 }
 

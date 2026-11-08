@@ -35,6 +35,7 @@
 #include "um98x_flash.h"
 #include "web_core.h"
 #include "web_json.h"
+#include "web_shell_build.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -347,18 +348,6 @@ void web_build_local_caster(wj_t *w, const local_caster_cfg_t *cfg, const local_
 /* ---- Wi-Fi, system, updates -------------------------------------------------------------- */
 
 typedef struct {
-    const network_status_t *net;
-    const network_scan_entry_t *scan;
-    size_t scan_count;
-    uint32_t scan_age_s;           /**< UINT32_MAX = never scanned */
-    bool scan_running;
-    bool ap_password_set;
-} web_wifi_snap_t;
-
-/** GET /api/wifi. */
-void web_build_wifi(wj_t *w, const web_wifi_snap_t *s);
-
-typedef struct {
     const char *hostname;          /**< stored ("" = none, the active one is used) */
     const char *hostname_active;
     bool public_status;
@@ -526,13 +515,6 @@ bool web_history_collect(const diag_journal_entry_t *page, size_t count, uint32_
  */
 void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count, const ntrip_caster_cfg_t *cfg,
                            size_t slots, bool complete);
-
-/** GET /api/diag/tasks. */
-void web_build_tasks(wj_t *w, const diag_task_info_t *t, size_t count);
-
-/** GET /api/logs (JSON form); `level_max` the most detailed level this build logs ("info"). */
-void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *text, size_t len,
-                    const char *level_max);
 
 /* ---- errors and WebSocket messages ---------------------------------------------------------- */
 

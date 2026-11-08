@@ -4,7 +4,6 @@
  */
 #include "web_parse.h"
 
-#include <math.h>
 #include <string.h>
 
 #include "station.h"
@@ -35,132 +34,20 @@ static bool invalid_rule(web_bad_t *bad, const char *field, const char *rule)
     return fail(bad, WEB_ERR_INVALID_FIELD, field);
 }
 
-bool web_json_depth_ok(const char *text, size_t len, unsigned max_depth)
-{
-    unsigned depth = 0;
-    bool in_str = false;
-    bool esc = false;
-    for (size_t i = 0; text != NULL && i < len; i++) {
-        char c = text[i];
-        if (in_str) {
-            if (esc) {
-                esc = false;
-            } else if (c == '\\') {
-                esc = true;
-            } else if (c == '"') {
-                in_str = false;
-            }
-            continue;
-        }
-        if (c == '"') {
-            in_str = true;
-        } else if (c == '{' || c == '[') {
-            if (++depth > max_depth) {
-                return false;
-            }
-        } else if ((c == '}' || c == ']') && depth > 0) {
-            depth--;
-        }
-    }
-    return true;
-}
-
 cJSON *web_parse_body(const char *body, size_t len, web_bad_t *bad)
 {
-    bool blank = true;
-    for (size_t i = 0; body != NULL && i < len; i++) {
-        if (body[i] != ' ' && body[i] != '\t' && body[i] != '\r' && body[i] != '\n') {
-            blank = false;
-            break;
-        }
-    }
-    /* cJSON recurses per level: a deep body must not reach the server's stack. */
-    if (!blank && !web_json_depth_ok(body, len, WEB_JSON_MAX_DEPTH)) {
+    cJSON *root = web_parse_object(body, len);
+    if (root == NULL) {
         fail(bad, WEB_ERR_BAD_JSON, NULL);
-        return NULL;
-    }
-    cJSON *root = blank ? cJSON_CreateObject() : cJSON_ParseWithLength(body, len);
-    if (root == NULL || !cJSON_IsObject(root)) {
-        cJSON_Delete(root);
-        fail(bad, WEB_ERR_BAD_JSON, NULL);
-        return NULL;
     }
     return root;
-}
-
-/* ---- typed member access -------------------------------------------------------------- */
-
-typedef enum { M_ABSENT, M_OK, M_BAD } member_t;
-
-static const cJSON *get(const cJSON *obj, const char *key)
-{
-    return cJSON_GetObjectItemCaseSensitive(obj, key);
-}
-
-static member_t get_bool(const cJSON *obj, const char *key, bool *out)
-{
-    const cJSON *it = get(obj, key);
-    if (it == NULL) {
-        return M_ABSENT;
-    }
-    if (!cJSON_IsBool(it)) {
-        return M_BAD;
-    }
-    *out = cJSON_IsTrue(it);
-    return M_OK;
-}
-
-/* An integer within [min, max] (JSON numbers are doubles; fractions refused). */
-static member_t get_int(const cJSON *obj, const char *key, int64_t min, int64_t max, int64_t *out)
-{
-    const cJSON *it = get(obj, key);
-    if (it == NULL) {
-        return M_ABSENT;
-    }
-    if (!cJSON_IsNumber(it)) {
-        return M_BAD;
-    }
-    double v = it->valuedouble;
-    if (!isfinite(v) || v != floor(v) || v < (double)min || v > (double)max) {
-        return M_BAD;
-    }
-    *out = (int64_t)v;
-    return M_OK;
-}
-
-static member_t get_double(const cJSON *obj, const char *key, double min, double max, double *out)
-{
-    const cJSON *it = get(obj, key);
-    if (it == NULL) {
-        return M_ABSENT;
-    }
-    if (!cJSON_IsNumber(it) || !isfinite(it->valuedouble) || it->valuedouble < min || it->valuedouble > max) {
-        return M_BAD;
-    }
-    *out = it->valuedouble;
-    return M_OK;
-}
-
-/* A string of at most max_len bytes without control characters. */
-static member_t get_str(const cJSON *obj, const char *key, size_t max_len, const char **out)
-{
-    const cJSON *it = get(obj, key);
-    if (it == NULL) {
-        return M_ABSENT;
-    }
-    if (!cJSON_IsString(it) || it->valuestring == NULL || strlen(it->valuestring) > max_len ||
-        !web_no_ctrl(it->valuestring)) {
-        return M_BAD;
-    }
-    *out = it->valuestring;
-    return M_OK;
 }
 
 /* ---- session and setup -------------------------------------------------------------------- */
 
 bool web_parse_password(const cJSON *root, const char *key, const char **out, web_bad_t *bad)
 {
-    const cJSON *it = get(root, key);
+    const cJSON *it = web_member(root, key);
     if (it == NULL || !cJSON_IsString(it) || it->valuestring == NULL) {
         return invalid(bad, key);
     }
@@ -174,7 +61,7 @@ bool web_parse_login(const cJSON *root, const char **pw, bool *remember, web_bad
         return false;
     }
     *remember = false;
-    if (get_bool(root, "remember", remember) == M_BAD) {
+    if (web_member_bool(root, "remember", remember) == WEB_MEMBER_BAD) {
         return invalid(bad, "remember");
     }
     return true;
@@ -183,7 +70,7 @@ bool web_parse_login(const cJSON *root, const char **pw, bool *remember, web_bad
 bool web_parse_confirm(const cJSON *root, web_bad_t *bad)
 {
     bool confirm = false;
-    if (get_bool(root, "confirm", &confirm) != M_OK || !confirm) {
+    if (web_member_bool(root, "confirm", &confirm) != WEB_MEMBER_OK || !confirm) {
         return fail(bad, WEB_ERR_CONFIRM_REQUIRED, "confirm");
     }
     return true;
@@ -207,7 +94,7 @@ const char *web_setup_step_name(uint8_t step)
 bool web_parse_setup_step(const cJSON *root, uint8_t *step, web_bad_t *bad)
 {
     const char *name = NULL;
-    if (get_str(root, "step", 16, &name) != M_OK) {
+    if (web_member_str(root, "step", 16, &name) != WEB_MEMBER_OK) {
         return invalid(bad, "step");
     }
     for (uint8_t i = WEB_SETUP_STEP_WIFI; i < sizeof(s_setup_steps) / sizeof(s_setup_steps[0]); i++) {
@@ -241,8 +128,8 @@ static bool parse_rtcm(const cJSON *arr, um98x_base_profile_t *p, web_bad_t *bad
     cJSON_ArrayForEach(e, arr) {
         int64_t msg = 0;
         int64_t period = 0;
-        if (!cJSON_IsObject(e) || get_int(e, "msg", 1001, 4095, &msg) != M_OK ||
-            get_int(e, "period_s", 1, UINT16_MAX, &period) != M_OK) {
+        if (!cJSON_IsObject(e) || web_member_int(e, "msg", 1001, 4095, &msg) != WEB_MEMBER_OK ||
+            web_member_int(e, "period_s", 1, UINT16_MAX, &period) != WEB_MEMBER_OK) {
             return invalid(bad, "rtcm");
         }
         /* 1101-1107 never reach a caster: the station keeps them out of the hub. */
@@ -272,7 +159,7 @@ static bool parse_rtcm(const cJSON *arr, um98x_base_profile_t *p, web_bad_t *bad
  */
 static bool antenna_str(const cJSON *obj, const char *key, char *dst, size_t dst_size, web_bad_t *bad)
 {
-    const cJSON *it = get(obj, key);
+    const cJSON *it = web_member(obj, key);
     if (it == NULL) {
         return true;
     }
@@ -306,64 +193,64 @@ static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, 
     }
     *p = *stored;
     int64_t v = 0;
-    member_t m;
+    web_member_t m;
 
-    if ((m = get_int(obj, "signal_group_master", 0, 255, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "signal_group_master", 0, 255, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "signal_group_master");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->signal_group_master = (uint8_t)v;
     }
-    if ((m = get_int(obj, "signal_group_slave", 0, 255, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "signal_group_slave", 0, 255, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "signal_group_slave");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->signal_group_slave = (uint8_t)v;
     }
     const char *mode = NULL;
-    if ((m = get_str(obj, "base_mode", 16, &mode)) == M_BAD || (m == M_OK && !web_base_mode_parse(mode, &p->base_mode))) {
+    if ((m = web_member_str(obj, "base_mode", 16, &mode)) == WEB_MEMBER_BAD || (m == WEB_MEMBER_OK && !web_base_mode_parse(mode, &p->base_mode))) {
         return invalid(bad, "base_mode");
     }
-    if ((m = get_int(obj, "station_id", 0, UM98X_STATION_ID_MAX, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "station_id", 0, UM98X_STATION_ID_MAX, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "station_id");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->station_id = (uint16_t)v;
     }
-    if ((m = get_int(obj, "com1_baud", 0, UINT32_MAX, &v)) == M_BAD || (m == M_OK && !um98x_baud_supported((uint32_t)v))) {
+    if ((m = web_member_int(obj, "com1_baud", 0, UINT32_MAX, &v)) == WEB_MEMBER_BAD || (m == WEB_MEMBER_OK && !um98x_baud_supported((uint32_t)v))) {
         return invalid(bad, "com1_baud");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->com1_baud = (uint32_t)v;
     }
     bool sat_view = false;
-    if ((m = get_bool(obj, "sat_view_output", &sat_view)) == M_BAD) {
+    if ((m = web_member_bool(obj, "sat_view_output", &sat_view)) == WEB_MEMBER_BAD) {
         return invalid(bad, "sat_view_output");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->sat_view_output = sat_view;
     }
     if (!antenna_str(obj, "antenna_model", p->antenna_model, sizeof(p->antenna_model), bad) ||
         !antenna_str(obj, "antenna_serial", p->antenna_serial, sizeof(p->antenna_serial), bad)) {
         return false;
     }
-    if ((m = get_int(obj, "antenna_setup_id", 0, 255, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "antenna_setup_id", 0, 255, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "antenna_setup_id");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->antenna_setup_id = (uint8_t)v;
     }
-    if ((m = get_int(obj, "signal_group_um980", 1, 255, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "signal_group_um980", 1, 255, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "signal_group_um980");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->signal_group_um980 = (uint8_t)v;
     }
-    if ((m = get_int(obj, "elevation_mask_deg", 0, UM98X_MASK_MAX_DEG, &v)) == M_BAD) {
+    if ((m = web_member_int(obj, "elevation_mask_deg", 0, UM98X_MASK_MAX_DEG, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "elevation_mask_deg");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         p->elevation_mask_deg = (uint8_t)v;
     }
 
     if (p->base_mode == UM98X_BASE_SURVEY_IN) {
         /* survey_in_s matters only here; a stored 0 (a fixed profile) falls back to the default. */
-        if ((m = get_int(obj, "survey_in_s", 0, UINT16_MAX, &v)) == M_BAD) {
+        if ((m = web_member_int(obj, "survey_in_s", 0, UINT16_MAX, &v)) == WEB_MEMBER_BAD) {
             return invalid(bad, "survey_in_s");
         }
-        if (m == M_OK) {
+        if (m == WEB_MEMBER_OK) {
             if (v < 1 || v > UM98X_SURVEY_MAX_S) {
                 return invalid(bad, "survey_in_s");
             }
@@ -372,14 +259,14 @@ static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, 
             p->survey_in_s = UM98X_DEFAULT_SURVEY_S;
         }
     } else {
-        const cJSON *fixed = get(obj, "fixed");
+        const cJSON *fixed = web_member(obj, "fixed");
         if (fixed != NULL && !cJSON_IsNull(fixed)) {
             double lat = 0;
             double lon = 0;
             double h = 0;
-            if (!cJSON_IsObject(fixed) || get_double(fixed, "lat_deg", -90.0, 90.0, &lat) != M_OK ||
-                get_double(fixed, "lon_deg", -180.0, 180.0, &lon) != M_OK ||
-                get_double(fixed, "height_m", UM98X_HEIGHT_MIN_M, UM98X_HEIGHT_MAX_M, &h) != M_OK) {
+            if (!cJSON_IsObject(fixed) || web_member_double(fixed, "lat_deg", -90.0, 90.0, &lat) != WEB_MEMBER_OK ||
+                web_member_double(fixed, "lon_deg", -180.0, 180.0, &lon) != WEB_MEMBER_OK ||
+                web_member_double(fixed, "height_m", UM98X_HEIGHT_MIN_M, UM98X_HEIGHT_MAX_M, &h) != WEB_MEMBER_OK) {
                 return invalid(bad, "fixed");
             }
             p->fixed_lat_deg = lat;
@@ -391,7 +278,7 @@ static bool parse_profile(const cJSON *obj, const um98x_base_profile_t *stored, 
         p->survey_in_s = 0;
     }
 
-    const cJSON *rtcm = get(obj, "rtcm");
+    const cJSON *rtcm = web_member(obj, "rtcm");
     if (rtcm != NULL && !parse_rtcm(rtcm, p, bad)) {
         return false;
     }
@@ -414,12 +301,12 @@ bool web_parse_profile_put(const cJSON *root, const um98x_base_profile_t *stored
 {
     *have_profile = false;
     *have_autocfg = false;
-    member_t m = get_bool(root, "autocfg", autocfg);
-    if (m == M_BAD) {
+    web_member_t m = web_member_bool(root, "autocfg", autocfg);
+    if (m == WEB_MEMBER_BAD) {
         return invalid(bad, "autocfg");
     }
-    *have_autocfg = m == M_OK;
-    const cJSON *obj = get(root, "profile");
+    *have_autocfg = m == WEB_MEMBER_OK;
+    const cJSON *obj = web_member(root, "profile");
     if (obj != NULL) {
         if (!parse_profile(obj, stored, profile, bad)) {
             return false;
@@ -433,11 +320,11 @@ bool web_parse_recovery(const cJSON *root, bool *have, health_recovery_mode_t *m
 {
     *have = false;
     const char *s = NULL;
-    member_t m = get_str(root, "recovery", 16, &s);
-    if (m == M_ABSENT) {
+    web_member_t m = web_member_str(root, "recovery", 16, &s);
+    if (m == WEB_MEMBER_ABSENT) {
         return true;
     }
-    if (m == M_BAD || !web_recovery_mode_parse(s, mode)) {
+    if (m == WEB_MEMBER_BAD || !web_recovery_mode_parse(s, mode)) {
         return invalid(bad, "recovery");
     }
     *have = true;
@@ -447,22 +334,22 @@ bool web_parse_recovery(const cJSON *root, bool *have, health_recovery_mode_t *m
 bool web_parse_maintenance(const cJSON *root, uint32_t *duration_s, web_bad_t *bad)
 {
     int64_t v = 0;
-    member_t m = get_int(root, "duration_s", 0, UINT32_MAX, &v);
-    if (m == M_BAD || (m == M_OK && v != 0 && !web_maint_duration_ok((uint32_t)v))) {
+    web_member_t m = web_member_int(root, "duration_s", 0, UINT32_MAX, &v);
+    if (m == WEB_MEMBER_BAD || (m == WEB_MEMBER_OK && v != 0 && !web_maint_duration_ok((uint32_t)v))) {
         return invalid(bad, "duration_s");
     }
-    *duration_s = m == M_OK ? (uint32_t)v : 0;
+    *duration_s = m == WEB_MEMBER_OK ? (uint32_t)v : 0;
     return true;
 }
 
 bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_bad_t *bad)
 {
     int64_t v = 0;
-    member_t m = get_int(root, "minutes", 0, max_min, &v);
-    if (m == M_BAD) {
+    web_member_t m = web_member_int(root, "minutes", 0, max_min, &v);
+    if (m == WEB_MEMBER_BAD) {
         return invalid(bad, "minutes");
     }
-    *minutes = m == M_OK ? (uint32_t)v : 0;
+    *minutes = m == WEB_MEMBER_OK ? (uint32_t)v : 0;
     return true;
 }
 
@@ -471,7 +358,7 @@ bool web_parse_live(const cJSON *root, uint32_t max_min, uint32_t *minutes, web_
 bool web_parse_query(const cJSON *root, unsigned *query, web_bad_t *bad)
 {
     const char *s = NULL;
-    int q = get_str(root, "command", 16, &s) == M_OK ? um98x_query_find(s) : -1;
+    int q = web_member_str(root, "command", 16, &s) == WEB_MEMBER_OK ? um98x_query_find(s) : -1;
     if (q < 0) {
         return invalid_rule(bad, "command", "one of VERSIONA, CONFIG, MODE, ANT1GROUPA, BASEPOSA, SPPNAVA");
     }
@@ -483,7 +370,7 @@ bool web_parse_query(const cJSON *root, unsigned *query, web_bad_t *bad)
 
 bool web_parse_signal_test(const cJSON *root, uint8_t out[2][2], uint32_t *phase_s, web_bad_t *bad)
 {
-    const cJSON *groups = get(root, "groups");
+    const cJSON *groups = web_member(root, "groups");
     if (!cJSON_IsArray(groups) || cJSON_GetArraySize(groups) != 2) {
         return invalid_rule(bad, "groups", "two signal groups, each {master, slave} of 0-255");
     }
@@ -491,8 +378,8 @@ bool web_parse_signal_test(const cJSON *root, uint8_t out[2][2], uint32_t *phase
         const cJSON *g = cJSON_GetArrayItem(groups, i);
         int64_t m = 0;
         int64_t sl = 0;
-        if (!cJSON_IsObject(g) || get_int(g, "master", 0, 255, &m) != M_OK ||
-            get_int(g, "slave", 0, 255, &sl) != M_OK) {
+        if (!cJSON_IsObject(g) || web_member_int(g, "master", 0, 255, &m) != WEB_MEMBER_OK ||
+            web_member_int(g, "slave", 0, 255, &sl) != WEB_MEMBER_OK) {
             return invalid_rule(bad, "groups", "two signal groups, each {master, slave} of 0-255");
         }
         out[i][0] = (uint8_t)m;
@@ -502,18 +389,18 @@ bool web_parse_signal_test(const cJSON *root, uint8_t out[2][2], uint32_t *phase
         return invalid_rule(bad, "groups", "two different signal groups");
     }
     int64_t v = 0;
-    member_t pm = get_int(root, "phase_s", WEB_SG_TEST_PHASE_MIN_S, WEB_SG_TEST_PHASE_MAX_S, &v);
-    if (pm == M_BAD) {
+    web_member_t pm = web_member_int(root, "phase_s", WEB_SG_TEST_PHASE_MIN_S, WEB_SG_TEST_PHASE_MAX_S, &v);
+    if (pm == WEB_MEMBER_BAD) {
         return invalid_rule(bad, "phase_s", "60 to 7200 seconds");
     }
-    *phase_s = pm == M_OK ? (uint32_t)v : WEB_SG_TEST_PHASE_DEFAULT_S;
+    *phase_s = pm == WEB_MEMBER_OK ? (uint32_t)v : WEB_SG_TEST_PHASE_DEFAULT_S;
     return true;
 }
 
 bool web_parse_signal_test_keep(const cJSON *root, unsigned *group, web_bad_t *bad)
 {
     int64_t v = 0;
-    if (get_int(root, "group", 0, 1, &v) != M_OK) {
+    if (web_member_int(root, "group", 0, 1, &v) != WEB_MEMBER_OK) {
         return invalid_rule(bad, "group", "0 (the first group) or 1 (the second)");
     }
     *group = (unsigned)v;
@@ -573,11 +460,11 @@ static bool str_field_rule(const cJSON *root, const char *key, char *dst, size_t
                            const char *allowed_extra, const char *rule, web_bad_t *bad)
 {
     const char *s = NULL;
-    member_t m = get_str(root, key, max_len, &s);
-    if (m == M_BAD || (m == M_OK && allowed_extra != NULL && !web_chars_ok(s, allowed_extra))) {
+    web_member_t m = web_member_str(root, key, max_len, &s);
+    if (m == WEB_MEMBER_BAD || (m == WEB_MEMBER_OK && allowed_extra != NULL && !web_chars_ok(s, allowed_extra))) {
         return invalid_rule(bad, key, rule);
     }
-    if (m == M_OK) {
+    if (m == WEB_MEMBER_OK) {
         strlcpy(dst, s, dst_size);
     }
     return true;
@@ -616,99 +503,99 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     ntrip_caster_cfg_t c = *stored;
     memset(c.password, 0, sizeof(c.password));
     c.clear_password = false;
-    member_t m;
+    web_member_t m;
     bool b = false;
     int64_t v = 0;
 
-    if ((m = get_bool(root, "enabled", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "enabled", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "enabled");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.enabled = b;
     }
     if (!str_field_rule(root, "name", c.name, sizeof(c.name), sizeof(c.name) - 1, NULL, RULE_NAME, bad)) {
         return false;
     }
     const char *host = NULL;
-    if ((m = get_str(root, "host", sizeof(c.host) - 1, &host)) == M_BAD ||
-        (m == M_OK && host[0] != '\0' && !web_host_name_ok(host))) {
+    if ((m = web_member_str(root, "host", sizeof(c.host) - 1, &host)) == WEB_MEMBER_BAD ||
+        (m == WEB_MEMBER_OK && host[0] != '\0' && !web_host_name_ok(host))) {
         return invalid_rule(bad, "host", RULE_HOST);
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         strlcpy(c.host, host, sizeof(c.host));
     }
-    if ((m = get_int(root, "port", 1, 65535, &v)) == M_BAD) {
+    if ((m = web_member_int(root, "port", 1, 65535, &v)) == WEB_MEMBER_BAD) {
         return invalid_rule(bad, "port", RULE_PORT);
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.port = (uint16_t)v;
     }
-    if ((m = get_int(root, "ntrip_version", 1, 2, &v)) == M_BAD) {
+    if ((m = web_member_int(root, "ntrip_version", 1, 2, &v)) == WEB_MEMBER_BAD) {
         return invalid(bad, "ntrip_version");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.proto = v == 2 ? NTRIP_PROTO_V2 : NTRIP_PROTO_V1;
     }
-    if ((m = get_bool(root, "tls", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "tls", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "tls");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.tls = b;
     }
     const char *trust = NULL;
-    if ((m = get_str(root, "trust", 16, &trust)) == M_BAD || (m == M_OK && !web_ntrip_trust_parse(trust, &c.trust_mode))) {
+    if ((m = web_member_str(root, "trust", 16, &trust)) == WEB_MEMBER_BAD || (m == WEB_MEMBER_OK && !web_ntrip_trust_parse(trust, &c.trust_mode))) {
         return invalid(bad, "trust");
     }
     /* The mountpoint. A new RTK2go name that breaks the generic rule is told
      * RTK2go's own rule: the generic one allows "." and 47 characters, which
      * RTK2go refuses, so its words would send the user to a second refusal. */
     const char *mount = NULL;
-    if ((m = get_str(root, "mountpoint", sizeof(c.mountpoint) - 1, &mount)) == M_BAD ||
-        (m == M_OK && !web_chars_ok(mount, "._-"))) {
-        const cJSON *jm = get(root, "mountpoint");
+    if ((m = web_member_str(root, "mountpoint", sizeof(c.mountpoint) - 1, &mount)) == WEB_MEMBER_BAD ||
+        (m == WEB_MEMBER_OK && !web_chars_ok(mount, "._-"))) {
+        const cJSON *jm = web_member(root, "mountpoint");
         ntrip_rtk2go_mount_t rk = NTRIP_RTK2GO_OK;
         if (cJSON_IsString(jm) && jm->valuestring != NULL) {
             rk = ntrip_server_rtk2go_check(stored->host, stored->mountpoint, c.host, jm->valuestring);
         }
         return invalid_rule(bad, "mountpoint", rk != NTRIP_RTK2GO_OK ? rtk2go_rule(rk) : RULE_MOUNT);
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         strlcpy(c.mountpoint, mount, sizeof(c.mountpoint));
     }
     const char *user = NULL;
-    if ((m = get_str(root, "username", sizeof(c.username) - 1, &user)) == M_BAD ||
-        (m == M_OK && strchr(user, ':') != NULL)) {
+    if ((m = web_member_str(root, "username", sizeof(c.username) - 1, &user)) == WEB_MEMBER_BAD ||
+        (m == WEB_MEMBER_OK && strchr(user, ':') != NULL)) {
         return invalid_rule(bad, "username", RULE_USER);
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         strlcpy(c.username, user, sizeof(c.username));
     }
     const char *pw = NULL;
-    if ((m = get_str(root, "password", sizeof(c.password) - 1, &pw)) == M_BAD) {
+    if ((m = web_member_str(root, "password", sizeof(c.password) - 1, &pw)) == WEB_MEMBER_BAD) {
         return invalid_rule(bad, "password", RULE_PASSWORD);
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         strlcpy(c.password, pw, sizeof(c.password));
     }
-    if ((m = get_bool(root, "clear_password", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "clear_password", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "clear_password");
-    } else if (m == M_OK && b) {
+    } else if (m == WEB_MEMBER_OK && b) {
         c.clear_password = true;
         memset(c.password, 0, sizeof(c.password));
     }
     if (!str_field_rule(root, "label", c.label, sizeof(c.label), sizeof(c.label) - 1, "", RULE_LABEL, bad)) {
         return false;
     }
-    if ((m = get_bool(root, "v2_raw_body", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "v2_raw_body", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "v2_raw_body");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.v2_raw_body = b;
     }
-    if ((m = get_bool(root, "dup_stream_ack", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "dup_stream_ack", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "dup_stream_ack");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.dup_stream_ack = b;
     }
-    if ((m = get_bool(root, "onocoy_stats", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "onocoy_stats", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "onocoy_stats");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         c.onocoy_stats = b;
     }
-    if ((m = get_bool(root, "test_onocoy", &b)) == M_BAD) {
+    if ((m = web_member_bool(root, "test_onocoy", &b)) == WEB_MEMBER_BAD) {
         return invalid(bad, "test_onocoy");
-    } else if (m == M_OK) {
+    } else if (m == WEB_MEMBER_OK) {
         if (b && !ntrip_test_onocoy_allowed()) {
             return invalid_rule(bad, "test_onocoy", RULE_TEST_ONO);
         }
@@ -716,15 +603,15 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     }
     const char *backoff_s = NULL;
     ntrip_backoff_profile_t backoff = c.backoff_profile;
-    if ((m = get_str(root, "backoff_profile", 16, &backoff_s)) == M_BAD ||
-        (m == M_OK && !web_ntrip_backoff_parse(backoff_s, &backoff))) {
+    if ((m = web_member_str(root, "backoff_profile", 16, &backoff_s)) == WEB_MEMBER_BAD ||
+        (m == WEB_MEMBER_OK && !web_ntrip_backoff_parse(backoff_s, &backoff))) {
         return invalid(bad, "backoff_profile");
     }
 
     /* Server-set fields: protected_slot and the backoff profile follow the
      * caster component's host rules (a requested profile they refuse is
      * named here). */
-    if (!ntrip_server_apply_host_rules(&c, m == M_OK ? &backoff : NULL)) {
+    if (!ntrip_server_apply_host_rules(&c, m == WEB_MEMBER_OK ? &backoff : NULL)) {
         return invalid(bad, "backoff_profile");
     }
     c.password_set = false;
@@ -778,52 +665,9 @@ bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, n
     return true;
 }
 
-bool web_pem_certs_only(const char *pem)
-{
-    static const char begin[] = "-----BEGIN CERTIFICATE-----";
-    static const char end[] = "-----END CERTIFICATE-----";
-    if (pem == NULL) {
-        return false;
-    }
-    size_t len = strlen(pem);
-    if (len == 0 || len > WEB_CA_PEM_MAX) {
-        return false;
-    }
-    size_t certs = 0;
-    const char *p = pem;
-    for (;;) {
-        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
-            p++;
-        }
-        if (*p == '\0') {
-            break;
-        }
-        if (strncmp(p, begin, sizeof(begin) - 1) != 0) {
-            return false;
-        }
-        p += sizeof(begin) - 1;
-        const char *e = strstr(p, end);
-        if (e == NULL) {
-            return false;
-        }
-        /* The body is base64 and line breaks only. */
-        for (const char *q = p; q < e; q++) {
-            char ch = *q;
-            bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '+' ||
-                      ch == '/' || ch == '=' || ch == '\r' || ch == '\n';
-            if (!ok) {
-                return false;
-            }
-        }
-        p = e + sizeof(end) - 1;
-        certs++;
-    }
-    return certs > 0;
-}
-
 bool web_parse_ca_pem(const cJSON *root, const char **pem, web_bad_t *bad)
 {
-    const cJSON *it = get(root, "pem");
+    const cJSON *it = web_member(root, "pem");
     if (it == NULL || !cJSON_IsString(it) || !web_pem_certs_only(it->valuestring)) {
         return invalid(bad, "pem");
     }
@@ -839,11 +683,11 @@ bool web_parse_local_caster_put(const cJSON *root, const local_caster_cfg_t *sto
     *out = *stored;
     memset(out->password, 0, sizeof(out->password));
     bool b = false;
-    member_t m = get_bool(root, "enabled", &b);
-    if (m == M_BAD) {
+    web_member_t m = web_member_bool(root, "enabled", &b);
+    if (m == WEB_MEMBER_BAD) {
         return invalid(bad, "enabled");
     }
-    if (m == M_OK) {
+    if (m == WEB_MEMBER_OK) {
         out->enabled = b;
     }
     /* No rule here: the handler asks local_caster_check_config() for the field's words. */
@@ -864,7 +708,7 @@ bool web_parse_local_caster_put(const cJSON *root, const local_caster_cfg_t *sto
 bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
 {
     memset(out, 0, sizeof(*out));
-    const cJSON *it = get(root, "ssid");
+    const cJSON *it = web_member(root, "ssid");
     if (it != NULL) {
         if (!cJSON_IsString(it) || !web_ssid_valid(it->valuestring)) {
             return invalid(bad, "ssid");
@@ -872,7 +716,7 @@ bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
         out->have_ssid = true;
         out->ssid = it->valuestring;
     }
-    it = get(root, "password");
+    it = web_member(root, "password");
     if (it != NULL) {
         if (!cJSON_IsString(it) || !web_wifi_password_valid(it->valuestring)) {
             return invalid(bad, "password");
@@ -880,7 +724,7 @@ bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
         out->have_password = true;
         out->password = it->valuestring;
     }
-    it = get(root, "ap_password");
+    it = web_member(root, "ap_password");
     if (it != NULL) {
         if (!cJSON_IsString(it) || (it->valuestring[0] != '\0' && !web_ap_password_valid(it->valuestring))) {
             return invalid(bad, "ap_password");
@@ -891,7 +735,7 @@ bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
     if (out->have_password && !out->have_ssid) {
         return invalid(bad, "ssid");   /* a password belongs to an SSID */
     }
-    if (get_bool(root, "no_trial", &out->no_trial) == M_BAD) {
+    if (web_member_bool(root, "no_trial", &out->no_trial) == WEB_MEMBER_BAD) {
         return invalid(bad, "no_trial");
     }
     return true;
@@ -900,7 +744,7 @@ bool web_parse_wifi_put(const cJSON *root, web_wifi_put_t *out, web_bad_t *bad)
 bool web_parse_system_put(const cJSON *root, web_system_put_t *out, web_bad_t *bad)
 {
     memset(out, 0, sizeof(*out));
-    const cJSON *it = get(root, "hostname");
+    const cJSON *it = web_member(root, "hostname");
     if (it != NULL) {
         if (!cJSON_IsString(it) || !web_hostname_valid(it->valuestring)) {
             return invalid(bad, "hostname");
@@ -908,12 +752,12 @@ bool web_parse_system_put(const cJSON *root, web_system_put_t *out, web_bad_t *b
         out->have_hostname = true;
         out->hostname = it->valuestring;
     }
-    member_t m = get_bool(root, "public_status", &out->public_status);
-    if (m == M_BAD) {
+    web_member_t m = web_member_bool(root, "public_status", &out->public_status);
+    if (m == WEB_MEMBER_BAD) {
         return invalid(bad, "public_status");
     }
-    out->have_public_status = m == M_OK;
-    const cJSON *w = get(root, "wiring");
+    out->have_public_status = m == WEB_MEMBER_OK;
+    const cJSON *w = web_member(root, "wiring");
     if (w != NULL) {
         out->have_wiring = true;
         if (cJSON_IsNull(w)) {
@@ -926,13 +770,13 @@ bool web_parse_system_put(const cJSON *root, web_system_put_t *out, web_bad_t *b
         int64_t rx;
         int64_t tx;
         int64_t port;
-        if (get_int(w, "rx_gpio", 0, 48, &rx) != M_OK) {
+        if (web_member_int(w, "rx_gpio", 0, 48, &rx) != WEB_MEMBER_OK) {
             return invalid_rule(bad, "wiring.rx_gpio", "a GPIO number, 0-48");
         }
-        if (get_int(w, "tx_gpio", 0, 48, &tx) != M_OK) {
+        if (web_member_int(w, "tx_gpio", 0, 48, &tx) != WEB_MEMBER_OK) {
             return invalid_rule(bad, "wiring.tx_gpio", "a GPIO number, 0-48");
         }
-        if (get_int(w, "port", 1, 3, &port) != M_OK) {
+        if (web_member_int(w, "port", 1, 3, &port) != WEB_MEMBER_OK) {
             return invalid_rule(bad, "wiring.port", "1, 2 or 3 (COM1 to COM3)");
         }
         out->rx_gpio = (int8_t)rx;
@@ -945,11 +789,11 @@ bool web_parse_system_put(const cJSON *root, web_system_put_t *out, web_bad_t *b
 bool web_parse_log_level(const cJSON *root, const char **tag, esp_log_level_t *level, web_bad_t *bad)
 {
     const char *t = NULL;
-    if (get_str(root, "tag", 15, &t) != M_OK || t[0] == '\0') {
+    if (web_member_str(root, "tag", 15, &t) != WEB_MEMBER_OK || t[0] == '\0') {
         return invalid(bad, "tag");
     }
     const char *l = NULL;
-    if (get_str(root, "level", 16, &l) != M_OK || !web_log_level_parse(l, level)) {
+    if (web_member_str(root, "level", 16, &l) != WEB_MEMBER_OK || !web_log_level_parse(l, level)) {
         return invalid(bad, "level");
     }
     *tag = t;
@@ -965,11 +809,11 @@ bool web_parse_admin_password(const cJSON *root, const char **current, const cha
 
 bool web_parse_update_app(const cJSON *root, const char **version, bool *rolled_back_ack, web_bad_t *bad)
 {
-    if (get_str(root, "version", 31, version) != M_OK || (*version)[0] == '\0') {
+    if (web_member_str(root, "version", 31, version) != WEB_MEMBER_OK || (*version)[0] == '\0') {
         return invalid(bad, "version");
     }
     *rolled_back_ack = false;
-    if (get_bool(root, "rolled_back_ack", rolled_back_ack) == M_BAD) {
+    if (web_member_bool(root, "rolled_back_ack", rolled_back_ack) == WEB_MEMBER_BAD) {
         return invalid(bad, "rolled_back_ack");
     }
     return true;
@@ -978,12 +822,12 @@ bool web_parse_update_app(const cJSON *root, const char **version, bool *rolled_
 bool web_parse_update_gnss(const cJSON *root, uint32_t *build, bool *cross_layout_ack, web_bad_t *bad)
 {
     int64_t v = 0;
-    if (get_int(root, "build", 1, UINT32_MAX, &v) != M_OK) {
+    if (web_member_int(root, "build", 1, UINT32_MAX, &v) != WEB_MEMBER_OK) {
         return invalid(bad, "build");
     }
     *build = (uint32_t)v;
     *cross_layout_ack = false;
-    if (get_bool(root, "cross_layout_ack", cross_layout_ack) == M_BAD) {
+    if (web_member_bool(root, "cross_layout_ack", cross_layout_ack) == WEB_MEMBER_BAD) {
         return invalid(bad, "cross_layout_ack");
     }
     return true;
@@ -993,66 +837,19 @@ bool web_parse_upload_confirm(const cJSON *root, uint8_t sha256[32], const char 
                               uint32_t *expected_build, bool *cross_layout_ack, web_bad_t *bad)
 {
     const char *hex = NULL;
-    if (get_str(root, "sha256", 64, &hex) != M_OK || !web_parse_sha256_hex(hex, sha256)) {
+    if (web_member_str(root, "sha256", 64, &hex) != WEB_MEMBER_OK || !web_parse_sha256_hex(hex, sha256)) {
         return invalid(bad, "sha256");
     }
     const char *fw = NULL;
     uint32_t build = 0;
-    if (get_str(root, "expected_fw", 47, &fw) != M_OK || (build = web_expected_build(fw)) == 0) {
+    if (web_member_str(root, "expected_fw", 47, &fw) != WEB_MEMBER_OK || (build = web_expected_build(fw)) == 0) {
         return invalid(bad, "expected_fw");
     }
     *expected_fw = fw;
     *expected_build = build;
     *cross_layout_ack = false;
-    if (get_bool(root, "cross_layout_ack", cross_layout_ack) == M_BAD) {
+    if (web_member_bool(root, "cross_layout_ack", cross_layout_ack) == WEB_MEMBER_BAD) {
         return invalid(bad, "cross_layout_ack");
     }
     return true;
-}
-
-/* ---- WebSocket ---------------------------------------------------------------------------------------- */
-
-web_ws_msg_t web_parse_ws_message(const char *text, size_t len, web_ws_sub_t *sub)
-{
-    if (!web_json_depth_ok(text, len, WEB_JSON_MAX_DEPTH)) {
-        return WEB_WS_MSG_INVALID;
-    }
-    cJSON *root = cJSON_ParseWithLength(text, len);
-    web_ws_msg_t kind = WEB_WS_MSG_INVALID;
-    const char *type = NULL;
-    if (root != NULL && cJSON_IsObject(root) && get_str(root, "type", 16, &type) == M_OK) {
-        if (strcmp(type, "ping") == 0) {
-            kind = WEB_WS_MSG_PING;
-        } else if (strcmp(type, "subscribe") == 0) {
-            const cJSON *list = get(root, "topics");
-            if (cJSON_IsArray(list)) {
-                uint32_t bits = 0;
-                const cJSON *t;
-                cJSON_ArrayForEach(t, list) {
-                    if (!cJSON_IsString(t)) {
-                        continue;
-                    }
-                    if (strcmp(t->valuestring, "status") == 0) {
-                        bits |= WEB_TOPIC_STATUS;
-                    } else if (strcmp(t->valuestring, "progress") == 0) {
-                        bits |= WEB_TOPIC_PROGRESS;
-                    } else if (strcmp(t->valuestring, "log") == 0) {
-                        bits |= WEB_TOPIC_LOG;
-                    }
-                }
-                int64_t cur = 0;
-                member_t mc = get_int(root, "log_cursor", 0, UINT32_MAX, &cur);
-                if (mc != M_BAD) {
-                    if (sub != NULL) {
-                        sub->topics = bits;
-                        sub->has_log_cursor = mc == M_OK;
-                        sub->log_cursor = (uint32_t)cur;
-                    }
-                    kind = WEB_WS_MSG_SUBSCRIBE;
-                }
-            }
-        }
-    }
-    cJSON_Delete(root);
-    return kind;
 }

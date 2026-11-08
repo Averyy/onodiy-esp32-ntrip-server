@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+dependencies:
+  espressif/cjson: "^1.7.19"

@@ -6,7 +6,7 @@
  * PBKDF2-HMAC-SHA256 through PSA key derivation, the stored record and a
  * constant-time check; SHA-256 of a session token.
  *
- * Record sys/admin_hash, v1 (settings_codec.h, little-endian):
+ * Password record, v1 (settings_codec.h, little-endian):
  *   u8 version (1), u32 iterations, salt[16], PBKDF2-HMAC-SHA256[32].
  * The iteration count is stored with each hash, so a later build can change
  * it without a migration: a check always uses the stored count.

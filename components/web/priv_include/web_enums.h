@@ -14,6 +14,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "web_shell_enums.h"
+
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -64,16 +66,8 @@ const char *web_fw_trial_name(fw_update_trial_t v);
 const char *web_gnss_block_name(fw_update_gnss_block_t v);
 /** fw_update_check_result_t: "ok", "no_release", ...; NULL for none (no check this boot). */
 const char *web_check_result_name(fw_update_check_result_t v);
-const char *web_probe_name(network_probe_t v);
-/** Name of one network_ap_reason_t bit (NULL for an unknown bit). */
-const char *web_ap_reason_name(uint32_t bit);
-const char *web_ladder_why_name(uint8_t v);
-/** Name of one network_ladder_trigger_t bit (NULL for an unknown bit). */
-const char *web_ladder_trigger_name(uint32_t bit);
 const char *web_link_mode_name(int v);
-const char *web_reset_class_name(lifecycle_reset_class_t v);
 const char *web_reboot_reason_name(lifecycle_reboot_reason_t v);
-const char *web_reset_reason_name(esp_reset_reason_t v);
 const char *web_clock_name(ledger_clock_t v);
 const char *web_sys_name(gnss_sys_t v);
 /** station_sgt_state_t: "idle", "switching", "settling", "measuring", "deciding", "restoring". */
@@ -108,8 +102,6 @@ const char *web_rx_boot_by_name(uint8_t v);
 bool web_base_mode_parse(const char *s, um98x_base_mode_t *out);
 bool web_ntrip_trust_parse(const char *s, ntrip_trust_t *out);
 bool web_ntrip_backoff_parse(const char *s, ntrip_backoff_profile_t *out);
-/** "none", "error", "warn", "info", "debug", "verbose". */
-bool web_log_level_parse(const char *s, esp_log_level_t *out);
 bool web_recovery_mode_parse(const char *s, health_recovery_mode_t *out);
 
 /* ---- receiver: apply preview ------------------------------------------------------------ */

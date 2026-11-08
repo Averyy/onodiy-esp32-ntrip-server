@@ -23,6 +23,7 @@
 #include "local_caster.h"
 #include "ntrip_server.h"
 #include "web_core.h"
+#include "web_shell_parse.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,12 +39,6 @@ typedef struct {
     const char *field;
     const char *rule;
 } web_bad_t;
-
-/** Deepest nesting of objects and arrays a request may have (cJSON parses recursively). */
-#define WEB_JSON_MAX_DEPTH 8u
-
-/** True if the text nests objects and arrays at most max_depth deep (strings skipped). */
-bool web_json_depth_ok(const char *text, size_t len, unsigned max_depth);
 
 /**
  * Parse a JSON body. NULL (with bad = bad_json) for invalid JSON, nesting
@@ -161,14 +156,8 @@ web_err_t web_sgt_error(int err, bool safe_mode, const char **field);
 bool web_parse_caster_put(const cJSON *root, const ntrip_caster_cfg_t *stored, ntrip_caster_cfg_t *out,
                           web_bad_t *bad);
 
-/** Largest custom CA accepted (bytes of PEM text). */
-#define WEB_CA_PEM_MAX 4096u
-
 /** PUT /api/casters/{n}/ca: {"pem": "..."} with PEM certificates only. *pem points into root. */
 bool web_parse_ca_pem(const cJSON *root, const char **pem, web_bad_t *bad);
-
-/** PEM text made only of CERTIFICATE blocks (and blank space), at most WEB_CA_PEM_MAX bytes. */
-bool web_pem_certs_only(const char *pem);
 
 /* ---- local NTRIP (Your rover) ------------------------------------------------------------- */
 
@@ -232,32 +221,6 @@ bool web_parse_update_gnss(const cJSON *root, uint32_t *build, bool *cross_layou
 /** POST /api/upload/gnss/confirm: {"sha256", "expected_fw", "cross_layout_ack"}. */
 bool web_parse_upload_confirm(const cJSON *root, uint8_t sha256[32], const char **expected_fw,
                               uint32_t *expected_build, bool *cross_layout_ack, web_bad_t *bad);
-
-/* ---- WebSocket ---------------------------------------------------------------------------------- */
-
-#define WEB_TOPIC_STATUS   (1u << 0)
-#define WEB_TOPIC_PROGRESS (1u << 1)
-#define WEB_TOPIC_LOG      (1u << 2)
-
-typedef enum {
-    WEB_WS_MSG_INVALID = 0,
-    WEB_WS_MSG_SUBSCRIBE,
-    WEB_WS_MSG_PING,
-} web_ws_msg_t;
-
-/** What a subscribe message asks for. */
-typedef struct {
-    uint32_t topics;          /**< topic bits (unknown names ignored) */
-    bool has_log_cursor;      /**< "log_cursor" given: send log lines after it */
-    uint32_t log_cursor;
-} web_ws_sub_t;
-
-/**
- * A client text message; for subscribe, *sub gets the topics and the
- * optional log cursor (a "log_cursor" that is not an integer of 0..2^32-1
- * makes the message invalid).
- */
-web_ws_msg_t web_parse_ws_message(const char *text, size_t len, web_ws_sub_t *sub);
 
 #ifdef __cplusplus
 }
