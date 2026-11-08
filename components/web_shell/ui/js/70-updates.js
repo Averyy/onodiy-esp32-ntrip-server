@@ -9,7 +9,7 @@ function checkFailure(u) {
   if (!r || r === 'ok') return null;
   const repo = u.release_repo ? 'github.com/' + u.release_repo : 'the release repository';
   const retry = u.next_check_in_s === null || u.next_check_in_s === undefined ? '' :
-    u.next_check_in_s <= 0 ? ' The station tries again as soon as it is online.' : ' The station tries again in ' + inMinutes(u.next_check_in_s) + '.';
+    u.next_check_in_s <= 0 ? productText(' The {product} tries again as soon as it is online.') : productText(' The {product} tries again in ') + inMinutes(u.next_check_in_s) + '.';
   const http = u.last_http_status ? ' (HTTP ' + u.last_http_status + ')' : '';
   let text;
   switch (r) {
@@ -17,13 +17,13 @@ function checkFailure(u) {
       text = 'No release found at ' + repo + http + '. The repository may be private or have no releases yet.';
       break;
     case 'no_response':
-      text = 'GitHub did not answer.' + (retry || ' The station tries again later.');
+      text = 'GitHub did not answer.' + (retry || productText(' The {product} tries again later.'));
       break;
     case 'http_error':
-      text = 'GitHub answered with an error' + http + '. The station tries again with the next daily check.';
+      text = 'GitHub answered with an error' + http + productText('. The {product} tries again with the next daily check.');
       break;
     case 'untrusted_redirect':
-      text = 'GitHub sent the request somewhere this firmware does not trust, so it stopped there. The station tries again with the next daily check.';
+      text = productText('GitHub sent the request somewhere this firmware does not trust, so it stopped there. The {product} tries again with the next daily check.');
       break;
     case 'bad_manifest':
       text = 'The latest release at ' + repo + ' has no release manifest this build accepts.';
@@ -158,10 +158,10 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       const ok = await dialog({
         title: 'Install app ' + version + '?',
         ok: 'Install',
-        body: [h('p', null, 'The station downloads ' + version + ' from the release over HTTPS, checks its size and SHA-256 against the release\'s manifest, installs it and restarts. ' +
-          'The station then checks the new version: if it fails, it goes back to this version by itself.'),
+        body: [h('p', null, productText('The {product} downloads ') + version + ' from the release over HTTPS, checks its size and SHA-256 against the release\'s manifest, installs it and restarts. ' +
+          productText('The {product} then checks the new version: if it fails, it goes back to this version by itself.')),
         UI.appDowntime ? UI.appDowntime() : null],
-        check: ack ? 'I know this version was rolled back on this station before.' : null,
+        check: ack ? productText('I know this version was rolled back on this {product} before.') : null,
       });
       if (!ok) return;
       appErr.hidden = true;
@@ -196,7 +196,7 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       const a = model.update.app || {};
       const rb = a.rollback_available && a.rollback_version && a.rollback_version !== a.running;
       return cancelDownload(button, [
-        h('p', null, 'The station stops downloading and keeps running ' + (a.running || 'this version') + '. Nothing is installed.'),
+        h('p', null, productText('The {product} stops downloading and keeps running ') + (a.running || 'this version') + '. Nothing is installed.'),
         rb ? h('p', { class: 'muted' }, 'Once a download has started, Revert to ' + a.rollback_version +
           ' is no longer offered: the download writes over it.') : null], appErr);
     }
@@ -255,7 +255,7 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       /* Nothing to go back to when the other slot holds this same version (a reinstall). */
       const rb = a.rollback_available && a.rollback_version !== a.running ? btn('Revert', async () => {
         const ok = await dialog({ title: 'Revert to ' + to + '?', ok: 'Revert', okKind: 'danger solid',
-          body: h('p', null, 'The station restarts into ' + to + '. ' + a.running +
+          body: h('p', null, productText('The {product} restarts into ') + to + '. ' + a.running +
             ' is not offered again; you can still install it from a file.') });
         if (!ok) return;
         const r = await act(rb, () => api('POST', '/api/update/rollback', { confirm: true }), rbErr);
@@ -272,19 +272,19 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
     /* An image that does not name this project: install only after the warning (?any_project=1). */
     function anotherProject(project) {
       return dialog({ title: 'Firmware for another project?', ok: 'Install anyway', okKind: 'danger solid',
-        body: h('p', null, (project ? 'This image says it is firmware for "' + project + '", not for this station.' :
-          project === '' ? 'This image names no project.' : 'This image does not say it is firmware for this station.') +
-          ' Firmware for something else can leave the station unreachable until it is flashed over USB.'),
+        body: h('p', null, (project ? 'This image says it is firmware for "' + project + productText('", not for this {product}.') :
+          project === '' ? 'This image names no project.' : productText('This image does not say it is firmware for this {product}.')) +
+          productText(' Firmware for something else can leave the {product} unreachable until it is flashed over USB.')),
         check: 'I know what this image is.' });
     }
     /* The same image as the one running, or a version rolled back here before: install only after asking. */
     const sameOk = v => dialog({ title: 'Install the same version again?', ok: 'Install again',
       body: h('p', null, 'This is the version already running' + (v ? ' (' + v + ')' : '') + '. Install it again? ' +
-        'The station restarts into it; nothing else changes.') });
+        productText('The {product} restarts into it; nothing else changes.')) });
     const rolledBackOk = v => dialog({ title: 'Install a version that was rolled back?', ok: 'Install anyway',
-      body: h('p', null, (v ? 'Version ' + v : 'This version') + ' was rolled back on this station before: its checks failed, or someone ' +
-        'went back from it. If it fails again, the station goes back to the version running now.'),
-      check: 'I know this version was rolled back on this station before.' });
+      body: h('p', null, (v ? 'Version ' + v : 'This version') + productText(' was rolled back on this {product} before: its checks failed, or someone ') +
+        productText('went back from it. If it fails again, the {product} goes back to the version running now.')),
+      check: productText('I know this version was rolled back on this {product} before.') });
     const appPick = fileButton('Choose file', 'Choose file: app (.bin)', '.bin,application/octet-stream', f => uploadApp(f, {}));
     const appUploadErr = errBox();
     /* Too big for the station: said before anything is sent (and when a refusal ends in a reset). */
@@ -296,12 +296,12 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       const max = model.update && model.update.app_max_bytes;
       /* Read the image's own description before sending a byte. */
       if (max && file.size > max) {
-        say(appUploadErr, tooBig(file, max, 'the station\'s app slot'));
+        say(appUploadErr, tooBig(file, max, productText('the {product}\'s app slot')));
         return;
       }
       const img = await readAppImage(file);
       if (!img) {
-        say(appUploadErr, 'This file is not an app image for the station (it does not start like one). Choose the .bin file of a release or of your own build.');
+        say(appUploadErr, productText('This file is not an app image for the {product} (it does not start like one). Choose the .bin file of a release or of your own build.'));
         return;
       }
       if (img.project !== UI.metadata.project_name && !o.anyProject) {
@@ -321,8 +321,8 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       }
       if (!o.anyProject && !o.rolledBackAck && !o.reinstall) {
         const ok = await dialog({ title: 'Install ' + (img.version || file.name) + '?', ok: 'Install',
-          body: [h('p', null, file.name + ', ' + fmt.bytes(file.size) + '. The station writes it to its spare app slot and restarts into it. ' +
-            'The station checks the new version and goes back to this one if it fails.')] });
+          body: [h('p', null, file.name + ', ' + fmt.bytes(file.size) + productText('. The {product} writes it to its spare app slot and restarts into it. ') +
+            productText('The {product} checks the new version and goes back to this one if it fails.'))] });
         if (!ok) return;
       }
       const q = [o.anyProject ? 'any_project=1' : null, o.rolledBackAck ? 'rolled_back_ack=1' : null].filter(x => x).join('&');
@@ -334,7 +334,7 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       } catch (e) {
         P.app_upload.hide();
         if (e instanceof ApiError && (e.code === 'network' || e.code === 'too_large') && max && file.size > max) {
-          say(appUploadErr, tooBig(file, max, 'the station\'s app slot'));
+          say(appUploadErr, tooBig(file, max, productText('the {product}\'s app slot')));
           return;
         }
         if (e instanceof ApiError && e.code === 'same_image' && !o.reinstall) {
@@ -354,7 +354,7 @@ function createAppUpdates({ getUpdate, load, P, headBox, appBox, rbBox, rbErr, r
       }
       showRestarting('Installing ' + (r && r.version ? r.version : 'the new app'),
         'The image was written' + (r && r.sha256 ? ' (SHA-256 ' + r.sha256.slice(0, 16) + '…)' : '') +
-        '. The station restarts into it now; this page reconnects by itself.');
+        productText('. The {product} restarts into it now; this page reconnects by itself.'));
     }
 
   return { renderCheck, renderApp, finishChecks, cancelDownload, appPick, appUploadErr,

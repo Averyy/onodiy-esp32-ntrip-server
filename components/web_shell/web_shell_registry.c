@@ -138,6 +138,11 @@ bool web_shell_registry_path(const web_shell_registry_t *r, const char *path)
     return false;
 }
 
+bool web_shell_access_valid(web_access_t access)
+{
+    return access >= WEB_ACC_PUB && access <= WEB_ACC_CLAIM;
+}
+
 void web_shell_frame_dispose(web_shell_frame_t *f)
 {
     if (f) { free(f->text); memset(f, 0, sizeof(*f)); }

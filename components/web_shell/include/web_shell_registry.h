@@ -34,6 +34,8 @@ bool web_shell_registry_sections(web_shell_registry_t *r, const web_shell_sectio
 bool web_shell_registry_status(web_shell_registry_t *r, const web_shell_status_provider_t *provider);
 bool web_shell_registry_seal(web_shell_registry_t *r);
 bool web_shell_registry_path(const web_shell_registry_t *r, const char *path);
+/* One of the access levels; WEB_ACC_UNSET and out-of-range values are not. */
+bool web_shell_access_valid(web_access_t access);
 
 /* A frame owns one heap block of status_cap bytes, kept across builds so a
  * periodic build allocates nothing; zero initialize before use, dispose after

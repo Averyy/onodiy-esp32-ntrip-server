@@ -35,6 +35,16 @@ extern "C" {
 #endif
 
 #define WEB_SHELL_SECTIONS_MAX 16u
+/* Who may call a route. Zero is no level: a route that does not say is refused
+ * at registration instead of being open to everyone. */
+typedef enum {
+    WEB_ACC_UNSET = 0,
+    WEB_ACC_PUB,         /**< always */
+    WEB_ACC_PUBSTAR,     /**< without a session only while public status is on */
+    WEB_ACC_ADMIN,       /**< admin session */
+    WEB_ACC_CLAIM,       /**< the handler applies the claim rules */
+} web_access_t;
+
 #define WEB_SHELL_ITEMS_MAX 64u
 #define WEB_SHELL_ITEM_KEY_MAX 32u
 #define WEB_SHELL_STATUS_MAX 16384u

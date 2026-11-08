@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Avery L.
+# SPDX-License-Identifier: MIT
+cmake_minimum_required(VERSION 3.22)
+set(STATION_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "Pinned component checkout")
+get_filename_component(STATION_DIR "${STATION_DIR}" ABSOLUTE)
+set(STATION_FLASH "16MB" CACHE STRING "Partition layout: 16MB or 8MB")
+option(EXTERNAL_WEB_QEMU "Development Ethernet build for QEMU only" OFF)
+set(PRODUCT_COMPONENTS web_shell settings diag lifecycle network ledger tcp_diag)
+foreach(_c ${PRODUCT_COMPONENTS})
+    list(APPEND EXTRA_COMPONENT_DIRS "${STATION_DIR}/components/${_c}")
+endforeach()
+if(STATION_FLASH STREQUAL "16MB")
+    set(_table partitions.csv)
+elseif(STATION_FLASH STREQUAL "8MB")
+    set(_table partitions-8mb.csv)
+else()
+    message(FATAL_ERROR "STATION_FLASH must be 16MB or 8MB")
+endif()
+set(_layout "${CMAKE_BINARY_DIR}/product_layout.defaults")
+file(WRITE "${_layout}"
+    "CONFIG_ESPTOOLPY_FLASHSIZE_${STATION_FLASH}=y\n"
+    "CONFIG_PARTITION_TABLE_CUSTOM=y\n"
+    "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"${STATION_DIR}/${_table}\"\n"
+    "CONFIG_PARTITION_TABLE_OFFSET=0x10000\n")
+set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/sdkconfig.defaults;${_layout}")
+if(EXTERNAL_WEB_QEMU)
+    list(APPEND SDKCONFIG_DEFAULTS "${STATION_DIR}/sdkconfig.qemu")
+endif()
+set(COMPONENTS main)
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(external_web)
+if(NOT IDF_VERSION_MAJOR EQUAL 6 OR NOT IDF_VERSION_MINOR EQUAL 1)
+    message(FATAL_ERROR "external-web requires ESP-IDF 6.1")
+endif()
+foreach(_c main ${PRODUCT_COMPONENTS})
+    idf_component_get_property(_lib ${_c} COMPONENT_LIB)
+    target_compile_options(${_lib} PRIVATE -Wall -Wextra -Werror $<$<COMPILE_LANGUAGE:C>:-Wstrict-prototypes>)
+endforeach()

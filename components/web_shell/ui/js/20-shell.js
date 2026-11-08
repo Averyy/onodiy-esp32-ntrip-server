@@ -111,11 +111,11 @@ function renderLive() {
   let tone = '', text, title, count = '';
   if (!s || age === null) {
     text = 'Connecting…';
-    title = 'Connecting to the station';
+    title = productText('Connecting to the {product}');
   } else if (lost) {
     text = 'No contact';
     count = contactAge(age);
-    title = 'No contact with the station for ' + fmt.dur(age);
+    title = productText('No contact with the {product} for ') + fmt.dur(age);
   } else {
     const st = classifyStatus(s, isAdmin() && !s.public);
     tone = st.tone;
@@ -130,7 +130,7 @@ function renderLive() {
     mount(el, a);
   }
   const box = a.querySelector('.in'), word = a.querySelector('.word'), ageEl = a.querySelector('.age');
-  const name = count ? 'No contact with the station' :
+  const name = count ? productText('No contact with the {product}') :
     title.toLowerCase().indexOf(text.replace(/…$/, '').toLowerCase()) === 0 ? title : text + ': ' + title;
   a.className = tone;
   if (box.getAttribute('title') !== title) box.setAttribute('title', title);
@@ -383,7 +383,7 @@ bus.on('event', m => {
   if (m.event === 'settings_changed') {
     settingsChanged(m);
   } else if (m.event === 'network' && m.what === 'offline') {
-    toast('The station lost its Wi-Fi connection.', 'warn');
+    toast(productText('The {product} lost its Wi-Fi connection.'), 'warn');
   }
 });
 
@@ -472,9 +472,9 @@ function renderNotices() {
 async function retryPendingWifi(e) {
   const b = e && e.currentTarget;
   const ok = await dialog({ title: 'Try the new Wi-Fi settings again?', ok: 'Try again',
-    body: [h('p', null, 'The station leaves its current network and tries them for up to 90 seconds. ' +
+    body: [h('p', null, productText('The {product} leaves its current network and tries them for up to 90 seconds. ') +
       'If it gets no address, it comes back by itself.'),
-    h('p', { class: 'muted' }, 'This page may lose the station meanwhile.')] });
+    h('p', { class: 'muted' }, productText('This page may lose the {product} meanwhile.'))] });
   if (!ok) return false;
   const r = await act(b, () => api('POST', '/api/wifi/pending/retry'));
   if (r !== undefined) toast('Trying the new Wi-Fi settings…', 'ok');
@@ -484,7 +484,7 @@ async function retryPendingWifi(e) {
 async function discardPendingWifi(e) {
   const b = e && e.currentTarget;
   const ok = await dialog({ title: 'Discard the new Wi-Fi settings?', ok: 'Discard', okKind: 'danger solid',
-    body: h('p', null, 'The station keeps its current network and forgets the new settings.') });
+    body: h('p', null, productText('The {product} keeps its current network and forgets the new settings.')) });
   if (!ok) return false;
   const r = await act(b, () => api('POST', '/api/wifi/pending/discard'));
   if (r !== undefined) toast('New Wi-Fi settings discarded.', 'ok');
@@ -619,7 +619,7 @@ function showRestarting(title, text) {
   const status = h('p', { class: 'muted small' }, 'Waiting…');
   mount(root, h('div', { class: 'overlay', role: 'alert' },
     h('div', { class: 'card' }, h('div', { class: 'spinner' }), h('h2', null, title || 'Restarting'),
-      h('p', null, text || 'This page reconnects by itself when the station is back, usually within a minute.'),
+      h('p', null, text || productText('This page reconnects by itself when the {product} is back, usually within a minute.')),
       status)));
   const started = Date.now();
   rebootWatch = setInterval(async () => {
@@ -639,7 +639,7 @@ function showRestarting(title, text) {
       }
       location.reload();
     } catch (e) {
-      if (secs > 180) status.textContent = 'Still waiting (' + fmt.dur(secs) + '). If the station moved to another network, open it there.';
+      if (secs > 180) status.textContent = 'Still waiting (' + fmt.dur(secs) + productText('). If the {product} moved to another network, open it there.');
     }
   }, 2000);
 }
@@ -657,7 +657,7 @@ async function logout() {
   logoutBusy = true;
   live.stop();
   UI.forgetSecrets();
-  bare(h('div', { class: 'narrow' }, pageCard('Logging out', h('p', null, 'Waiting for the station…'))));
+  bare(h('div', { class: 'narrow' }, pageCard('Logging out', h('p', null, productText('Waiting for the {product}…')))));
   let failed = null;
   try {
     await api('DELETE', '/api/session', undefined, { quiet401: true });
@@ -670,7 +670,7 @@ async function logout() {
   }
   if (failed) {
     bare(h('div', { class: 'narrow' }, pageCard('Logout not confirmed',
-      h('p', null, 'The station may still recognize this browser. Retry logout when it is reachable.'),
+      h('p', null, productText('The {product} may still recognize this browser. Retry logout when it is reachable.')),
       msg('warn', errText(failed)), h('div', { class: 'form-actions' }, btn('Retry logout', logout, 'primary')))));
     return;
   }

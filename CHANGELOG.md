@@ -6,6 +6,13 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Reuse: add an external HTTP-shell product example, isolated builds and runtime
+  smoke checks, product commissioning steps and metadata-based shared UI nouns.
+  A product route with no access level is refused at registration.
+  Pending: the web split (this and the two entries below) is tested in QEMU, on
+  the host and in a browser against QEMU; not yet on hardware, including the
+  example's BOOT recovery.
+
 - Reuse: select browser modules/assets with an ordered product manifest; share
   the UI bundler, shell, registry and app controls while retaining station
   navigation, setup, status text and browser storage keys.

@@ -24,7 +24,7 @@ function recoveryHint() {
 function recoverySteps() {
   const ap = apSsidText();
   return h('ol', { class: 'howto' },
-    h('li', null, 'Hold the BOOT button on the station for 10 seconds. This clears the password.'),
+    h('li', null, productText('Hold the BOOT button on the {product} for 10 seconds. This clears the password.')),
     h('li', null, 'Within 15 minutes, join the setup hotspot', ap ? [' ', h('strong', null, ap)] : null, ', open ',
       h('strong', null, 'http://192.168.4.1/'), ' and set a new password.'));
 }
@@ -37,8 +37,8 @@ async function boot() {
     s = await api('GET', '/api/session', undefined, { quiet401: true, timeout: 8000 });
   } catch (e) {
     const lost = e instanceof ApiError && (e.code === 'network' || e.code === 'timeout');
-    bare(h('div', { class: 'narrow' }, pageCard('The station is not answering',
-      h('p', null, lost ? 'Check that this device is on the same network as the station.' : errText(e)),
+    bare(h('div', { class: 'narrow' }, pageCard(productText('The {product} is not answering'),
+      h('p', null, lost ? productText('Check that this device is on the same network as the {product}.') : errText(e)),
       h('div', { class: 'form-actions' }, btn('Try again', boot, 'primary')))));
     return;
   }
@@ -61,7 +61,7 @@ async function boot() {
   /* With the settings unavailable this boot, setup_done reads false and
    * cannot be stored: the wizard could never finish. The dashboard and its
    * notice explain the situation instead. */
-  if (UI.commissioning && !s.setup_done && s.settings_available !== false) {
+  if ((UI.commissioning || UI.commissioningSteps.length) && !s.setup_done && s.settings_available !== false) {
     startWizard(false);
     return;
   }
@@ -102,8 +102,8 @@ async function startPublic() {
 
 function showNoAdmin() {
   const ap = apSsidText();
-  bare(h('div', { class: 'narrow' }, pageCard('Set up this station',
-    h('p', null, 'This station has no admin password yet. Set it over the setup hotspot:'),
+  bare(h('div', { class: 'narrow' }, pageCard(productText('Set up this {product}'),
+    h('p', null, productText('This {product} has no admin password yet. Set it over the setup hotspot:')),
     h('ol', { class: 'howto' },
       h('li', null, ap ? ['Join the setup hotspot ', h('strong', null, ap), '.'] : UI.setupHint),
       h('li', null, 'Open ', h('strong', null, 'http://192.168.4.1/'), '.')),
@@ -121,7 +121,7 @@ function restartNote() {
   } catch (e) {
     at = 0;
   }
-  return at && Date.now() - at < 600000 ? 'The station restarted. Login again.' : null;
+  return at && Date.now() - at < 600000 ? productText('The {product} restarted. Login again.') : null;
 }
 
 /*
@@ -351,6 +351,7 @@ function wifiPicker(wifi, opts) {
  * A product may own its full commissioning flow through UI.commissioning. */
 function startWizard(claim) {
   if (UI.commissioning) return UI.commissioning(claim);
+  if (UI.commissioningSteps.length) return startCommissioning(claim);
   if (!claim) return startAuthed();
   live.stop();
   return claimPassword((step, title, ...body) => bare(h('div', { class: 'narrow' }, pageCard(title, ...body))),

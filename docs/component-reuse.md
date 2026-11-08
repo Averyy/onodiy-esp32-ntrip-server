@@ -359,7 +359,9 @@ Use ESP-IDF's `CONFIG_HTTPD_WS_SUPPORT`,
 PSRAM settings for the shared buffers. The unchanged `WEB_*` options now live
 in `web_shell/Kconfig`, so they are available without the station adapter.
 
-An application initializes settings, lifecycle and networking as usual, then:
+An application initializes NVS, the default event loop, settings and lifecycle,
+calls `esp_netif_init()` before `network_init()` (`network` leaves it to the
+application; without it the first received frame fails an lwIP assert), then:
 
 1. Calls `web_shell_init()` with `web_shell_config_t`: an asset-set descriptor
    (table/count/digest/total, or an empty set for REST/WS only), product metadata,
@@ -369,7 +371,8 @@ An application initializes settings, lifecycle and networking as usual, then:
    reserved. The route capacity excludes those eight shared handlers.
 2. Calls `web_shell_register_status()` with a capture/release pair and context,
    `web_shell_register_sections()` with bounded serializers, then
-   `web_shell_register_routes()` with URI, method, access, body policy, body
+   `web_shell_register_routes()` with URI, method, access (required: a route
+   with none is refused), body policy, body
    limit, callback and context. Wildcards are trailing `/*` only; an optional
    concrete-path predicate determines 404 versus 405 for other methods.
 3. Calls `web_shell_start()` after `network_init()`. Registration batches are
@@ -466,3 +469,96 @@ The canonical bundler is `web_shell/tools/ui_bundle.py`; the former station
 tool path forwards to it and still accepts `--ui components/web/ui`.
 The bench UI harnesses resolve their sources with the same production manifest
 loader, excluding only its entrypoint when a harness controls startup.
+
+### External HTTP product example
+
+[`examples/external-web`](../examples/external-web) selects only `web_shell`,
+`settings`, `diag`, `lifecycle`, `network`, `ledger` and `tcp_diag` from this
+repository. It initializes settings/lifecycle/network and starts the shell
+without a receiver, caster, station supervisor, reporting or health service.
+Its `product` section reports its own HTTP tick counter; the shared envelope
+reports captured monotonic uptime. Its second public section, `network`, uses
+`network_get_status()`: a failed read yields `online: null`. Authenticated
+viewers also get the cached network name/address and setup-AP state; public
+viewers get only `online`. The admin-only `preferences` section reports
+settings availability. It does not manufacture receiver/caster/health sections.
+
+The product reuses the canonical HTML, CSS and favicon and selects modules in
+`ui/product.json` with no vendor map assets. `ui/status.js` owns navigation,
+branding, network-only status classification and its Status/Settings views.
+Replacement sections merge independently: a network delta leaves the counter
+unchanged; a full snapshot drops every old section. Products can instead
+register `UI.mergeSections[key]` for keyed deltas (as the station does for
+casters); a full message bypasses that merger, including after item removal.
+
+`tools/ci/external_web.sh [outside-output-directory] [--qemu]` copies the app
+outside the checkout and defines builds for both existing partition layouts.
+It rejects unknown/ignored Kconfig settings, checks exact repository component
+directories, and inspects resolved dependency edges in
+`project_description.json` for forbidden product services. The optional third
+build selects the Ethernet overlay for QEMU. The `external-web` job invokes
+these checks and is a release prerequisite. A component-registry connection is
+needed when the copied app first resolves cJSON and mDNS.
+
+The runtime check is `uv run --no-project python tools/qemu/external_web.py
+--build-dir <outside-output-directory>/build-16MB-qemu --out <log-directory>`.
+It creates fresh flash/NVS, boots the actual external image with emulated
+Ethernet and defines checks for gzip assets, CSP, claim/login/logout, JSON
+content-type/Origin checks, body limits, public redaction, product REST/WS
+status, settings-change attribution and absent station routes. It terminates
+QEMU on exit. Hardware operation of this example has not been verified.
+
+### Product commissioning and recovery
+
+A product selects `shared:js/32-commissioning.js` after the auth module and
+may register `UI.commissioningSteps` before startup, together with
+`UI.commissioningLoad()` and `UI.commissioningSave(values)`. Each ordered step
+has a stable `key`, a `title` and `create({body, state, next})`. The product
+owns the endpoint, stored step encoding and controls. `next(values)` saves the
+following step (or `setup_done` on completion) before advancing; a failure
+keeps the current controls/input and displays the error. Repeated clicks while
+a save is pending are ignored. Password claim precedes authenticated product
+reads. Without step providers, claim opens the product Status view directly.
+The existing `UI.commissioning` adapter takes precedence, retaining the
+station's setup steps, text and NVS values.
+
+The example's two steps explain recovery access and choose public visibility;
+there are no required caster credentials or receiver checks. It stores
+password/session records in `counter_auth`, preferences/setup progress in
+`counter_ui`, and browser keys under `counter.`. Network/lifecycle continue
+using their own component settings; browser namespacing does not rename those
+keys. The example's app task watches BOOT: holding it for ten seconds requests
+an HTTP-task password reset and opens the network recovery AP. This path is
+independent of receiver availability, including when settings cannot be read.
+The Ethernet-only QEMU build omits the physical BOOT-button polling loop.
+The example intentionally provides status/visibility commissioning; it does
+not provide a Wi-Fi credential editor or app/receiver update service.
+
+The product Status view labels missing network information as unknown, shows
+missing values as a dash and marks old values after the shared contact
+interval. The shared transport reconnects/polls and accepts full resyncs.
+Settings views expose `dirty()`, `reload()` and `destroy()`: navigation asks
+before losing edits, live updates do not replace an edited form, and coalesced
+`settings_changed` events warn only for another tab's changes. Mutating API
+requests carry this tab's `X-Client-Id`; the runtime attributes the resulting
+settings event to it. This is advisory attribution over the existing short
+hold window, not a transaction identifier or optimistic-concurrency lock.
+
+Shared prose uses `productText()` with `{product}` and `{Product}` tokens from
+`metadata.product_noun`, preserving station text with the noun `station`.
+Product/receiver-specific modules remain product selected. The Node composition
+tests run the generated production bundle, including startup, with a simulated
+DOM/transport; they cover these flows without requiring station-shaped JSON.
+They are browser-logic tests, not a substitute for the QEMU network check.
+
+### Asset licenses
+
+The shared HTML, CSS, favicon, JavaScript, bundler and example code carry MIT
+SPDX notices and are covered by the repository's [`LICENSE`](../LICENSE).
+Keep those copyright/license notices when distributing them. Selecting a vendor
+asset does not change its license: the station's optional MapLibre files and
+its hash-pinned `vendor/maplibre-LICENSE.txt` are listed in
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md). The external example
+selects none of these vendor assets. Distributions also retain notices for
+selected firmware dependencies (including ESP-IDF, FreeRTOS, lwIP, Mbed TLS,
+cJSON and mDNS); the shared assets' MIT license does not replace those notices.

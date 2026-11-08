@@ -46,7 +46,7 @@ function apiMismatch(v) {
     location.reload();
   } else if (!apiWarned) {
     apiWarned = true;
-    toast('This page does not match the station\'s firmware. Reload the page.', 'warn');
+    toast(productText('This page does not match the {product}\'s firmware. Reload the page.'), 'warn');
   }
   return true;
 }
@@ -238,7 +238,7 @@ const live = {
     } else if (!isAdmin() && S.publicView && !s.public_status) {
       this.stop();
       S.session = s;
-      showLogin('Public status was turned off. Login to see the station.');
+      showLogin(productText('Public status was turned off. Login to see the {product}.'));
     }
   },
 

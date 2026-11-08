@@ -1,0 +1,91 @@
+{
+  "metadata": {
+    "title": "Counter",
+    "default_brand": "Counter",
+    "product_noun": "device",
+    "project_name": "external_web",
+    "browser_storage_prefix": "counter."
+  },
+  "assets": "assets.json",
+  "modules": [
+    {
+      "name": "product",
+      "source": "generated:product",
+      "requires": []
+    },
+    {
+      "name": "registry",
+      "source": "shared:js/00-registry.js",
+      "requires": [
+        "product"
+      ]
+    },
+    {
+      "name": "core",
+      "source": "shared:js/00-core.js",
+      "requires": [
+        "registry"
+      ]
+    },
+    {
+      "name": "format",
+      "source": "shared:js/05-format.js",
+      "requires": [
+        "core"
+      ]
+    },
+    {
+      "name": "live",
+      "source": "shared:js/10-live.js",
+      "requires": [
+        "core"
+      ]
+    },
+    {
+      "name": "shell",
+      "source": "shared:js/20-shell.js",
+      "requires": [
+        "live"
+      ]
+    },
+    {
+      "name": "auth",
+      "source": "shared:js/30-auth.js",
+      "requires": [
+        "shell",
+        "format"
+      ]
+    },
+    {
+      "name": "steps",
+      "source": "shared:js/32-commissioning.js",
+      "requires": [
+        "auth"
+      ]
+    },
+    {
+      "name": "app-updates",
+      "source": "shared:js/70-updates.js",
+      "requires": [
+        "auth",
+        "format"
+      ]
+    },
+    {
+      "name": "status",
+      "source": "product:status.js",
+      "requires": [
+        "steps",
+        "app-updates"
+      ]
+    },
+    {
+      "name": "main",
+      "source": "shared:js/99-main.js",
+      "requires": [
+        "status"
+      ],
+      "entrypoint": true
+    }
+  ]
+}

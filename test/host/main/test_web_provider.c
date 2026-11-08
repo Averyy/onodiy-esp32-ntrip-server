@@ -19,6 +19,18 @@ static void init(web_shell_registry_t *r, size_t routes, size_t sections)
     web_shell_status_provider_t p={.capture=capture,.release=release};
     TEST_ASSERT_TRUE(web_shell_registry_status(r,&p));
 }
+TEST_CASE("web provider: a route that does not state its access level is refused", "[web_provider]")
+{
+    TEST_ASSERT_FALSE(web_shell_access_valid((web_access_t)0));
+    TEST_ASSERT_FALSE(web_shell_access_valid(WEB_ACC_UNSET));
+    TEST_ASSERT_FALSE(web_shell_access_valid((web_access_t)(WEB_ACC_CLAIM + 1)));
+    TEST_ASSERT_FALSE(web_shell_access_valid((web_access_t)-1));
+    TEST_ASSERT_TRUE(web_shell_access_valid(WEB_ACC_PUB));
+    TEST_ASSERT_TRUE(web_shell_access_valid(WEB_ACC_PUBSTAR));
+    TEST_ASSERT_TRUE(web_shell_access_valid(WEB_ACC_ADMIN));
+    TEST_ASSERT_TRUE(web_shell_access_valid(WEB_ACC_CLAIM));
+}
+
 static bool concrete(void *ctx, const char *path) { (void)ctx; return !strcmp(path,"/api/items/1"); }
 
 TEST_CASE("web provider: bounded registry rejects duplicate reserved and ambiguous routes atomically", "[web_provider]")

@@ -243,6 +243,45 @@ jobs:
           . "$IDF_PATH/export.sh"
           tools/ci/external_app.sh
 
+  external-web:
+    name: External app (HTTP shell only)
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:81893c71bb5e570088901f21def8684c25cd2a9020281bd01b843a7655edb18c  # v6.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.24"
+
+      - name: Build outside checkout (both layouts and QEMU)
+        shell: bash
+        run: |
+          set -o pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          . "$IDF_PATH/export.sh"
+          mkdir -p build-external-web
+          tools/ci/external_web.sh /tmp/onodiy-external-web --qemu 2>&1 | tee build-external-web/build.log
+
+      - name: QEMU HTTP and WebSocket smoke
+        shell: bash
+        run: |
+          . "$IDF_PATH/export.sh"
+          if ! command -v qemu-system-xtensa >/dev/null; then
+            uv run --no-project "$IDF_PYTHON_ENV_PATH/bin/python" "$IDF_PATH/tools/idf_tools.py" install qemu-xtensa
+            . "$IDF_PATH/export.sh"
+          fi
+          uv run --no-project python tools/qemu/external_web.py \
+            --build-dir /tmp/onodiy-external-web/build-16MB-qemu --out build-external-web/smoke
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: external-web-${{ github.sha }}
+          if-no-files-found: warn
+          path: build-external-web/
+
   bench-tools:
     name: Bench tools (pytest)
     runs-on: ubuntu-24.04
@@ -407,7 +446,7 @@ jobs:
   release:
     name: GitHub Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [firmware, host-tests, external-app, bench-tools, firmware-bench, qemu-smoke, qemu-bench-console]
+    needs: [firmware, host-tests, external-app, external-web, bench-tools, firmware-bench, qemu-smoke, qemu-bench-console]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -23,6 +23,9 @@ const UI = {
   tick: () => {},
   event: () => {},
   commissioning: null,
+  commissioningSteps: [],
+  commissioningLoad: null,
+  commissioningSave: null,
   setupHint: 'Join the setup hotspot.',
   scanWarning: 'The connection may pause for a few seconds during a scan.',
   progress: null,
@@ -40,4 +43,12 @@ function storageKey(name) {
 
 function classifyStatus(status, admin) {
   return UI.classifyStatus(status, admin) || { key: 'unknown', tone: '', head: 'Unknown', word: 'Unknown' };
+}
+
+/* Product nouns in shared prose. Tokens keep the station's punctuation and
+ * spacing unchanged and let products supply their own singular noun. */
+function productText(text) {
+  const noun = UI.metadata.product_noun;
+  return text.replace(/\{(product|Product)\}/g, (token, word) =>
+    word === 'Product' ? noun.charAt(0).toUpperCase() + noun.slice(1) : noun);
 }

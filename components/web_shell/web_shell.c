@@ -1586,7 +1586,7 @@ esp_err_t web_shell_register_routes(const web_route_t *routes, size_t count)
     static web_shell_route_rule_t rules[WEB_SHELL_ROUTES_MAX];
     for (size_t i=0; i<count; i++) {
         const web_route_t *r=&routes[i];
-        if (!r->fn || (unsigned)r->access > WEB_ACC_CLAIM || (unsigned)r->body > WEB_BODY_UPLOAD ||
+        if (!r->fn || !web_shell_access_valid(r->access) || (unsigned)r->body > WEB_BODY_UPLOAD ||
             (r->body == WEB_BODY_JSON && r->max_body > s_config.json_body_bytes) ||
             !route_method_valid(r->method)) { s_registry.failed=true; return ESP_ERR_INVALID_ARG; }
         rules[i]=(web_shell_route_rule_t){.uri=r->uri,.method=r->method,.path_known=r->path_known,.ctx=r->ctx};

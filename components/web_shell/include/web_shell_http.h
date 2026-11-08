@@ -12,6 +12,7 @@
 #include "web_shell_errors.h"
 #include "web_shell_error_build.h"
 #include "web_json.h"
+#include "web_shell_provider.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -53,13 +54,6 @@ void web_shell_http_progress(const char *json);
 void web_kick(void);
 
 /* ---- requests and responses ------------------------------------------------------------- */
-
-typedef enum {
-    WEB_ACC_PUB = 0,     /**< always */
-    WEB_ACC_PUBSTAR,     /**< without a session only while public status is on */
-    WEB_ACC_ADMIN,       /**< admin session */
-    WEB_ACC_CLAIM,       /**< the handler applies the claim rules */
-} web_access_t;
 
 typedef enum {
     WEB_BODY_NONE = 0,   /**< GET, DELETE */
