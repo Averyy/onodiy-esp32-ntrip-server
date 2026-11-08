@@ -8,6 +8,29 @@ menu "Station: network"
         help
             The setup access point is named <prefix><last 4 hex digits of MAC>.
 
+    config NETWORK_SETUP_AP_ON_REQUEST_ONLY
+        bool "Open the setup AP only when the product asks"
+        default n
+        help
+            For a product with no setup page behind the AP. The AP then opens
+            only through network_start_setup_ap(): not at start without
+            stored credentials, and not after NETWORK_STA_FALLBACK_S offline.
+            Without credentials Wi-Fi stays off until
+            network_set_credentials() or that call.
+
+    choice NETWORK_WIFI_PS
+        prompt "Wi-Fi power save"
+        default NETWORK_WIFI_PS_NONE
+        help
+            Applied after every Wi-Fi start.
+
+        config NETWORK_WIFI_PS_NONE
+            bool "Off (lowest latency)"
+
+        config NETWORK_WIFI_PS_MIN_MODEM
+            bool "Modem sleep between DTIM beacons (lower power, more latency)"
+    endchoice
+
     config NETWORK_AP_CHANNEL
         int "Setup AP channel"
         range 1 13

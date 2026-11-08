@@ -30,6 +30,14 @@ components they use are listed in each `CMakeLists.txt` (`esp_driver_uart`,
 `nvs_flash`, `esp_event`, `esp_timer`). The updaters and backend HTTP shell are optional sets,
 described below. Station supervisors, casters and the hub remain product services.
 
+`diag`, also needed by `network`, does not compile without
+`CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS`. It does not need PSRAM's no-init
+segment: without it the log ring keeps this boot only.
+`network` follows the station's defaults; a product can change two of them in
+Kconfig: `CONFIG_NETWORK_SETUP_AP_ON_REQUEST_ONLY` (no setup AP unless the product
+calls `network_start_setup_ap()`) and `CONFIG_NETWORK_WIFI_PS_MIN_MODEM` (modem
+sleep instead of power save off).
+
 None of them starts station behaviour on its own: the station supervisor,
 casters and web server live in other components. `um98x_ctl` holds the
 station's base profile and apply session, which run only when called

@@ -147,6 +147,18 @@ _Static_assert((int)NETWORK_LADDER_TRIG_PROTECTED == (int)NET_TRIG_P &&
                "ladder triggers match the core");
 _Static_assert(sizeof(((network_scan_entry_t *)0)->ssid) == sizeof(((net_scan_entry_t *)0)->ssid),
                "scan entries carry the same SSID size");
+#if CONFIG_NETWORK_WIFI_PS_MIN_MODEM
+#define WIFI_POWER_SAVE WIFI_PS_MIN_MODEM
+#else
+#define WIFI_POWER_SAVE WIFI_PS_NONE
+#endif
+
+#if CONFIG_NETWORK_SETUP_AP_ON_REQUEST_ONLY
+#define AP_ON_REQUEST_ONLY true
+#else
+#define AP_ON_REQUEST_ONLY false
+#endif
+
 _Static_assert(CONFIG_NETWORK_RECOVERY_AP_S > 0 && CONFIG_NETWORK_STA_FALLBACK_S > 0 && CONFIG_NETWORK_AP_LINGER_S > 0,
                "AP timings");
 _Static_assert(WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == NET_REASON_4WAY_HANDSHAKE_TIMEOUT &&
@@ -1217,10 +1229,10 @@ static esp_err_t wifi_start(void)
     }
     s_wifi_start_fails = 0;
     s_wifi_started = true;
-    /* Power save off after every start: no DTIM latency, no stalls. */
-    err = esp_wifi_set_ps(WIFI_PS_NONE);
+    /* After every start. Off by default: no DTIM latency, no stalls. */
+    err = esp_wifi_set_ps(WIFI_POWER_SAVE);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "power save off: %s", esp_err_to_name(err));
+        ESP_LOGW(TAG, "power save: %s", esp_err_to_name(err));
     }
     wifi_mode_t mode = WIFI_MODE_NULL;
     (void)esp_wifi_get_mode(&mode);
@@ -1530,6 +1542,7 @@ static void apply_ap_policy(void)
         .fallback_after_s = CONFIG_NETWORK_STA_FALLBACK_S,
         .recovery_lifetime_s = CONFIG_NETWORK_RECOVERY_AP_S,
         .linger_s = CONFIG_NETWORK_AP_LINGER_S,
+        .on_request_only = AP_ON_REQUEST_ONLY,
     };
     bool expired = false;
     uint32_t want = net_ap_reasons(&in, &expired);

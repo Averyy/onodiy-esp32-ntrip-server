@@ -100,7 +100,9 @@ static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
  * under s_lock by diag_log_check_stamp, before any reader starts. */
 static logbanks_t s_banks;
 static bool s_ring_ok;
+#if BANKS_PERSIST
 static uint32_t s_cache_line = 32;
+#endif
 
 static diag_log_stats_t s_stats;    /* under s_lock */
 

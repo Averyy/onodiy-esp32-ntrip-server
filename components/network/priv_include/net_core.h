@@ -100,6 +100,7 @@ typedef struct {
     uint32_t fallback_after_s;   /**< offline time before the fallback AP opens */
     uint32_t recovery_lifetime_s;/**< recovery AP lifetime when nobody is connected */
     uint32_t linger_s;           /**< how long the AP stays after the station got an IP */
+    bool on_request_only;        /**< the product opens the AP itself: no SETUP or FALLBACK of its own */
 } net_ap_input_t;
 
 /**
@@ -108,8 +109,8 @@ typedef struct {
  *    while a client stays connected, for at most NET_AP_CLIENT_HOLD_MAX_S
  *    beyond the lifetime; then *recovery_expired is set (the caller clears
  *    the request).
- *  - Only with settings available (degraded mode opens nothing on its own):
- *    SETUP while no credentials are stored; FALLBACK once the configured
+ *  - Only with settings available (degraded mode opens nothing on its own)
+ *    and without on_request_only: SETUP while no credentials are stored; FALLBACK once the configured
  *    station has been offline for fallback_after_s, and also for as long as
  *    an AP that is up for SETUP/FALLBACK/LINGER waits for the station's IP
  *    (new credentials being tried, or failing: the browser keeps its link);

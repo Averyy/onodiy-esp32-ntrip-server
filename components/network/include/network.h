@@ -352,7 +352,8 @@ esp_err_t network_init(void);
 /**
  * Start station or setup AP depending on stored credentials. With the
  * settings unavailable nothing starts (no AP on its own); the BOOT button's
- * network_start_setup_ap(true) is then the only way in.
+ * network_start_setup_ap(true) is then the only way in. With
+ * CONFIG_NETWORK_SETUP_AP_ON_REQUEST_ONLY no AP opens on its own either.
  */
 esp_err_t network_start(void);
 
@@ -376,7 +377,8 @@ bool network_get_gateway(uint32_t *addr);
  * ones and keeps these pending (see the header). Without stored credentials
  * they are stored as the station's at once. An AP that is up stays up until
  * the station gets an IP and CONFIG_NETWORK_AP_LINGER_S after, so the
- * browser gets an answer.
+ * browser gets an answer. With CONFIG_NETWORK_SETUP_AP_ON_REQUEST_ONLY an AP
+ * is only ever up on request: it keeps that request's lifetime instead.
  * ssid: 1-32 bytes; password: "" (open), 8-63 characters or 64 hex digits.
  * With the settings unavailable they are kept for this boot only.
  * The status reflects the change before this returns (cred_trial true with

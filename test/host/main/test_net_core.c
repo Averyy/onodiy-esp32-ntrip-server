@@ -319,6 +319,23 @@ TEST_CASE("network AP: setup without credentials, nothing in degraded mode", "[n
     TEST_ASSERT_FALSE(expired);
 }
 
+TEST_CASE("network AP: a product that opens the AP itself gets none on its own, only the one it asks for", "[net_core]")
+{
+    bool expired = true;
+    net_ap_input_t in = ap_in();
+    in.on_request_only = true;
+    in.sta_configured = false;   /* no credentials stored */
+    in.has_ip = false;
+    TEST_ASSERT_EQUAL_UINT32(0, net_ap_reasons(&in, &expired));
+    in.sta_configured = true;    /* long offline */
+    in.offline_s = in.fallback_after_s + 1;
+    TEST_ASSERT_EQUAL_UINT32(0, net_ap_reasons(&in, &expired));
+    in.recovery_requested = true;
+    in.recovery_age_s = 0;
+    TEST_ASSERT_EQUAL_UINT32(NET_AP_RECOVERY, net_ap_reasons(&in, &expired));
+    TEST_ASSERT_FALSE(expired);
+}
+
 TEST_CASE("network AP: fallback after the offline time, held until the IP, then linger", "[net_core]")
 {
     bool expired;

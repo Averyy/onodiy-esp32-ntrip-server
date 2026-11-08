@@ -153,7 +153,7 @@ uint32_t net_ap_reasons(const net_ap_input_t *in, bool *recovery_expired)
             expired = true;
         }
     }
-    if (in->settings_available) {
+    if (in->settings_available && !in->on_request_only) {
         bool held = (in->reasons_now & (NET_AP_SETUP | NET_AP_FALLBACK | NET_AP_LINGER)) != 0;
         if (!in->sta_configured) {
             r |= NET_AP_SETUP;

@@ -6,6 +6,11 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Reuse: `network` options for a product: open the setup AP only when asked, and
+  Wi-Fi modem sleep; the station's defaults are unchanged. `diag` builds without
+  a warning when PSRAM has no no-init segment. Pending: host tests and builds
+  only, not yet on hardware.
+
 - Reuse: add an external HTTP-shell product example, isolated builds and runtime
   smoke checks, product commissioning steps and metadata-based shared UI nouns.
   A product route with no access level is refused at registration.
