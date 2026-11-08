@@ -266,9 +266,12 @@ esp_err_t um98x_flash_user_restart(gnss_link_lease_t raw_lease, const um98x_flas
                                    um98x_flash_result_t *out);
 
 /**
- * Boot-time recovery of an open journal (actions enabled only): run the
- * recovery-table plan (see flash_journal_plan). race_prompt: the early race
- * reached the loader prompt.
+ * Boot-time recovery of an open journal: run the recovery-table plan (see
+ * um98x_flash_journal_plan). race_prompt: the early race reached the loader
+ * prompt. Only with CONFIG_UM98X_FLASH_RECOVERY_ACTIONS: without it this
+ * returns ESP_ERR_NOT_SUPPORTED at once and touches nothing, neither the
+ * receiver nor the staged copy nor the journal (out zeroed); the journal
+ * then waits for the user (um98x_flash_user_retry / _user_restart).
  */
 esp_err_t um98x_flash_recover(gnss_link_lease_t raw_lease, const um98x_flash_request_t *req, int plan,
                               bool race_prompt, um98x_flash_result_t *out);
@@ -278,7 +281,9 @@ esp_err_t um98x_flash_recover(gnss_link_lease_t raw_lease, const um98x_flash_req
  * the stop key at UM98X_FLASH_BAUD for up to max_ms, looking for the loader
  * prompt. Called by the station's early boot step before anything else uses
  * the UART. PROVISIONAL, to be confirmed on hardware.
- * @return ESP_OK when the prompt was seen, ESP_ERR_TIMEOUT otherwise.
+ * @return ESP_OK when the prompt was seen, ESP_ERR_TIMEOUT otherwise;
+ *         ESP_ERR_NOT_SUPPORTED (nothing sent) without
+ *         CONFIG_UM98X_FLASH_RECOVERY_ACTIONS.
  */
 esp_err_t um98x_flash_race(gnss_link_lease_t raw_lease, uint32_t max_ms);
 

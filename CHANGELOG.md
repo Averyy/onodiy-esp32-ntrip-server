@@ -54,6 +54,12 @@ before tagging ([releases](docs/releases.md)).
   the running CRC), and it reports the input it holds. New
   `gnss_rtcm3_crc24q_update()`. The station still frames its receiver link
   with the framer as before.
+- Receiver updates: `um98x_flash_recover()` and `um98x_flash_race()` now
+  refuse (`ESP_ERR_NOT_SUPPORTED`) in a build without
+  `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS`, touching neither the receiver nor the
+  staged package nor the journal; the session core refuses as well. Before,
+  only the station's caller checked the option. Station behaviour unchanged
+  (it calls them only with the option on).
 - Docs: the command layer's and the flasher's headers no longer say that only
   the UM982 is flashed; UM980 packages are accepted too.
 - API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,

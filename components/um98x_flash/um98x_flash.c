@@ -44,6 +44,9 @@ _Static_assert(UM98X_FLASH_BAUD == FL_BAUD_LOADER, "loader baud mismatch");
 #ifndef CONFIG_UM98X_FLASH_ENABLE
 #define CONFIG_UM98X_FLASH_ENABLE 0
 #endif
+#ifndef CONFIG_UM98X_FLASH_RECOVERY_ACTIONS
+#define CONFIG_UM98X_FLASH_RECOVERY_ACTIONS 0
+#endif
 #ifndef CONFIG_UM98X_FLASH_FALLBACK_115200
 #define CONFIG_UM98X_FLASH_FALLBACK_115200 0
 #endif
@@ -711,7 +714,7 @@ static void sess_setup(gnss_link_lease_t lease, const um98x_flash_request_t *req
     };
     s_sess.j = req->journal;
     fl_sess_init(&s_sess, &s_io, with_copy ? s_buf : NULL, with_copy ? s_len : 0, UM98X_FLASH_BAUD,
-                 CONFIG_UM98X_FLASH_FALLBACK_115200 != 0, &h);
+                 CONFIG_UM98X_FLASH_FALLBACK_115200 != 0, CONFIG_UM98X_FLASH_RECOVERY_ACTIONS != 0, &h);
     portENTER_CRITICAL(&s_lock);
     s_progress.last_err = 0;
     portEXIT_CRITICAL(&s_lock);
@@ -875,7 +878,9 @@ esp_err_t um98x_flash_recover(gnss_link_lease_t raw_lease, const um98x_flash_req
     if (req == NULL || out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (!CONFIG_UM98X_FLASH_ENABLE) {
+    if (!CONFIG_UM98X_FLASH_ENABLE || !CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
+        /* Report-only build: nothing touches the receiver, the RAM copy or the journal. */
+        memset(out, 0, sizeof(*out));
         return ESP_ERR_NOT_SUPPORTED;
     }
     um98x_flash_discard();
@@ -887,8 +892,8 @@ esp_err_t um98x_flash_recover(gnss_link_lease_t raw_lease, const um98x_flash_req
 
 esp_err_t um98x_flash_race(gnss_link_lease_t raw_lease, uint32_t max_ms)
 {
-    if (!CONFIG_UM98X_FLASH_ENABLE) {
-        return ESP_ERR_NOT_SUPPORTED;
+    if (!CONFIG_UM98X_FLASH_ENABLE || !CONFIG_UM98X_FLASH_RECOVERY_ACTIONS) {
+        return ESP_ERR_NOT_SUPPORTED;   /* report-only build: nothing sent */
     }
     io_setup(raw_lease);
     static fl_lis_t lis;

@@ -169,6 +169,35 @@ the input, and reports the input it holds (`gnss_rtcm_scan_held`) and each
 frame's stream offset (`gnss_frame_t.start`). The framer reports the same
 for its own input (`gnss_framer_held`). Details in the headers.
 
+## Receiver firmware updates (`um98x_flash`)
+
+Not part of this contract yet: `um98x_flash` also needs the station's
+`diag` and `pkg_store` components (and `mbedtls`), and the external build
+does not include it. What its header already defines, for a product that
+plans to:
+
+- **Before any ordinary write** at start, read the journal
+  (`um98x_flash_journal_get`): `ESP_ERR_NOT_FOUND` is the only result that
+  means no update is open. An unreadable journal, one from a newer schema or
+  settings unavailable all count as open and waiting for the user: send
+  nothing to the receiver. `um98x_flash_journal_plan` gives the recovery
+  table's plan for it.
+- **Recovery actions** (`um98x_flash_recover`, the boot race
+  `um98x_flash_race`) run only in a build with
+  `CONFIG_UM98X_FLASH_RECOVERY_ACTIONS` (off by default). Without it both
+  return `ESP_ERR_NOT_SUPPORTED` at once and touch nothing: not the receiver,
+  the staged copy or the journal. The journal then waits for the user
+  (`um98x_flash_user_retry`, `um98x_flash_user_restart`).
+- **Ownership**: a session runs under a RAW lease held by the caller
+  throughout. `um98x_flash_cancel` is honoured only before the receiver's
+  reset.
+- **Staged package**: on the 8 MB layout (no `gnss_pkg` partition) the
+  package lives in RAM only and does not survive a restart; the journal then
+  waits for the package to be staged again.
+- **After a transfer**: the session confirms the receiver's application
+  with its version; re-applying a profile, checking it and closing the
+  journal (`um98x_flash_journal_close`) are the caller's.
+
 ## Shared NVS keys
 
 Namespace `gnss`, written as device state (no `SETTINGS_EVENT_CHANGED`):

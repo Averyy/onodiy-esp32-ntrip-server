@@ -65,6 +65,7 @@ typedef enum {
     FL_SESS_ABORTED,        /**< ended before the point of no return, application confirmed: re-apply, check, close */
     FL_SESS_NEEDS_USER,     /**< the journal now waits for the user (out.reason); the receiver is left as it is */
     FL_SESS_NOT_STARTED,    /**< the first journal write failed: nothing was sent, no journal exists */
+    FL_SESS_REFUSED,        /**< recovery actions are off in this build: nothing sent, the journal unchanged */
 } fl_sess_result_t;
 
 typedef struct {
@@ -110,6 +111,7 @@ typedef struct {
     uint32_t pkg_len;
     uint32_t loader_baud;     /**< UM98X_FLASH_BAUD */
     bool fallback_115200;     /**< build option */
+    bool recovery_actions;    /**< build option: fl_sess_recover may act (else it refuses, sending nothing) */
     um98x_flash_journal_t j;  /**< the journal (fields of the session; state written by the session) */
     fl_sess_hooks_t hooks;
     /* work state */
@@ -128,7 +130,7 @@ typedef struct {
 
 /** Prepare a session object (zeroes the work state, keeps nothing). */
 void fl_sess_init(fl_sess_t *s, const fl_io_t *io, const uint8_t *pkg, uint32_t len, uint32_t loader_baud,
-                  bool fallback_115200, const fl_sess_hooks_t *hooks);
+                  bool fallback_115200, bool recovery_actions, const fl_sess_hooks_t *hooks);
 
 /**
  * A new session: s->j holds the identity fields (SHA-256, size, expected
@@ -155,7 +157,8 @@ fl_sess_result_t fl_sess_user_restart(fl_sess_t *s);
 /**
  * Boot-time recovery (actions enabled): run the plan of the recovery table
  * for the open journal in s->j. race_prompt: the early boot race saw the
- * loader prompt (plans that race).
+ * loader prompt (plans that race). Without recovery_actions: FL_SESS_REFUSED
+ * at once, nothing written to the receiver or the journal.
  */
 fl_sess_result_t fl_sess_recover(fl_sess_t *s, fl_plan_t plan, bool race_prompt);
 

@@ -120,7 +120,7 @@ static void setup(void)
     s_prepare_ok = true;
     journal_fields(&s_sess.j);
     fl_sess_hooks_t h = hooks();
-    fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, false, &h);
+    fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, false, true, &h);
 }
 
 static bool states_include(uint8_t st)
@@ -602,7 +602,7 @@ TEST_CASE("session: 115200 fallback attempt only when built in, after an attempt
     s_sim.loader_only_baud = 115200;
     fl_sess_hooks_t h = hooks();
     journal_fields(&s_sess.j);
-    fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, true, &h);
+    fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, true, true, &h);
     TEST_ASSERT_EQUAL(FL_SESS_DONE, fl_sess_run(&s_sess));
     TEST_ASSERT_EQUAL_UINT32(115200, s_sess.j.boot_baud);
     TEST_ASSERT_EQUAL_UINT8(2, s_sess.j.entry_attempts);
@@ -682,7 +682,31 @@ static void setup_recovery(uint8_t state, uint8_t phase, uint8_t transfers, bool
     setup();
     s_sess.j = journal_in(state, phase, transfers);
     fl_sess_hooks_t h = hooks();
-    fl_sess_init(&s_sess, &s_io, with_pkg ? s_pkg : NULL, with_pkg ? sizeof(s_pkg) : 0, 460800, false, &h);
+    fl_sess_init(&s_sess, &s_io, with_pkg ? s_pkg : NULL, with_pkg ? sizeof(s_pkg) : 0, 460800, false, true, &h);
+}
+
+TEST_CASE("recovery: with recovery actions off, no plan sends anything or writes the journal", "[flash]")
+{
+    /* Every plan that acts. */
+    for (int plan = FL_PLAN_RESTORE_CHECK; plan <= FL_PLAN_CHECK_WAIT; plan++) {
+        for (int race = 0; race < 2; race++) {
+            setup();
+            s_sess.j = journal_in(UM98X_JOURNAL_TRANSFERRING, UM98X_JOURNAL_MENU2_SENT, 1);
+            um98x_flash_journal_t before = s_sess.j;
+            fl_sess_hooks_t h = hooks();
+            fl_sess_init(&s_sess, &s_io, s_pkg, sizeof(s_pkg), 460800, false, false, &h);
+            sim_at_prompt(&s_sim, 460800);
+            unsigned states = s_nstates;
+            unsigned prepares = s_prepares;
+            TEST_ASSERT_EQUAL(FL_SESS_REFUSED, fl_sess_recover(&s_sess, (fl_plan_t)plan, race != 0));
+            TEST_ASSERT_EQUAL_UINT32(0, s_sim.host_bytes);   /* nothing reached the receiver */
+            TEST_ASSERT_EQUAL_UINT(states, s_nstates);       /* no journal write */
+            TEST_ASSERT_EQUAL_UINT(prepares, s_prepares);    /* the package not touched */
+            TEST_ASSERT_EQUAL_MEMORY(&before, &s_sess.j, sizeof(before));
+            TEST_ASSERT_EQUAL_STRING("recovery actions are off in this build", s_sess.out.reason);
+            sim_free(&s_sim);
+        }
+    }
 }
 
 TEST_CASE("recovery: the loader prompt before the point of no return: \"6\", unchanged", "[flash]")

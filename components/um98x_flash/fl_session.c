@@ -632,7 +632,7 @@ static int attempts(fl_sess_t *s)
 /* ---- public ----------------------------------------------------------------------------- */
 
 void fl_sess_init(fl_sess_t *s, const fl_io_t *io, const uint8_t *pkg, uint32_t len, uint32_t loader_baud,
-                  bool fallback_115200, const fl_sess_hooks_t *hooks)
+                  bool fallback_115200, bool recovery_actions, const fl_sess_hooks_t *hooks)
 {
     um98x_flash_journal_t j = s->j;
     memset(s, 0, sizeof(*s));
@@ -642,6 +642,7 @@ void fl_sess_init(fl_sess_t *s, const fl_io_t *io, const uint8_t *pkg, uint32_t 
     s->pkg_len = len;
     s->loader_baud = loader_baud;
     s->fallback_115200 = fallback_115200;
+    s->recovery_actions = recovery_actions;
     if (hooks != NULL) {
         s->hooks = *hooks;
     }
@@ -810,6 +811,12 @@ static fl_prompt_result_t loader_listen(fl_sess_t *s, uint32_t ms, bool *start_b
 
 fl_sess_result_t fl_sess_recover(fl_sess_t *s, fl_plan_t plan, bool race_prompt)
 {
+    if (!s->recovery_actions) {
+        /* This build only reports: nothing to the receiver, the journal left as it is. */
+        s->out.result = FL_SESS_REFUSED;
+        snprintf(s->out.reason, sizeof(s->out.reason), "recovery actions are off in this build");
+        return FL_SESS_REFUSED;
+    }
     uint32_t boot = s->j.boot_baud != 0 ? s->j.boot_baud : s->loader_baud;
     s->j.boot_baud = boot;
     s->out.ponr = s->j.transfers > 0 || s->j.phase >= UM98X_JOURNAL_TRANSFERRING;
