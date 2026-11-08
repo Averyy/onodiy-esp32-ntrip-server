@@ -142,6 +142,25 @@ esp_err_t settings_erase_state_key(const char *ns, const char *key);
 esp_err_t settings_erase_namespace(const char *ns);
 
 /**
+ * True for a namespace of the station's own schema (settings_schema.h):
+ * sys, wifi, gnss, ota, life, ledger, web, lcast and the caster slots
+ * cst0..cst7. Another product keeps its own preferences in namespaces of its
+ * own, which settings_factory_reset() never touches; the shared device keys
+ * stay where the station keeps them (docs/component-reuse.md).
+ */
+bool settings_ns_is_station(const char *ns);
+
+/**
+ * A product's reset of its own preferences: settings_erase_namespace() for
+ * a namespace that is not the station's, refused with ESP_ERR_INVALID_ARG
+ * (nothing erased) for one that is, so a product reset never reaches the
+ * shared device state (receiver wiring and identity, the receiver update
+ * journal, app trial records, device history). Posts SETTINGS_EVENT_CHANGED
+ * for the namespace (key "") like settings_erase_namespace().
+ */
+esp_err_t settings_erase_product_namespace(const char *ns);
+
+/**
  * Batch write: several keys of one namespace, one commit, one
  * SETTINGS_EVENT_CHANGED (key ""). Not atomic across keys (NVS writes each key
  * as it goes): anything that must change together belongs in one blob.

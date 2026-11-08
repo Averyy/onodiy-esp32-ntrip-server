@@ -413,3 +413,65 @@ TEST_CASE("settings: the default hostname is the build's name and the setup AP's
     TEST_ASSERT_EQUAL_STRING("-c978", small);
     TEST_ASSERT_EQUAL_size_t(0, settings_hostname_with_mac("onodiy", mac, small, 5));
 }
+
+TEST_CASE("settings: a product resets its own namespace; shared device state and the station's stay", "[settings]")
+{
+    nvs_up();
+    TEST_ASSERT_EQUAL(ESP_OK, settings_init());
+    const uint8_t blob[8] = { 1, 2, 3 };
+
+    /* Shared device state a product must never lose with its own reset. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_WIRING, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FLASH_JOB, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_MODEL, "UM982"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_str(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_FW, "R4.10Build25164"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_u32(SETTINGS_NS_GNSS, SETTINGS_KEY_GNSS_BAUD, 115200));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_TRIAL, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_OTA, SETTINGS_KEY_OTA_BAD_VER, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_LEDGER, SETTINGS_KEY_LEDGER_HIST, blob, sizeof(blob)));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_state_blob(SETTINGS_NS_LIFE, SETTINGS_KEY_BOOT_HISTORY, blob, sizeof(blob)));
+    /* The product's own preferences, with its own version stamp. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u16("rover", "schema", 3));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str("rover", "ble_name", "rover-1"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_u8("rover", "profile", 2));
+
+    /* Its own reset: only its namespace goes. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_erase_product_namespace("rover"));
+    static const char *const none[] = { NULL };
+    expect_keys("rover", none);
+    static const char *const gnss[] = { SETTINGS_KEY_GNSS_WIRING, SETTINGS_KEY_GNSS_FLASH_JOB, SETTINGS_KEY_GNSS_MODEL,
+                                        SETTINGS_KEY_GNSS_FW, SETTINGS_KEY_GNSS_BAUD, NULL };
+    expect_keys(SETTINGS_NS_GNSS, gnss);
+    static const char *const ota[] = { SETTINGS_KEY_OTA_TRIAL, SETTINGS_KEY_OTA_BAD_VER, NULL };
+    expect_keys(SETTINGS_NS_OTA, ota);
+    static const char *const ledger[] = { SETTINGS_KEY_LEDGER_HIST, NULL };
+    expect_keys(SETTINGS_NS_LEDGER, ledger);
+    static const char *const life[] = { SETTINGS_KEY_BOOT_HISTORY, NULL };
+    expect_keys(SETTINGS_NS_LIFE, life);
+    uint16_t schema = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, settings_get_u16(SETTINGS_NS_SYS, SETTINGS_KEY_SCHEMA, &schema));
+    TEST_ASSERT_EQUAL_UINT16(SETTINGS_SCHEMA_VERSION, schema);
+
+    /* A station namespace is never a product's to erase. */
+    static const char *const station[] = {
+        SETTINGS_NS_SYS, SETTINGS_NS_WIFI, SETTINGS_NS_GNSS, SETTINGS_NS_OTA, SETTINGS_NS_LIFE,
+        SETTINGS_NS_LEDGER, SETTINGS_NS_WEB, SETTINGS_NS_LCAST, "cst0", "cst7",
+    };
+    for (size_t i = 0; i < sizeof(station) / sizeof(station[0]); i++) {
+        TEST_ASSERT_TRUE_MESSAGE(settings_ns_is_station(station[i]), station[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(ESP_ERR_INVALID_ARG, settings_erase_product_namespace(station[i]), station[i]);
+    }
+    expect_keys(SETTINGS_NS_GNSS, gnss);
+    TEST_ASSERT_FALSE(settings_ns_is_station("rover"));
+    TEST_ASSERT_FALSE(settings_ns_is_station("cst8"));
+    TEST_ASSERT_FALSE(settings_ns_is_station(NULL));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_erase_product_namespace(""));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, settings_erase_product_namespace(NULL));
+
+    /* The station's factory reset leaves a product's namespace alone. */
+    TEST_ASSERT_EQUAL(ESP_OK, settings_set_str("rover", "ble_name", "rover-1"));
+    TEST_ASSERT_EQUAL(ESP_OK, settings_factory_reset());
+    static const char *const rover[] = { "ble_name", NULL };
+    expect_keys("rover", rover);
+    nvs_down();
+}

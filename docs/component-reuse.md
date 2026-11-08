@@ -210,8 +210,26 @@ Namespace `gnss`, written as device state (no `SETTINGS_EVENT_CHANGED`):
 | `applied_hash`, `applied_fw`, `rtcm1230_ok`, `sg_ok` | the station | a successful `um98x_ctl_apply_profile`, in one batch |
 | `hold` | the station | written by the station; erased by a successful `um98x_ctl_apply_profile` |
 
-Who may reset or migrate which key, outside the station's own factory reset,
-is not defined yet for another product.
+These keys, and every other key of the station's namespaces
+(`settings_ns_is_station()`: sys, wifi, gnss, ota, life, ledger, web,
+lcast, cst0 to cst7), stay the station's: their layout and their migrations
+belong to the station (`settings_init` stamps and migrates its schema). A
+product reads and writes them only as the table says.
+
+## Product preferences and resets
+
+- Keep them in namespaces of your own (NVS names have at most 15
+  characters). The station's factory reset (`settings_factory_reset`) never
+  touches them, and nothing in these components writes or erases them.
+- Version them yourself, with a version key in your namespace. The station's
+  rule for its own stamp is a reasonable one to follow: a version newer than
+  the code knows (after a rollback) is read as it is and nothing is deleted.
+- Reset them with `settings_erase_product_namespace(ns)`. It refuses a
+  station namespace (`ESP_ERR_INVALID_ARG`, nothing erased), so a product
+  reset keeps the receiver wiring and identity, the receiver update journal,
+  the app trial records and the device history (host-tested).
+- A record of yours that cannot be read is yours to handle: nothing here
+  erases it for you.
 
 ## Host tests
 

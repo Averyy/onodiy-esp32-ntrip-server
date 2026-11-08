@@ -343,6 +343,38 @@ esp_err_t settings_erase_namespace(const char *ns)
     return finish_write(h, nvs_erase_all(h), ns, NULL);
 }
 
+bool settings_ns_is_station(const char *ns)
+{
+    if (ns == NULL) {
+        return false;
+    }
+    static const char *const k_station[] = {
+        SETTINGS_NS_SYS,  SETTINGS_NS_WIFI,   SETTINGS_NS_GNSS, SETTINGS_NS_OTA,
+        SETTINGS_NS_LIFE, SETTINGS_NS_LEDGER, SETTINGS_NS_WEB,  SETTINGS_NS_LCAST,
+    };
+    for (size_t i = 0; i < sizeof(k_station) / sizeof(k_station[0]); i++) {
+        if (strcmp(ns, k_station[i]) == 0) {
+            return true;
+        }
+    }
+    for (unsigned i = 0; i < CASTER_NAMESPACE_SLOTS; i++) {
+        char cst[16];
+        snprintf(cst, sizeof(cst), SETTINGS_NS_CASTER_FMT, i);
+        if (strcmp(ns, cst) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+esp_err_t settings_erase_product_namespace(const char *ns)
+{
+    if (ns == NULL || ns[0] == '\0' || settings_ns_is_station(ns)) {
+        return ESP_ERR_INVALID_ARG;   /* the station's (shared device state lives there): never a product's to erase */
+    }
+    return settings_erase_namespace(ns);
+}
+
 /* ---- batch ------------------------------------------------------------------ */
 
 struct settings_batch {

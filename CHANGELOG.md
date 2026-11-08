@@ -60,6 +60,11 @@ before tagging ([releases](docs/releases.md)).
   staged package nor the journal; the session core refuses as well. Before,
   only the station's caller checked the option. Station behaviour unchanged
   (it calls them only with the option on).
+- Settings: `settings_ns_is_station()` names the station's own namespaces,
+  and `settings_erase_product_namespace()` resets another product's
+  namespace but refuses the station's, so such a reset keeps the shared
+  device state. `docs/component-reuse.md` says which keys are shared and who
+  migrates them. The station's own factory reset is unchanged.
 - Docs: the command layer's and the flasher's headers no longer say that only
   the UM982 is flashed; UM980 packages are accepted too.
 - API: additions only (`gnss_link_write_ex`, `gnss_link_tx_t`,
