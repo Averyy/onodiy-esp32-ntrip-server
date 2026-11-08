@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Per-connection bookkeeping of the HTTP server, and the lingering close's
- * drain (pure logic, no IDF or RTOS includes, host-testable). web.c keeps one
+ * drain (pure logic, no IDF or RTOS includes, host-testable). web_shell.c keeps one
  * table under a spinlock and feeds it from the server's open and close
  * callbacks, its receive override, the handlers and the worker.
  *
@@ -41,7 +41,7 @@
  * A connection with bytes waiting in its socket is not idle either: a
  * browser sends its next request on a kept-alive connection without
  * waiting, and closing it then loses that request (the browser sees an
- * empty answer). web.c reads each socket's waiting bytes just before the
+ * empty answer). web_shell.c reads each socket's waiting bytes just before the
  * choice (web_conn_set_unread), and such a connection is never chosen. Nor
  * is one whose last request ended less than WEB_CONN_QUIET_MS ago: a
  * browser that just had an answer often sends its next request at once, and
@@ -258,7 +258,7 @@ bool web_conn_take_owed(web_conns_t *t, int fd);
  * server had before read on until recv() returned 0, so it took the FIN, and
  * with our FIN already out that let lwIP free the connection on the client's
  * ACK without telling the socket; the close() after it then worked on freed
- * memory (the sequence is in web.c, web_linger_close). The host tests hold
+ * memory (the sequence is in web_shell.c, web_linger_close). The host tests hold
  * the drain to this against a model of lwIP's socket receive side.
  */
 

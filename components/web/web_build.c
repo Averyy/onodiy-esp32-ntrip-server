@@ -23,26 +23,14 @@
 
 void web_build_session(wj_t *w, const web_session_snap_t *s)
 {
-    wj_obj_open(w, NULL);
-    wj_int(w, "api", WEB_API_VERSION);
-    wj_bool(w, "authenticated", s->authenticated);
-    wj_bool(w, "admin_set", s->admin_set);
-    wj_bool(w, "setup_done", s->setup_done);
-    wj_bool(w, "claim_allowed", s->claim_allowed);
-    wj_bool(w, "on_setup_ap", s->on_setup_ap);
-    wj_bool(w, "public_status", s->public_status);
-    wj_bool(w, "settings_available", s->settings_available);
-    if (s->authenticated) {
-        wj_uint(w, "idle_left_s", s->idle_left_s);
-    } else {
-        wj_null(w, "idle_left_s");
-    }
-    /* Not new disclosures: DHCP, mDNS and the AP's beacon carry them anyway. */
-    wj_str(w, "hostname", s->hostname != NULL ? s->hostname : "");
-    wj_str_or_null(w, "mdns_host", s->mdns_host);
-    wj_str_or_null(w, "ap_ssid", s->ap_ssid);
-    wj_str(w, "setup_step", s->authenticated && !s->setup_done ? web_setup_step_name(s->setup_step) : NULL);
-    wj_obj_close(w);
+    web_shell_session_snap_t common={
+        .authenticated=s->authenticated,.admin_set=s->admin_set,.setup_done=s->setup_done,
+        .claim_allowed=s->claim_allowed,.on_setup_ap=s->on_setup_ap,.public_status=s->public_status,
+        .settings_available=s->settings_available,.idle_left_s=s->idle_left_s,
+        .hostname=s->hostname,.mdns_host=s->mdns_host,.ap_ssid=s->ap_ssid,
+        .setup_step=web_setup_step_name(s->setup_step),
+    };
+    web_shell_build_session(w,&common);
 }
 
 /* ---- receiver update session view ---------------------------------------------------- */
@@ -2777,23 +2765,6 @@ void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count,
 }
 
 /* ---- errors and WebSocket messages ------------------------------------------------------------------- */
-
-void web_build_error(wj_t *w, web_err_t err, const char *message, const char *field, uint32_t retry_in_s,
-                     const char *by, const char *reason)
-{
-    wj_obj_open(w, NULL);
-    wj_obj_open(w, "error");
-    wj_str(w, "code", web_err_code(err));
-    wj_str(w, "message", message != NULL ? message : web_err_message(err));
-    wj_str(w, "field", field);
-    wj_u32_or_null(w, "retry_in_s", retry_in_s);
-    wj_str(w, "by", by);
-    if (reason != NULL) {
-        wj_str(w, "reason", reason);
-    }
-    wj_obj_close(w);
-    wj_obj_close(w);
-}
 
 void web_flash_progress_msg(const um98x_flash_progress_t *p, bool final, bool check_only,
                             const station_flash_last_t *last, web_progress_t *out)

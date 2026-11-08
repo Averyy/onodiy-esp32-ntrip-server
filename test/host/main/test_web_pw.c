@@ -137,7 +137,7 @@ TEST_CASE("new password hashes take the build's iteration count; older 10000-ite
 {
     TEST_ASSERT_EQUAL_UINT32(3000, CONFIG_WEB_PBKDF2_ITERATIONS);
     TEST_ASSERT_EQUAL_UINT32(CONFIG_WEB_PBKDF2_ITERATIONS,
-                             kconfig_default(FIXTURE_DIR "/../../components/web/Kconfig", "WEB_PBKDF2_ITERATIONS"));
+                             kconfig_default(FIXTURE_DIR "/../../components/web_shell/Kconfig", "WEB_PBKDF2_ITERATIONS"));
 
     uint8_t salt[WEB_PW_SALT_LEN];
     for (size_t i = 0; i < sizeof(salt); i++) {

@@ -406,30 +406,7 @@ const char *web_link_mode_name(int v)
     return pick(s_link_mode, COUNT(s_link_mode), v);
 }
 
-static const char *const s_reboot_reason[] = {
-    [LIFECYCLE_REBOOT_NONE] = "none",
-    [LIFECYCLE_REBOOT_USER] = "user",
-    [LIFECYCLE_REBOOT_FACTORY_RESET] = "factory_reset",
-    [LIFECYCLE_REBOOT_ADMIN_RESET] = "admin_reset",
-    [LIFECYCLE_REBOOT_APP_UPDATE] = "app_update",
-    [LIFECYCLE_REBOOT_APP_REVERT] = "app_revert",
-    [LIFECYCLE_REBOOT_GNSS_LADDER] = "gnss_ladder",
-    [LIFECYCLE_REBOOT_NETWORK_LADDER] = "network_ladder",
-    [LIFECYCLE_REBOOT_LOW_HEAP] = "low_heap",
-    [LIFECYCLE_REBOOT_SAFE_MODE_RETRY] = "safe_mode_retry",
-    [LIFECYCLE_REBOOT_SAFE_MODE_CLEARED] = "safe_mode_cleared",
-    [LIFECYCLE_REBOOT_NVS_SLOT_SWITCH] = "nvs_slot_switch",
-    [LIFECYCLE_REBOOT_BOOT_FAILURE] = "boot_failure",
-    [LIFECYCLE_REBOOT_APP_ROLLBACK] = "app_rollback",
-};
 
-_Static_assert(COUNT(s_reboot_reason) == (size_t)LIFECYCLE_REBOOT_APP_ROLLBACK + 1u,
-               "reboot reasons moved: update the table");
-
-const char *web_reboot_reason_name(lifecycle_reboot_reason_t v)
-{
-    return pick(s_reboot_reason, COUNT(s_reboot_reason), (int)v);
-}
 
 static const char *const s_clock[] = {
     [LEDGER_CLOCK_NONE] = "none",

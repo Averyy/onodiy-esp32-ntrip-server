@@ -5,6 +5,7 @@
  * Asset lookup and If-None-Match evaluation for the embedded UI (pure logic).
  */
 #include "web_assets.h"
+#include "web_shell_assets.h"
 
 #include <string.h>
 
@@ -95,4 +96,27 @@ bool web_etag_match(const char *if_none_match, const char *etag)
         }
     }
     return false;
+}
+
+bool web_shell_assets_valid(const web_shell_assets_t *set)
+{
+    if (set == NULL || set->count > 32 || (set->count && !set->table)) return false;
+    if (!set->count) return set->total == 0;
+    if (!set->digest || strlen(set->digest) != 16) return false;
+    for (const char *s=set->digest; *s; s++)
+        if (!((*s >= '0' && *s <= '9') || (*s >= 'a' && *s <= 'f'))) return false;
+    size_t total=0;
+    for (size_t i=0;i<set->count;i++) {
+        const web_asset_t *a=&set->table[i];
+        if (!a->path || a->path[0] != '/' || !a->path[1] || strlen(a->path) > 127 ||
+            !strcmp(a->path,"/api") || !strncmp(a->path,"/api/",5) || !strcmp(a->path,"/ws") ||
+            !a->type || !a->type[0] || strlen(a->type) > 96 || !a->gz || !a->gz_len ||
+            a->gz_len > SIZE_MAX-total) return false;
+        for (const char *s=a->path;*s;s++)
+            if ((unsigned char)*s <= 0x20 || (unsigned char)*s >= 0x7f || strchr("?#*\\",*s)) return false;
+        for (const char *s=a->type;*s;s++) if ((unsigned char)*s < 0x20 || (unsigned char)*s >= 0x7f) return false;
+        for (size_t j=0;j<i;j++) if (!strcmp(a->path,set->table[j].path)) return false;
+        total+=a->gz_len;
+    }
+    return total == set->total;
 }

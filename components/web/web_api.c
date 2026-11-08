@@ -60,7 +60,6 @@ static const char *TAG = "web";
 #define HISTORY_DAYS_MAX      90u
 
 /* Server-task snapshots (PSRAM). */
-EXT_RAM_BSS_ATTR static web_status_snap_t s_status;
 EXT_RAM_BSS_ATTR static station_status_t s_st;
 EXT_RAM_BSS_ATTR static ntrip_caster_cfg_t s_cfg[WEB_MAX_SLOTS];
 EXT_RAM_BSS_ATTR static ntrip_caster_status_t s_cst[WEB_MAX_SLOTS];
@@ -412,112 +411,6 @@ void web_note_scan_done(void)
 
 /* ---- session and setup ---------------------------------------------------------------------------------- */
 
-static esp_err_t h_session_get(web_req_t *r)
-{
-    web_admin_state_t admin = web_auth_admin_state();
-    if (network_get_status(&s_net) != ESP_OK) {
-        memset(&s_net, 0, sizeof(s_net));
-    }
-    bool authed = r->sess >= 0;
-    char name[33];
-    web_station_name(name, sizeof(name));
-    web_session_snap_t snap = {
-        .authenticated = authed,
-        .admin_set = admin != WEB_ADMIN_NONE,
-        .setup_done = read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_DONE, 0) != 0,
-        .claim_allowed = admin == WEB_ADMIN_NONE && r->on_ap,
-        .on_setup_ap = r->on_ap,
-        .public_status = web_public_status(),
-        .settings_available = settings_ok(),
-        .idle_left_s = authed ? web_auth_session_left_s(r->sess) : 0,
-        .hostname = name,
-        .mdns_host = s_net.mdns_host,
-        .ap_ssid = s_net.ap_ssid,
-        .setup_step = authed ? read_u8(SETTINGS_NS_SYS, SETTINGS_KEY_SETUP_STEP, WEB_SETUP_STEP_NONE)
-                             : (uint8_t)WEB_SETUP_STEP_NONE,
-    };
-    web_resp_t resp;
-    resp_begin(&resp, r->req, 200);
-    web_build_session(&resp.w, &snap);
-    return web_resp_end(&resp);
-}
-
-static esp_err_t h_session_post(web_req_t *r)
-{
-    web_admin_state_t admin = web_auth_admin_state();
-    if (admin == WEB_ADMIN_NONE) {
-        return web_send_err(r->req, WEB_ERR_ADMIN_NOT_SET);
-    }
-    if (admin == WEB_ADMIN_UNREADABLE) {
-        return web_send_error(r->req, WEB_ERR_SETTINGS_UNAVAILABLE,
-                              "The stored password cannot be read: hold the BOOT button to reset it", NULL, UINT32_MAX,
-                              NULL, NULL);
-    }
-    uint32_t wait = web_auth_throttle_wait_s(r->req, r->on_ap);
-    if (wait > 0) {
-        return web_send_error(r->req, WEB_ERR_RATE_LIMITED, NULL, NULL, wait, NULL, NULL);
-    }
-    web_bad_t b = { 0 };
-    const char *pw = NULL;
-    bool remember = false;
-    if (!web_parse_login(r->body, &pw, &remember, &b)) {
-        return bad(r->req, &b);
-    }
-    if (!web_auth_check(r->req, r->on_ap, pw)) {
-        return web_send_err(r->req, WEB_ERR_WRONG_PASSWORD);
-    }
-    /* A fresh login replaces the one this browser had. */
-    char cookie[96];
-    if (web_auth_start_session(r->req, remember, r->sess, cookie) < 0) {
-        return web_send_internal(r->req, ESP_FAIL);
-    }
-    if (remember) {
-        return web_send_json_literal(r->req, 200, "{\"authenticated\":true,\"idle_timeout_s\":null,\"remembered\":true}");
-    }
-    char body[80];
-    snprintf(body, sizeof(body), "{\"authenticated\":true,\"idle_timeout_s\":%u,\"remembered\":false}",
-             (unsigned)WEB_SESSION_IDLE_S);
-    return web_send_json_literal(r->req, 200, body);
-}
-
-static esp_err_t h_session_delete(web_req_t *r)
-{
-    web_auth_logout(r->req, r->sess);
-    return ok(r->req);
-}
-
-static esp_err_t h_setup_admin(web_req_t *r)
-{
-    if (web_auth_admin_state() != WEB_ADMIN_NONE) {
-        return web_send_err(r->req, WEB_ERR_ADMIN_ALREADY_SET);
-    }
-    if (!r->on_ap) {
-        return web_send_err(r->req, WEB_ERR_NOT_ON_SETUP_AP);
-    }
-    web_bad_t b = { 0 };
-    const char *pw = NULL;
-    if (!web_parse_password(r->body, "password", &pw, &b)) {
-        return bad(r->req, &b);
-    }
-    if (!web_password_valid(pw)) {
-        return web_send_error(r->req, WEB_ERR_INVALID_FIELD, "8-64 characters, no control characters", "password",
-                              UINT32_MAX, NULL, NULL);
-    }
-    bool persisted = false;
-    esp_err_t err = web_auth_set_password(pw, &persisted);
-    if (err != ESP_OK) {
-        return web_send_internal(r->req, err);
-    }
-    ESP_LOGW(TAG, "admin password set over the setup Wi-Fi%s", persisted ? "" : " (this boot only)");
-    /* Never remembered: its cookie belongs to the setup network's address, which closes after the setup. */
-    char cookie[96];
-    if (web_auth_start_session(r->req, false, -1, cookie) < 0) {
-        return web_send_internal(r->req, ESP_FAIL);
-    }
-    return web_send_json_literal(r->req, 200, persisted ? "{\"authenticated\":true,\"persisted\":true}"
-                                                        : "{\"authenticated\":true,\"persisted\":false}");
-}
-
 static esp_err_t h_setup_done(web_req_t *r)
 {
     if (!settings_ok()) {
@@ -555,49 +448,6 @@ static esp_err_t h_setup_step(web_req_t *r)
     char body[48];
     snprintf(body, sizeof(body), "{\"setup_step\":\"%s\"}", web_setup_step_name(step));
     return web_send_json_literal(r->req, 200, body);
-}
-
-static esp_err_t h_admin_password(web_req_t *r)
-{
-    uint32_t wait = web_auth_throttle_wait_s(r->req, r->on_ap);
-    if (wait > 0) {
-        return web_send_error(r->req, WEB_ERR_RATE_LIMITED, NULL, NULL, wait, NULL, NULL);
-    }
-    web_bad_t b = { 0 };
-    const char *cur = NULL;
-    const char *next = NULL;
-    if (!web_parse_admin_password(r->body, &cur, &next, &b)) {
-        return bad(r->req, &b);
-    }
-    if (!settings_ok()) {
-        return web_send_err(r->req, WEB_ERR_SETTINGS_UNAVAILABLE);
-    }
-    if (!web_auth_check(r->req, r->on_ap, cur)) {
-        return web_send_err(r->req, WEB_ERR_WRONG_PASSWORD);
-    }
-    if (!web_password_valid(next)) {
-        return web_send_error(r->req, WEB_ERR_INVALID_FIELD, "8-64 characters, no control characters", "new",
-                              UINT32_MAX, NULL, NULL);
-    }
-    bool persisted = false;
-    esp_err_t err = web_auth_set_password(next, &persisted);
-    if (err != ESP_OK) {
-        return web_send_internal(r->req, err);
-    }
-    web_auth_end_sessions(r->sess);
-    ESP_LOGW(TAG, "admin password changed: other sessions ended");
-    return ok(r->req);
-}
-
-/* ---- status ------------------------------------------------------------------------------------------------ */
-
-static esp_err_t h_status(web_req_t *r)
-{
-    web_snap_status(&s_status);
-    web_resp_t resp;
-    resp_begin(&resp, r->req, 200);
-    web_build_status(&resp.w, &s_status, !r->admin);
-    return web_resp_end(&resp);
 }
 
 /* ---- receiver ------------------------------------------------------------------------------------------------ */
@@ -2795,14 +2645,8 @@ static esp_err_t h_power_lost_dismiss(web_req_t *r)
 #define ROUTE(u, m, a, b, f) { .uri = (u), .method = (m), .access = (a), .body = (b), .max_body = 0, .fn = (f) }
 
 const web_route_t web_api_routes[] = {
-    ROUTE("/api/session", HTTP_GET, WEB_ACC_PUB, WEB_BODY_NONE, h_session_get),
-    ROUTE("/api/session", HTTP_POST, WEB_ACC_PUB, WEB_BODY_JSON, h_session_post),
-    ROUTE("/api/session", HTTP_DELETE, WEB_ACC_ADMIN, WEB_BODY_NONE, h_session_delete),
-    ROUTE("/api/setup/admin", HTTP_POST, WEB_ACC_CLAIM, WEB_BODY_JSON, h_setup_admin),
     ROUTE("/api/setup/done", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_setup_done),
     ROUTE("/api/setup/step", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_setup_step),
-    ROUTE("/api/admin-password", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_admin_password),
-    ROUTE("/api/status", HTTP_GET, WEB_ACC_PUBSTAR, WEB_BODY_NONE, h_status),
     ROUTE("/api/gnss", HTTP_GET, WEB_ACC_ADMIN, WEB_BODY_NONE, h_gnss),
     ROUTE("/api/gnss/profile", HTTP_PUT, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_profile),
     ROUTE("/api/gnss/apply", HTTP_POST, WEB_ACC_ADMIN, WEB_BODY_JSON, h_gnss_apply),

@@ -13,6 +13,7 @@
 #include "um98x_profile.h"
 #include "unity.h"
 #include "web_build.h"
+#include "web_shell_registry.h"
 #include "web_enums.h"
 
 static char s_out[32768];
@@ -715,7 +716,7 @@ TEST_CASE("connection history: the four kinds, newest first, nothing past the pa
     cJSON_Delete(root);
 }
 
-/* web_ws.c builds every status section into 1280 bytes and every caster summary into 896. */
+/* web_shell_ws.c builds every status section into 1280 bytes and every caster summary into 896. */
 TEST_CASE("status sections with the new fields still fit the WebSocket's section buffers", "[web_live]")
 {
     static web_status_snap_t s;
@@ -822,4 +823,16 @@ TEST_CASE("status sections with the new fields still fit the WebSocket's section
     wj_init_elements(&w, cst, sizeof(cst));
     web_build_caster_summary(&w, &s, 0, false);
     TEST_ASSERT_TRUE(wj_ok(&w));
+    web_shell_registry_t registry;
+    TEST_ASSERT_TRUE(web_shell_registry_init(&registry,1,WEB_SHELL_SECTIONS_MAX,WEB_SHELL_STATUS_MAX));
+    TEST_ASSERT_TRUE(web_shell_registry_sections(&registry,web_station_sections,web_station_section_count));
+    s.slots=WEB_MAX_SLOTS;
+    for (size_t i=1;i<WEB_MAX_SLOTS;i++) { s.cfg[i]=s.cfg[0]; s.cst[i]=s.cst[0]; }
+    web_shell_frame_t frame={0};
+    static char status[WEB_SHELL_STATUS_MAX];
+    for (unsigned pub=0;pub<2;pub++) {
+        TEST_ASSERT_TRUE(web_shell_frame_build(&registry,&s,s.uptime_s,pub,&frame));
+        TEST_ASSERT_GREATER_THAN(0,web_shell_frame_render(&registry,&frame,NULL,true,true,1,status,sizeof(status)));
+    }
+    web_shell_frame_dispose(&frame);
 }

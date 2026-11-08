@@ -13,10 +13,28 @@
 #include "diag.h"
 #include "network.h"
 #include "web_json.h"
+#include "web_shell_provider.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+typedef struct {
+    bool authenticated;            /**< the request has a valid admin session */
+    bool admin_set;
+    bool setup_done;
+    bool claim_allowed;
+    bool on_setup_ap;
+    bool public_status;
+    bool settings_available;
+    uint32_t idle_left_s;          /**< with a session: until it expires idle */
+    const char *hostname;          /**< configured display name */
+    const char *mdns_host;         /**< label the mDNS responder answers ("" = not running) */
+    const char *ap_ssid;           /**< setup AP name ("" = not known yet) */
+    const char *setup_step;       /**< product name of the stored step, NULL = none */
+} web_shell_session_snap_t;
+
+void web_shell_build_session(wj_t *w, const web_shell_session_snap_t *s);
 
 typedef struct {
     const network_status_t *net;

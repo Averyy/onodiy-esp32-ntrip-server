@@ -3,16 +3,15 @@
 #
 # Product-specific pure cores are also compiled into the host test app.
 # web_shell holds the reusable JSON, connection, password, asset and helper
-# cores; web.c, web_api.c, web_auth.c, web_ws.c and web_worker.c stay here.
+# cores and HTTP runtime; station routes, snapshots, events and job bodies stay here.
 # um98x_ctl (profile codec, WGS84/ECEF) and um98x_flash (package facts) are
 # lower layers the API needs directly.
 idf_component_register(
     SRCS
-        "web.c"
+        "web_station.c"
+        "web_station_provider.c"
         "web_api.c"
-        "web_auth.c"
-        "web_ws.c"
-        "web_worker.c"
+        "web_station_jobs.c"
         "web_core.c"
         "web_enums.c"
         "web_build.c"

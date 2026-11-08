@@ -6,7 +6,6 @@
  * before a handler runs, the dispatcher of the REST routes, the embedded UI
  * assets, the captive portal, component events and the periodic tick.
  */
-#include "web.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -27,20 +26,15 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "fw_update.h"
-#include "health.h"
 #include "lifecycle.h"
 #include "lwip/sockets.h"
 #include "network.h"
-#include "ntrip_server.h"
 #include "sdkconfig.h"
 #include "settings.h"
-#include "station.h"
 #include "web_assets.h"
+#include "web_shell_internal.h"
+#include "web_shell_worker.h"
 #include "web_conn.h"
-#include "web_enums.h"
-#include "web_internal.h"
-#include "web_parse.h"
 
 static const char *TAG = "web";
 
@@ -60,7 +54,7 @@ _Static_assert(ESP_ERR_OTA_VALIDATE_FAILED == 0x1503, "OTA validation error code
  * One browser page can hold 7 by itself: its WebSocket and the 6 connections
  * a browser opens to one host for its requests. */
 #define SERVER_MAX_SOCKETS   10
-#define SERVER_MAX_URIS      WEB_MAX_URI_HANDLERS
+#define SHELL_BUILTIN_HANDLERS 8u
 #define SERVER_STACK         8192
 #define SERVER_PRIO          5
 #define SERVER_HDR_LEN       2048
@@ -101,7 +95,7 @@ static esp_netif_t *s_sta;
 static esp_netif_t *s_ap;
 static char s_hostname[33];
 static portMUX_TYPE s_name_lock = portMUX_INITIALIZER_UNLOCKED;
-static char s_name[33];   /* s_name_lock: web_station_name */
+static char s_name[33];   /* s_name_lock: web_shell_name */
 static char s_etag[64];   /* "<app version>-<UI digest>" with quotes */
 static bool s_public;
 static esp_timer_handle_t s_tick_timer;
@@ -112,11 +106,9 @@ static atomic_int s_reboot_reason = -1;
 static atomic_bool s_rebooting;
 
 /* Flags set by event handlers, consumed by the tick on the server task. */
-static atomic_uint s_caster_changed;     /* slot bit mask */
 static atomic_bool s_auth_reload;
 static atomic_bool s_end_all_sessions;
 static atomic_bool s_public_reload;
-static atomic_bool s_fw_changed;
 static atomic_bool s_scan_done;
 
 /* The X-Client-Id of the mutating request running now or just finished
@@ -137,7 +129,13 @@ static uint32_t s_late_count;
 /* Server-task buffers in PSRAM. */
 EXT_RAM_BSS_ATTR static char s_http_buf[2048];
 EXT_RAM_BSS_ATTR static char s_body[WEB_JSON_MAX_CA + 1];
-static char s_csp[512];
+static char s_csp[1536];
+static web_shell_config_t s_config;
+EXT_RAM_BSS_ATTR static web_shell_registry_t s_registry;
+EXT_RAM_BSS_ATTR static web_route_t s_routes[WEB_SHELL_ROUTES_MAX];
+static bool s_initialized;
+extern const web_route_t web_shell_builtin_routes[];
+extern const size_t web_shell_builtin_route_count;
 
 /* ---- small accessors ------------------------------------------------------------------- */
 
@@ -427,14 +425,14 @@ const char *web_hostname_active(void)
     return s_hostname;
 }
 
-void web_station_name(char *out, size_t size)
+void web_shell_name(char *out, size_t size)
 {
     taskENTER_CRITICAL(&s_name_lock);
     strlcpy(out, s_name[0] != '\0' ? s_name : s_hostname, size);
     taskEXIT_CRITICAL(&s_name_lock);
 }
 
-void web_station_name_set(const char *name)
+void web_shell_name_set(const char *name)
 {
     taskENTER_CRITICAL(&s_name_lock);
     strlcpy(s_name, name, sizeof(s_name));
@@ -450,7 +448,7 @@ char *web_http_buf(size_t *cap)
 static void load_public_status(void)
 {
     uint8_t v = 0;
-    web_public_status_set_cached(settings_get_u8(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_PUBLIC, &v) == ESP_OK && v != 0);
+    web_public_status_set_cached(settings_get_u8(s_config.storage.public_status.ns, s_config.storage.public_status.key, &v) == ESP_OK && v != 0);
 }
 
 static void load_hostname(void)
@@ -462,9 +460,9 @@ static void load_hostname(void)
         settings_default_hostname(s_hostname, sizeof(s_hostname));
     }
     char stored[33] = "";
-    if (settings_get_str(SETTINGS_NS_SYS, SETTINGS_KEY_HOSTNAME, stored, sizeof(stored)) == ESP_OK &&
+    if (settings_get_str(s_config.storage.hostname.ns, s_config.storage.hostname.key, stored, sizeof(stored)) == ESP_OK &&
         web_hostname_valid(stored)) {
-        web_station_name_set(stored);   /* as the network component takes it; else the name in use */
+        web_shell_name_set(stored);   /* as the network component takes it; else the name in use */
     }
 }
 
@@ -985,6 +983,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
     web_req_t r;
     memset(&r, 0, sizeof(r));
     r.req = req;
+    r.ctx = rt->ctx;
     r.sess = -1;
     pre_t pre = precheck(req, &r.on_ap, false);
     if (pre != PRE_OK) {
@@ -1012,6 +1011,7 @@ static esp_err_t api_handle(httpd_req_t *req, web_req_t *rp)
         return web_refuse_and_close(req, WEB_ERR_UNSUPPORTED_MEDIA_TYPE);
     }
     size_t max_body = rt->max_body != 0 ? rt->max_body : WEB_JSON_MAX;
+    if (max_body > s_config.json_body_bytes) max_body = s_config.json_body_bytes;
     if (rt->body == WEB_BODY_JSON && req->content_len > max_body) {
         return web_refuse_and_close(req, WEB_ERR_TOO_LARGE);
     }
@@ -1072,7 +1072,7 @@ static esp_err_t api_dispatch(httpd_req_t *req)
     bool close = request_begin(req, true);
     esp_err_t ret = request_end(req, close, api_handle(req, &r));
     if (r.sess >= 0) {
-        health_note_admin_activity();   /* someone uses the page: the GNSS ladder's restart waits */
+        web_shell_admin_activity();   /* someone uses the page: the GNSS ladder's restart waits */
     }
     web_conn_request_done(req, r.sess >= 0);
     return ret;
@@ -1091,15 +1091,10 @@ static esp_err_t serve_asset(httpd_req_t *req, const web_asset_t *a)
     httpd_resp_set_hdr(req, "ETag", s_etag);
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     if (is_html(a)) {
-        /* Scripts, styles and the map's module worker come from this station.
-         * Only the optional map connects to OSM, after the user asks for it.
-         * The Host was validated, so it is safe to name in the policy. */
-        snprintf(s_csp, sizeof(s_csp),
-                 "default-src 'self'; script-src 'self'; worker-src 'self'; style-src 'self'; img-src 'self' data: blob: " WEB_MAP_TILE_ORIGIN "; "
-                 "font-src 'self'; "
-                 "connect-src 'self' " WEB_MAP_TILE_ORIGIN " ws://%s; object-src 'none'; base-uri 'none'; form-action 'self'; "
-                 "frame-ancestors 'none'",
-                 s_host);
+        if (!web_shell_csp(s_csp, sizeof(s_csp), s_host, s_config.img_origins, s_config.img_origin_count,
+                           s_config.connect_origins, s_config.connect_origin_count)) {
+            return web_send_internal(req, ESP_ERR_INVALID_STATE);
+        }
         httpd_resp_set_hdr(req, "Content-Security-Policy", s_csp);
     }
     char inm[160];
@@ -1126,10 +1121,10 @@ static esp_err_t fallback_handle(httpd_req_t *req)
     if (pre != PRE_OK) {
         return pre == PRE_CLOSE ? ESP_FAIL : ESP_OK;
     }
-    const web_asset_t *a = web_asset_find(web_ui_assets, web_ui_asset_count, req->uri);
+    const web_asset_t *a = web_asset_find(s_config.assets.table, s_config.assets.count, req->uri);
     web_fallback_t what = web_fallback_classify(req->uri, req->method == HTTP_OPTIONS,
                                                 req->method == HTTP_GET || req->method == HTTP_HEAD, a != NULL, on_ap,
-                                                web_api_path_known);
+                                                web_shell_path_known);
     bool body = web_req_body_of(req) != WEB_REQ_BODY_NONE;
     switch (what) {
     case WEB_FB_ASSET:
@@ -1187,24 +1182,6 @@ static void on_sess_close(httpd_handle_t hd, int fd)
 
 /* ---- periodic tick and events -------------------------------------------------------------------- */
 
-/* A BOOT-button admin reset clears the stored password through settings
- * (whose change event reloads it); a password set while the settings were
- * unavailable lives only here, so the reset count is watched too. */
-static void check_admin_reset(void)
-{
-    static uint32_t seen;
-    static bool known;
-    health_status_t hs;
-    if (health_get_status(&hs) != ESP_OK) {
-        return;
-    }
-    if (known && hs.admin_resets != seen) {
-        web_auth_admin_reset();
-    }
-    seen = hs.admin_resets;
-    known = true;
-}
-
 static void tick_work(void *arg)
 {
     (void)arg;
@@ -1228,34 +1205,11 @@ static void tick_work(void *arg)
     if (atomic_exchange(&s_public_reload, false)) {
         load_public_status();
     }
-    bool fw_event = atomic_exchange(&s_fw_changed, false);
-    if (fw_event || half) {
-        web_track_fw_state(fw_event);
+    if (atomic_exchange(&s_scan_done, false) && s_config.scan_done) {
+        s_config.scan_done(s_config.ctx);
     }
-    if (atomic_exchange(&s_scan_done, false)) {
-        web_note_scan_done();
-    }
-    unsigned changed = atomic_exchange(&s_caster_changed, 0u);
-    for (size_t slot = 0; changed != 0 && slot < WEB_MAX_SLOTS; slot++) {
-        if ((changed & (1u << slot)) == 0) {
-            continue;
-        }
-        ntrip_caster_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (st == NULL) {
-            st = malloc(sizeof(*st));
-        }
-        if (st != NULL && ntrip_server_get_status(slot, st) == ESP_OK) {
-            char ev[96];
-            snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"caster_state\",\"slot\":%u,\"state\":\"%s\"}",
-                     (unsigned)slot, web_ntrip_state_name(st->state));
-            web_ws_event(ev);
-        }
-        free(st);
-    }
-    if (second) {
-        web_auth_expire();
-        check_admin_reset();
-    }
+    if (second) web_auth_expire();
+    if (s_config.tick) s_config.tick(s_config.ctx, second, half);
     web_ws_tick(second, half);
 }
 
@@ -1283,46 +1237,6 @@ static void event_json(const char *event, const char *key, const char *value)
         snprintf(ev, sizeof(ev), "{\"type\":\"event\",\"event\":\"%s\"}", event);
     }
     web_ws_event(ev);
-}
-
-static void on_station(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg;
-    (void)base;
-    if (id == STATION_EVENT_STATE_CHANGED && data != NULL) {
-        event_json("station_state", "state", web_station_state_name(*(const station_state_t *)data));
-    } else if (id == STATION_EVENT_FLASH_PROGRESS && data != NULL) {
-        web_ws_note_flash_progress((const um98x_flash_progress_t *)data, false);
-    } else if (id == STATION_EVENT_FLASH_ENDED && data != NULL) {
-        web_ws_note_flash_progress((const um98x_flash_progress_t *)data, true);
-    } else if (id == STATION_EVENT_RECEIVER_RESTARTED) {
-        event_json("receiver_restarted", NULL, NULL);
-    }
-    web_kick();
-}
-
-static void on_ntrip(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg;
-    (void)base;
-    if (id == NTRIP_EVENT_STATE_CHANGED && data != NULL) {
-        size_t slot = *(const size_t *)data;
-        if (slot < WEB_MAX_SLOTS) {
-            atomic_fetch_or(&s_caster_changed, 1u << slot);
-            web_kick();
-        }
-    }
-}
-
-static void on_fw(void *arg, esp_event_base_t base, int32_t id, void *data)
-{
-    (void)arg;
-    (void)base;
-    if (id == FW_UPDATE_EVENT_STATE_CHANGED && data != NULL) {
-        event_json("update_state", "state", web_fw_state_name(*(const fw_update_state_t *)data));
-        atomic_store(&s_fw_changed, true);
-        web_kick();
-    }
 }
 
 static void on_network(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -1373,10 +1287,10 @@ static void on_settings(void *arg, esp_event_base_t base, int32_t id, void *data
     const settings_changed_t *c = data;
     char ns[sizeof(c->ns)];
     strlcpy(ns, c->ns, sizeof(ns));
-    if (strcmp(ns, SETTINGS_NS_SYS) == 0 && (c->key[0] == '\0' || strcmp(c->key, SETTINGS_KEY_ADMIN_HASH) == 0)) {
+    if (strcmp(ns, s_config.storage.password.ns) == 0 && (c->key[0] == '\0' || strcmp(c->key, s_config.storage.password.key) == 0)) {
         atomic_store(&s_auth_reload, true);
     }
-    if (strcmp(ns, SETTINGS_NS_WEB) == 0) {
+    if (strcmp(ns, s_config.storage.public_status.ns) == 0) {
         atomic_store(&s_public_reload, true);
     }
     /* The namespace is ours (schema), plain ASCII: safe in the JSON string.
@@ -1462,8 +1376,28 @@ static void *json_malloc(size_t size)
 
 /* ---- public API ------------------------------------------------------------------------------------ */
 
-esp_err_t web_init(void)
+esp_err_t web_shell_init(const web_shell_config_t *config)
 {
+    if (config == NULL) return ESP_ERR_INVALID_ARG;
+    if (s_server != NULL || s_registry.sealed) return ESP_ERR_INVALID_STATE;
+    web_shell_config_t cfg = *config;
+    if (!cfg.route_capacity) cfg.route_capacity = WEB_MAX_URI_HANDLERS - SHELL_BUILTIN_HANDLERS;
+    if (!cfg.section_capacity) cfg.section_capacity = WEB_SHELL_SECTIONS_MAX;
+    if (!cfg.status_bytes) cfg.status_bytes = WEB_SHELL_STATUS_MAX;
+    if (!cfg.json_body_bytes) cfg.json_body_bytes = WEB_JSON_MAX_CA;
+    const web_shell_storage_key_t *keys[] = { &cfg.storage.password, &cfg.storage.sessions, &cfg.storage.public_status,
+        &cfg.storage.setup_done, &cfg.storage.setup_step, &cfg.storage.hostname };
+    for (size_t i=0; i<sizeof(keys)/sizeof(keys[0]); i++)
+        if (!keys[i]->ns || !keys[i]->key || !keys[i]->ns[0] || !keys[i]->key[0] ||
+            strlen(keys[i]->ns)>15 || strlen(keys[i]->key)>15) return ESP_ERR_INVALID_ARG;
+    if (!cfg.title || !cfg.default_brand || !cfg.product_noun || !cfg.project_name || !cfg.browser_storage_prefix ||
+        !web_shell_assets_valid(&cfg.assets) ||
+        cfg.route_capacity + SHELL_BUILTIN_HANDLERS > WEB_MAX_URI_HANDLERS ||
+        cfg.json_body_bytes < 256 || cfg.json_body_bytes > WEB_JSON_MAX_CA ||
+        !web_shell_csp(s_csp,sizeof(s_csp),"device",cfg.img_origins,cfg.img_origin_count,
+                       cfg.connect_origins,cfg.connect_origin_count)) return ESP_ERR_INVALID_ARG;
+    if (!web_shell_registry_init(&s_registry,cfg.route_capacity,cfg.section_capacity,cfg.status_bytes)) return ESP_ERR_INVALID_ARG;
+    s_config = cfg;
     /* Request parsing only (responses use the streaming writer); global
      * hooks, set before any other task parses JSON. */
     cJSON_Hooks hooks = { .malloc_fn = json_malloc, .free_fn = free };
@@ -1471,25 +1405,26 @@ esp_err_t web_init(void)
 
     /* The UI digest keeps a development build whose version string does not
      * change from leaving a browser on a stale cached UI. */
-    snprintf(s_etag, sizeof(s_etag), "\"%s-%s\"", esp_app_get_description()->version, web_ui_digest);
+    snprintf(s_etag, sizeof(s_etag), "\"%s-%s\"", esp_app_get_description()->version, s_config.assets.digest ? s_config.assets.digest : "none");
     web_conns_init(&s_conns, (uint32_t)CONFIG_WEB_REQUEST_DEADLINE_S * 1000u);
     load_public_status();
     web_auth_init();
     if (s_reboot_sem == NULL) {
         s_reboot_sem = xSemaphoreCreateBinary();
+        if (s_reboot_sem == NULL) return ESP_ERR_NO_MEM;
     }
     esp_err_t err = web_ws_init();
     if (err == ESP_OK) {
-        err = web_worker_init();
+        err = web_shell_worker_init();
     }
     if (err != ESP_OK) {
         return err;
     }
+    if (s_initialized) return ESP_OK;
     static const struct {
         const esp_event_base_t *base;
         esp_event_handler_t fn;
     } subs[] = {
-        { &STATION_EVENT, on_station },     { &NTRIP_EVENT, on_ntrip },       { &FW_UPDATE_EVENT, on_fw },
         { &NETWORK_EVENT, on_network },     { &SETTINGS_EVENT, on_settings }, { &LIFECYCLE_EVENT, on_lifecycle },
     };
     for (size_t i = 0; i < sizeof(subs) / sizeof(subs[0]); i++) {
@@ -1510,15 +1445,18 @@ esp_err_t web_init(void)
             return err;
         }
     }
-    ESP_LOGI(TAG, "%u UI asset(s), public status %s", (unsigned)web_ui_asset_count, s_public ? "on" : "off");
+    s_initialized = true;
+    ESP_LOGI(TAG, "%u UI asset(s), public status %s", (unsigned)s_config.assets.count, s_public ? "on" : "off");
     return ESP_OK;
 }
 
-esp_err_t web_start(void)
+esp_err_t web_shell_start(void)
 {
     if (s_server != NULL) {
         return ESP_OK;
     }
+    if (!s_initialized || !web_shell_registry_seal(&s_registry)) return ESP_ERR_INVALID_STATE;
+    web_shell_worker_accept(true);
     s_sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
     s_ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
     load_hostname();
@@ -1541,7 +1479,7 @@ esp_err_t web_start(void)
     cfg.stack_size = SERVER_STACK;
     cfg.task_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
     cfg.max_open_sockets = SERVER_MAX_SOCKETS;
-    cfg.max_uri_handlers = SERVER_MAX_URIS;
+    cfg.max_uri_handlers = s_config.route_capacity + SHELL_BUILTIN_HANDLERS;
     cfg.max_resp_headers = 12;
     cfg.max_req_hdr_len = SERVER_HDR_LEN;
     /* Not the server's own LRU purge: it would close an admin's quiet
@@ -1559,8 +1497,9 @@ esp_err_t web_start(void)
         return err;
     }
 
-    for (size_t i = 0; i < web_api_route_count; i++) {
-        const web_route_t *rt = &web_api_routes[i];
+    for (size_t i = 0; i < web_shell_builtin_route_count + s_registry.route_count; i++) {
+        const web_route_t *rt = i < web_shell_builtin_route_count ? &web_shell_builtin_routes[i]
+                              : &s_routes[i - web_shell_builtin_route_count];
         httpd_uri_t u = {
             .uri = rt->uri,
             .method = rt->method,
@@ -1605,16 +1544,76 @@ esp_err_t web_start(void)
     return ESP_OK;
 }
 
-esp_err_t web_stop(void)
+esp_err_t web_shell_stop(void)
 {
     if (s_tick_timer != NULL) {
         (void)esp_timer_stop(s_tick_timer);
     }
-    if (s_server == NULL) {
-        return ESP_OK;
+    web_shell_worker_accept(false);
+    while (!web_shell_worker_idle()) {
+        web_shell_worker_interrupt();
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
+    if (s_server == NULL) return ESP_OK;
     /* Stopping closes every session; the close callback forgets the WebSocket clients. */
     esp_err_t err = httpd_stop(s_server);
     s_server = NULL;
     return err;
 }
+
+const web_shell_config_t *web_shell_config(void) { return &s_config; }
+const web_shell_registry_t *web_shell_registry(void) { return &s_registry; }
+void web_shell_admin_activity(void) { if (s_config.admin_activity) s_config.admin_activity(s_config.ctx); }
+bool web_shell_path_known(const char *path) { return web_shell_registry_path(&s_registry,path); }
+
+static bool route_method_valid(int method)
+{
+    if (method == HTTP_ANY) return true;
+    switch (method) {
+#define XX(num, name, text) case HTTP_##name: return true;
+        HTTP_METHOD_MAP(XX)
+#undef XX
+    default: return false;
+    }
+}
+
+esp_err_t web_shell_register_routes(const web_route_t *routes, size_t count)
+{
+    if (!s_initialized || s_registry.sealed) return ESP_ERR_INVALID_STATE;
+    if ((!routes && count) || count > s_registry.route_cap - s_registry.route_count) {
+        s_registry.failed = true; return ESP_ERR_INVALID_ARG;
+    }
+    static web_shell_route_rule_t rules[WEB_SHELL_ROUTES_MAX];
+    for (size_t i=0; i<count; i++) {
+        const web_route_t *r=&routes[i];
+        if (!r->fn || (unsigned)r->access > WEB_ACC_CLAIM || (unsigned)r->body > WEB_BODY_UPLOAD ||
+            (r->body == WEB_BODY_JSON && r->max_body > s_config.json_body_bytes) ||
+            !route_method_valid(r->method)) { s_registry.failed=true; return ESP_ERR_INVALID_ARG; }
+        rules[i]=(web_shell_route_rule_t){.uri=r->uri,.method=r->method,.path_known=r->path_known,.ctx=r->ctx};
+    }
+    size_t at=s_registry.route_count;
+    if (!web_shell_registry_routes(&s_registry,rules,count)) return ESP_ERR_INVALID_ARG;
+    if (count) memcpy(s_routes+at,routes,count*sizeof(*routes));
+    return ESP_OK;
+}
+esp_err_t web_shell_register_status(const web_shell_status_provider_t *provider)
+{
+    if (!s_initialized || s_registry.sealed) return ESP_ERR_INVALID_STATE;
+    return web_shell_registry_status(&s_registry,provider) ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+esp_err_t web_shell_register_sections(const web_shell_section_t *sections, size_t count)
+{
+    if (!s_initialized || s_registry.sealed) return ESP_ERR_INVALID_STATE;
+    return web_shell_registry_sections(&s_registry,sections,count) ? ESP_OK : ESP_ERR_INVALID_ARG;
+}
+esp_err_t web_shell_event(const char *json)
+{
+    if (!json || strlen(json) >= 160) return ESP_ERR_INVALID_ARG;
+    cJSON *obj=web_parse_object(json,strlen(json));
+    if (!obj) return ESP_ERR_INVALID_ARG;
+    cJSON_Delete(obj);
+    if (!s_server) return ESP_ERR_INVALID_STATE;
+    web_ws_event(json); web_kick(); return ESP_OK;
+}
+esp_err_t web_shell_publish(const char *topic, const char *json) { return web_ws_publish(topic,json); }
+esp_err_t web_shell_progress(const char *json) { return web_ws_publish("progress",json); }

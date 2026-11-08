@@ -2224,7 +2224,7 @@ TEST_CASE("a caster summary with the longest stop reason still fits the WebSocke
     s_snap.cst[0].next_retry_s = UINT32_MAX - 1;
     s_snap.cst[0].unreached_s = UINT32_MAX - 1;
     memset(s_snap.cst[0].hint, '"', sizeof(s_snap.cst[0].hint) - 1);
-    static char cst[896];   /* web_ws.c CST_TEXT_MAX */
+    static char cst[896];   /* web_shell_ws.c CST_TEXT_MAX */
     wj_t w;
     wj_init_elements(&w, cst, sizeof(cst));
     web_build_caster_summary(&w, &s_snap, 0, false);
@@ -3153,7 +3153,7 @@ TEST_CASE("status: the monitor section, latest and 24 h, null where nothing is k
         "\"rssi\":{\"now\":-79,\"avg\":-78,\"min\":-84},\"cpu\":{\"now\":12,\"avg\":10,\"max\":40},"
         "\"memory\":{\"free\":120000,\"min\":98000}}",
         wj_text(&w));
-    TEST_ASSERT_TRUE(strlen(wj_text(&w)) < 800);   /* well inside a status section's room (web_ws.c SEC_TEXT_MAX) */
+    TEST_ASSERT_TRUE(strlen(wj_text(&w)) < 800);   /* well inside a status section's room (web_shell_ws.c SEC_TEXT_MAX) */
 
     /* Admin only. */
     wj_init_members(&w, frag, sizeof(frag));

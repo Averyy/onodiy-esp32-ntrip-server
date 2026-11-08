@@ -18,6 +18,8 @@
 extern "C" {
 #endif
 
+const char *web_reboot_reason_name(lifecycle_reboot_reason_t v);
+
 const char *web_probe_name(network_probe_t v);
 /** Name of one network_ap_reason_t bit (NULL for an unknown bit). */
 const char *web_ap_reason_name(uint32_t bit);

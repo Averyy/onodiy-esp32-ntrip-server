@@ -40,7 +40,7 @@ What it does:
      the client's FIN);
      both ways a JSON answer goes out, on one kept HTTP/1.1 connection: one
      that fits the web server's response buffer (its size read from
-     components/web/web.c) with its Content-Length, a larger one streamed
+     components/web_shell/web_shell.c) with its Content-Length, a larger one streamed
      (chunked), each expectation following the answer's measured size, both
      ways taken, and the connection answers again after the streamed one;
      streamed answers to HTTP/1.0 carry no chunked framing: GET
@@ -906,9 +906,9 @@ class AnswerReader:
 
 
 def response_buffer_size() -> int | None:
-    """The web server's response buffer (components/web/web.c, s_http_buf): a JSON answer larger than it is
+    """The web server's response buffer (components/web_shell/web_shell.c, s_http_buf): a JSON answer larger than it is
     streamed (chunked to HTTP/1.1), one that fits goes out with its Content-Length."""
-    m = re.search(r"\bs_http_buf\[(\d+)\];", (ROOT / "components" / "web" / "web.c").read_text(encoding="utf-8"))
+    m = re.search(r"\bs_http_buf\[(\d+)\];", (ROOT / "components" / "web_shell" / "web_shell.c").read_text(encoding="utf-8"))
     return int(m.group(1)) if m else None
 
 
@@ -1241,10 +1241,10 @@ class Smoke:
                    f"closed {secs(eof)} after the answer")
         # Both ways a JSON answer goes out, on one HTTP/1.1 connection kept alive throughout: an answer that fits
         # the response buffer with its Content-Length, a larger one streamed (chunked). Which way an answer must
-        # take follows from its size, measured here, against the buffer the firmware has (read from web.c), so the
+        # take follows from its size, measured here, against the buffer the firmware has (read from web_shell.c), so the
         # expectation holds wherever the answers' sizes differ; that both ways were taken is checked on its own.
         cap = response_buffer_size()
-        if not self.check(cap is not None, f"the web server's response buffer read from web.c ({cap} bytes)"):
+        if not self.check(cap is not None, f"the web server's response buffer read from web_shell.c ({cap} bytes)"):
             return
         answers: list[tuple[str, Answer]] = []
         with socket.create_connection(("127.0.0.1", port), timeout=10) as c:

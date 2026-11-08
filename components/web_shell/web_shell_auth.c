@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: MIT
  *
  * Admin password, sessions and login throttling. Server task only (see
- * web_internal.h), so nothing here takes a lock.
+ * web_shell_internal.h), so nothing here takes a lock.
  *
  * Remembered sessions (web_core.h) are kept in settings web/sessions as the
  * SHA-256 of their token with their end in UTC, bound to the admin
@@ -22,7 +22,7 @@
 #include "esp_random.h"
 #include "sdkconfig.h"
 #include "settings.h"
-#include "web_internal.h"
+#include "web_shell_internal.h"
 #include "web_pw.h"
 
 static const char *TAG = "web";
@@ -43,7 +43,7 @@ static bool load(void)
     uint8_t buf[sizeof(s_blob)];
     size_t len = sizeof(buf);
     bool unreadable = false;
-    esp_err_t err = settings_is_available() ? settings_get_blob(SETTINGS_NS_SYS, SETTINGS_KEY_ADMIN_HASH, buf, &len)
+    esp_err_t err = settings_is_available() ? settings_get_blob(web_shell_config()->storage.password.ns, web_shell_config()->storage.password.key, buf, &len)
                                             : ESP_ERR_INVALID_STATE;
     if (err == ESP_ERR_NVS_NOT_FOUND || err == ESP_ERR_INVALID_STATE) {
         len = 0;
@@ -153,8 +153,8 @@ static void store_sessions(bool mark)
         now_mark = web_sess_mark_now(&s_sess, web_now_s(), diag_utc_now());
         len = web_sess_store_encode(&s_sess, s_rec.salt, now_mark, s_next, sizeof(s_next), &n);
     }
-    esp_err_t err = len > 0 ? settings_set_state_blob(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS, s_next, len)
-                            : settings_erase_state_key(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS);
+    esp_err_t err = len > 0 ? settings_set_state_blob(web_shell_config()->storage.sessions.ns, web_shell_config()->storage.sessions.key, s_next, len)
+                            : settings_erase_state_key(web_shell_config()->storage.sessions.ns, web_shell_config()->storage.sessions.key);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "remembered logins not stored: %s", esp_err_to_name(err));
         return;   /* the next change tries again */
@@ -176,7 +176,7 @@ static void restore_sessions(void)
         return;
     }
     size_t len = sizeof(s_kept);
-    esp_err_t err = settings_get_blob(SETTINGS_NS_WEB, SETTINGS_KEY_WEB_SESSIONS, s_kept, &len);
+    esp_err_t err = settings_get_blob(web_shell_config()->storage.sessions.ns, web_shell_config()->storage.sessions.key, s_kept, &len);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return;
     }
@@ -394,7 +394,7 @@ esp_err_t web_auth_set_password(const char *pw, bool *persisted)
         memcpy(s_blob, blob, len);
         s_blob_len = len;
         s_blob_unreadable = false;
-        esp_err_t err = settings_set_blob(SETTINGS_NS_SYS, SETTINGS_KEY_ADMIN_HASH, blob, len);
+        esp_err_t err = settings_set_blob(web_shell_config()->storage.password.ns, web_shell_config()->storage.password.key, blob, len);
         if (err != ESP_OK) {
             memcpy(s_blob, old, sizeof(s_blob));
             s_blob_len = old_len;

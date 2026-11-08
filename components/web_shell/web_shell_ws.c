@@ -24,17 +24,12 @@
 #include <sys/socket.h>
 
 #include "diag.h"
+#include "web_shell_internal.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "health.h"
-#include "station.h"
-#include "web.h"
-#include "web_enums.h"
-#include "web_internal.h"
-#include "web_parse.h"
 
 static const char *TAG = "web";
 
@@ -358,7 +353,7 @@ static void send_hello(ws_client_t *c)
 {
     char text[160];
     snprintf(text, sizeof(text), "{\"type\":\"hello\",\"api\":%d,\"admin\":%s,\"topics\":[%s],\"status_period_ms\":1000}",
-             WEB_API_VERSION, c->admin ? "true" : "false", c->admin ? "\"status\",\"progress\"" : "\"status\"");
+             WEB_SHELL_API_VERSION, c->admin ? "true" : "false", c->admin ? "\"status\",\"progress\"" : "\"status\"");
     ws_msg_t *m = msg_new(WEB_MSG_OTHER, text, strlen(text));
     if (m != NULL) {
         enqueue(c, m);
@@ -503,7 +498,7 @@ esp_err_t web_ws_handler(httpd_req_t *req)
     }
     case WEB_WS_MSG_PING: {
         if (c->admin && web_auth_session_alive(c->sess, c->gen)) {
-            health_note_admin_activity();   /* the page is open: the GNSS ladder's restart waits */
+            web_shell_admin_activity();   /* the page is open: the GNSS ladder's restart waits */
         }
         static const char pong[] = "{\"type\":\"pong\"}";
         ws_msg_t *m = msg_new(WEB_MSG_OTHER, pong, sizeof(pong) - 1);
@@ -555,6 +550,7 @@ void web_ws_close_sessions(uint32_t mask)
 
 typedef struct {
     char text[EVENT_TEXT_MAX];
+    char key[48];
 } ws_event_t;
 
 static portMUX_TYPE s_ev_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -564,46 +560,21 @@ static size_t s_ev_count;
 static uint32_t s_ev_tokens = EVENTS_PER_S;
 static uint32_t s_ev_refill_s;
 
-/* Coalescing key: the event name and, for caster events, the slot. */
-static size_t event_key(const char *json, char *key, size_t cap)
-{
-    const char *e = strstr(json, "\"event\":\"");
-    if (e == NULL) {
-        key[0] = '\0';
-        return 0;
-    }
-    e += 9;
-    size_t n = strcspn(e, "\"");
-    const char *slot = strstr(json, "\"slot\":");
-    size_t sl = slot != NULL ? strcspn(slot + 7, ",}") : 0;
-    snprintf(key, cap, "%.*s/%.*s", (int)n, e, (int)sl, slot != NULL ? slot + 7 : "");
-    return strlen(key);
-}
-
-static bool keyed(const char *json)
-{
-    /* State events replace an older one of the same kind still waiting; the rest are kept in order. */
-    return strstr(json, "\"event\":\"station_state\"") != NULL || strstr(json, "\"event\":\"caster_state\"") != NULL ||
-           strstr(json, "\"event\":\"update_state\"") != NULL;
-}
-
 void web_ws_event(const char *json)
 {
     if (json == NULL || strlen(json) >= EVENT_TEXT_MAX) {
         return;
     }
-    char key[48];
-    char other[48];
-    bool coalesce = keyed(json);
-    if (coalesce) {
-        event_key(json, key, sizeof(key));
-    }
+    char key[48] = "";
+    const web_shell_config_t *cfg=web_shell_config();
+    bool coalesce=cfg->event_key && cfg->event_key(cfg->ctx,json,key,sizeof(key));
+    key[sizeof(key)-1]=0;
+    coalesce=coalesce && key[0];
     portENTER_CRITICAL(&s_ev_lock);
     bool replaced = false;
     for (size_t i = 0; coalesce && i < s_ev_count; i++) {
         ws_event_t *e = &s_events[(s_ev_head + i) % EVENTS_MAX];
-        event_key(e->text, other, sizeof(other));
-        if (strcmp(key, other) == 0) {
+        if (strcmp(key, e->key) == 0) {
             strlcpy(e->text, json, sizeof(e->text));
             replaced = true;
             break;
@@ -614,7 +585,9 @@ void web_ws_event(const char *json)
             s_ev_head = (s_ev_head + 1) % EVENTS_MAX;   /* drop the oldest */
             s_ev_count--;
         }
-        strlcpy(s_events[(s_ev_head + s_ev_count) % EVENTS_MAX].text, json, EVENT_TEXT_MAX);
+        ws_event_t *e=&s_events[(s_ev_head+s_ev_count)%EVENTS_MAX];
+        strlcpy(e->text,json,sizeof(e->text));
+        strlcpy(e->key,coalesce ? key : "",sizeof(e->key));
         s_ev_count++;
     }
     portEXIT_CRITICAL(&s_ev_lock);
@@ -648,237 +621,73 @@ static void flush_events(void)
 
 /* ---- status -------------------------------------------------------------------------------------------- */
 
-EXT_RAM_BSS_ATTR static web_status_snap_t s_snap;
-EXT_RAM_BSS_ATTR static char s_sec[2][WEB_SEC_COUNT][SEC_TEXT_MAX];
-EXT_RAM_BSS_ATTR static char s_cst[2][WEB_MAX_SLOTS][CST_TEXT_MAX];
 EXT_RAM_BSS_ATTR static char s_scratch[MSG_SCRATCH];
-static uint32_t s_sec_crc[2][WEB_SEC_COUNT];
-static uint32_t s_cst_crc[2][WEB_MAX_SLOTS];
-static bool s_sec_changed[2][WEB_SEC_COUNT];
-static bool s_cst_changed[2][WEB_MAX_SLOTS];
-static bool s_have_prev[2];
-static bool s_cst_gone[2];   /* a slot left the form (an emptied slot in the public form): deltas cannot say so */
+EXT_RAM_BSS_ATTR static web_shell_baseline_t s_baseline[2];
+EXT_RAM_BSS_ATTR static web_shell_frame_t s_frame;
 static uint32_t s_seq[2];
 
-/* Build one form's sections and note what changed since the previous second. */
-static void build_form(int form)
+esp_err_t web_shell_status_rest(web_req_t *r)
 {
-    bool pub = form == 1;
-    for (int sec = 0; sec < WEB_SEC_COUNT; sec++) {
-        wj_t w;
-        wj_init_members(&w, s_sec[form][sec], SEC_TEXT_MAX);
-        web_build_section(&w, &s_snap, (web_section_t)sec, pub);
-        if (!wj_ok(&w)) {
-            s_sec[form][sec][0] = '\0';
-        }
-        uint32_t crc = web_crc32(0, s_sec[form][sec], strlen(s_sec[form][sec]));
-        s_sec_changed[form][sec] = !s_have_prev[form] || crc != s_sec_crc[form][sec];
-        s_sec_crc[form][sec] = crc;
-    }
-    s_cst_gone[form] = false;
-    for (size_t slot = 0; slot < s_snap.slots && slot < WEB_MAX_SLOTS; slot++) {
-        bool had = s_have_prev[form] && s_cst[form][slot][0] != '\0';
-        wj_t w;
-        wj_init_elements(&w, s_cst[form][slot], CST_TEXT_MAX);
-        web_build_caster_summary(&w, &s_snap, slot, pub);
-        if (!wj_ok(&w)) {
-            s_cst[form][slot][0] = '\0';
-        }
-        if (had && s_cst[form][slot][0] == '\0') {
-            s_cst_gone[form] = true;   /* the public form leaves an emptied slot out */
-        }
-        uint32_t crc = web_crc32(0, s_cst[form][slot], strlen(s_cst[form][slot]));
-        s_cst_changed[form][slot] = !s_have_prev[form] || crc != s_cst_crc[form][slot];
-        s_cst_crc[form][slot] = crc;
-    }
-    s_have_prev[form] = true;
-}
-
-static bool append(size_t *len, const char *text, size_t n)
-{
-    if (*len + n + 1 > sizeof(s_scratch)) {
-        return false;
-    }
-    memcpy(s_scratch + *len, text, n);
-    *len += n;
-    s_scratch[*len] = '\0';
-    return true;
-}
-
-/* Compose one status message (full or delta) of a form into s_scratch; 0 if it does not fit. */
-static size_t compose(int form, bool full)
-{
-    int head = snprintf(s_scratch, sizeof(s_scratch),
-                        "{\"type\":\"status\",\"seq\":%u,\"full\":%s,\"uptime_s\":%u,\"data\":{",
-                        (unsigned)++s_seq[form], full ? "true" : "false", (unsigned)s_snap.uptime_s);
-    if (head <= 0 || (size_t)head >= sizeof(s_scratch)) {
-        return 0;
-    }
-    size_t len = (size_t)head;
-    bool ok = true;
-    bool first = true;
-    for (int sec = 0; ok && sec < WEB_SEC_COUNT; sec++) {
-        size_t n = strlen(s_sec[form][sec]);
-        if (n > 0 && (full || s_sec_changed[form][sec])) {
-            ok = (first || append(&len, ",", 1)) && append(&len, s_sec[form][sec], n);
-            first = false;
-        }
-    }
-    bool any_caster = false;
-    for (size_t slot = 0; slot < s_snap.slots && slot < WEB_MAX_SLOTS; slot++) {
-        any_caster |= full || s_cst_changed[form][slot];
-    }
-    if (ok && any_caster) {
-        static const char key[] = "\"casters\":[";
-        ok = (first || append(&len, ",", 1)) && append(&len, key, sizeof(key) - 1);
-        bool first_slot = true;
-        for (size_t slot = 0; ok && slot < s_snap.slots && slot < WEB_MAX_SLOTS; slot++) {
-            size_t n = strlen(s_cst[form][slot]);
-            if (n > 0 && (full || s_cst_changed[form][slot])) {
-                ok = (first_slot || append(&len, ",", 1)) && append(&len, s_cst[form][slot], n);
-                first_slot = false;
-            }
-        }
-        ok = ok && append(&len, "]", 1);
-    }
-    ok = ok && append(&len, "}}", 2);
-    return ok ? len : 0;
+    const web_shell_registry_t *reg=web_shell_registry();
+    const void *snap=NULL;
+    uint32_t uptime=0;
+    if (!reg->status.capture(reg->status.ctx,&snap,&uptime)) return web_send_internal(r->req,ESP_FAIL);
+    size_t cap;
+    char *buf=web_http_buf(&cap);
+    web_resp_t resp;
+    web_resp_begin(&resp,r->req,200,buf,cap);
+    bool ok=web_shell_status_stream(reg,snap,uptime,!r->admin,&resp.w);
+    reg->status.release(reg->status.ctx,snap);
+    if (!ok) return resp.headers_sent ? ESP_FAIL : web_send_internal(r->req,ESP_ERR_INVALID_SIZE);
+    return web_resp_end(&resp);
 }
 
 static void push_status(void)
 {
-    bool want[2] = { false, false };
-    bool pub = web_public_status();   /* off: no public form for anyone (such clients are being closed) */
-    for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
-        ws_client_t *c = &s_clients[i];
-        if (c->used && !c->closing && (c->topics & WEB_TOPIC_STATUS) != 0 && (c->admin || pub)) {
-            want[c->admin ? 0 : 1] = true;
-        }
+    bool want[2]={false,false};
+    bool pub=web_public_status();
+    for (size_t i=0;i<WS_MAX_CLIENTS;i++) {
+        ws_client_t *c=&s_clients[i];
+        if (c->used && !c->closing && (c->topics & WEB_TOPIC_STATUS) && (c->admin || pub)) want[c->admin ? 0 : 1]=true;
     }
-    if (!want[0] && !want[1]) {
-        s_have_prev[0] = s_have_prev[1] = false;
-        return;
-    }
-    web_snap_status(&s_snap);
-    for (int form = 0; form < 2; form++) {
-        if (!want[form]) {
-            s_have_prev[form] = false;
-            continue;
-        }
-        build_form(form);
-        ws_msg_t *delta = NULL;
-        ws_msg_t *full = NULL;
-        for (size_t i = 0; i < WS_MAX_CLIENTS; i++) {
-            ws_client_t *c = &s_clients[i];
-            if (!c->used || c->closing || (c->topics & WEB_TOPIC_STATUS) == 0 || (c->admin ? 0 : 1) != form) {
-                continue;
+    if (!want[0] && !want[1]) { s_baseline[0].valid=s_baseline[1].valid=false; return; }
+    const web_shell_registry_t *reg=web_shell_registry();
+    const void *snap=NULL;
+    uint32_t uptime=0;
+    if (!reg->status.capture(reg->status.ctx,&snap,&uptime)) return;
+    web_shell_frame_t *frame=&s_frame;
+    for (int form=0;form<2;form++) {
+        if (!want[form]) { s_baseline[form].valid=false; continue; }
+        if (!web_shell_frame_build(reg,snap,uptime,form==1,frame)) continue;
+        bool removed=web_shell_frame_removed(frame,&s_baseline[form]);
+        ws_msg_t *delta=NULL,*full=NULL;
+        bool failed=false;
+        for (size_t i=0;i<WS_MAX_CLIENTS;i++) {
+            ws_client_t *c=&s_clients[i];
+            if (!c->used || c->closing || !(c->topics & WEB_TOPIC_STATUS) || (c->admin ? 0 : 1) != form) continue;
+            if (removed || !s_baseline[form].valid) c->need_full=true;
+            ws_msg_t **slot=c->need_full ? &full : &delta;
+            if (!*slot) {
+                size_t len=web_shell_frame_render(reg,frame,&s_baseline[form],true,c->need_full,
+                                                 ++s_seq[form],s_scratch,reg->status_cap);
+                if (!len || !(*slot=msg_new(WEB_MSG_STATUS,s_scratch,len))) { failed=true; c->need_full=true; continue; }
             }
-            if (s_cst_gone[form]) {
-                c->need_full = true;   /* a delta only adds or replaces slots: a full status drops the gone one */
-            }
-            ws_msg_t **slot = c->need_full ? &full : &delta;
-            if (*slot == NULL) {
-                size_t len = compose(form, c->need_full);
-                if (len == 0 || (*slot = msg_new(WEB_MSG_STATUS, s_scratch, len)) == NULL) {
-                    continue;
-                }
-            }
-            c->need_full = false;
-            enqueue(c, *slot);   /* a refused status sets need_full again */
+            c->need_full=false;
+            enqueue(c,*slot);
         }
-        msg_release(delta);
-        msg_release(full);
+        /* Allocation/composition failure cannot advance a shared baseline:
+         * recipients that did get this cycle resync with everyone next time. */
+        if (!failed) web_shell_frame_commit(frame,&s_baseline[form]);
+        else for (size_t i=0;i<WS_MAX_CLIENTS;i++) if ((s_clients[i].admin ? 0 : 1)==form) s_clients[i].need_full=true;
+        msg_release(delta); msg_release(full);
     }
+    reg->status.release(reg->status.ctx,snap);
 }
 
-/* ---- progress ------------------------------------------------------------------------------------------- */
-
-void web_ws_progress(const web_progress_t *p)
+void web_shell_http_progress(const char *json)
 {
-    wj_t w;
-    wj_init(&w, s_scratch, sizeof(s_scratch), NULL, NULL);
-    web_build_progress(&w, p);
-    if (wj_ok(&w)) {
-        broadcast(WEB_MSG_PROGRESS, s_scratch, w.len, true, WEB_TOPIC_PROGRESS);
-    }
-}
-
-static portMUX_TYPE s_flash_lock = portMUX_INITIALIZER_UNLOCKED;
-static um98x_flash_progress_t s_flash;        /* latest progress of the running job */
-static bool s_flash_new;
-static um98x_flash_progress_t s_flash_final;  /* the job's last message, until it went out */
-static bool s_flash_final_new;
-
-void web_ws_note_flash_progress(const um98x_flash_progress_t *p, bool final)
-{
-    portENTER_CRITICAL(&s_flash_lock);
-    if (final) {
-        s_flash_final = *p;
-        s_flash_final_new = true;
-        s_flash_new = false;   /* progress before the end is superseded by it */
-    } else {
-        s_flash = *p;
-        s_flash_new = true;
-    }
-    portEXIT_CRITICAL(&s_flash_lock);
-}
-
-static void push_flash_message(const um98x_flash_progress_t *p, bool final)
-{
-    /* Builds without receiver flashing only check packages: their job is gnss_check. */
-    bool check = !station_flash_available();
-    /* The final message says how the session (or the check) ended. */
-    static EXT_RAM_BSS_ATTR station_status_t s_fst;
-    const station_flash_last_t *last = NULL;
-    if (final && station_get_status(&s_fst) == ESP_OK && s_fst.flash_last.outcome != STATION_FLASH_OUT_NONE) {
-        last = &s_fst.flash_last;
-    }
-    web_progress_t m;
-    web_flash_progress_msg(p, final, check, last, &m);
-    web_ws_progress(&m);
-}
-
-static void push_flash_progress(void)
-{
-    um98x_flash_progress_t fin;
-    um98x_flash_progress_t p;
-    portENTER_CRITICAL(&s_flash_lock);
-    bool have_final = s_flash_final_new;
-    bool fresh = s_flash_new;
-    s_flash_final_new = false;
-    s_flash_new = false;
-    fin = s_flash_final;
-    p = s_flash;
-    portEXIT_CRITICAL(&s_flash_lock);
-    if (have_final) {
-        push_flash_message(&fin, true);
-    }
-    if (fresh) {
-        push_flash_message(&p, false);   /* a next job already reports */
-    }
-}
-
-static uint32_t s_upload_seq;
-
-static void push_upload_progress(void)
-{
-    web_upload_progress_t u;
-    web_upload_progress(&u);
-    if (u.job == NULL || u.seq == s_upload_seq) {
-        return;
-    }
-    s_upload_seq = u.seq;
-    web_progress_t m = {
-        .job = u.job,
-        .phase = u.phase,
-        .pct = u.total > 0 ? (int)((uint64_t)u.bytes * 100u / u.total) : -1,
-        .bytes = u.bytes,
-        .total = u.total,
-        .done = u.done,
-        .result = u.result,
-        .err = u.err,
-    };
-    web_ws_progress(&m);
+    if (json && strlen(json) < web_shell_registry()->status_cap)
+        broadcast(WEB_MSG_PROGRESS,json,strlen(json),true,WEB_TOPIC_PROGRESS);
 }
 
 /* ---- log ------------------------------------------------------------------------------------------------- */
@@ -941,8 +750,8 @@ void web_ws_tick(bool second, bool half_second)
 {
     flush_events();
     if (half_second) {
-        push_upload_progress();
-        push_flash_progress();
+        const web_shell_config_t *cfg=web_shell_config();
+        if (cfg->progress) cfg->progress(cfg->ctx);
         push_log();
     }
     if (second) {
@@ -995,6 +804,7 @@ esp_err_t web_ws_publish(const char *topic, const char *json)
     if (hd == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (strlen(json) >= web_shell_registry()->status_cap) return ESP_ERR_INVALID_SIZE;
     web_msg_kind_t kind = bit == WEB_TOPIC_STATUS ? WEB_MSG_STATUS : bit == WEB_TOPIC_LOG ? WEB_MSG_LOG : WEB_MSG_PROGRESS;
     publish_t *p = malloc(sizeof(*p));
     ws_msg_t *m = msg_new(kind, json, strlen(json));
@@ -1050,6 +860,10 @@ esp_err_t web_ws_init(void)
         s_clients[i].fd = -1;
     }
     s_reboot_sent = false;
+    memset(s_baseline,0,sizeof(s_baseline));
+    if (!web_shell_frame_reserve(web_shell_registry(),&s_frame)) {
+        ESP_LOGW(TAG,"no memory for the status frame now: tried again at each status push");
+    }
     web_lograte_init(&s_refused_log);
     return ESP_OK;
 }

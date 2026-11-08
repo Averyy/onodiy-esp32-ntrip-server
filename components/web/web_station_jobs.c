@@ -2,11 +2,13 @@
  * SPDX-FileCopyrightText: 2026 Avery L.
  * SPDX-License-Identifier: MIT
  *
- * Worker task: request bodies and downloads that take long (app image and
+ * Station job bodies on the shared web_shell worker: request bodies and
+ * downloads that take long (app image and
  * receiver package uploads, the core dump, the whole log as a file) and the
  * event journal's clear (a flash erase per sector) run here as async
  * requests, so the server keeps answering and pushing status meanwhile. Its
- * stack is in internal RAM because uploads write flash.
+ * stack is in internal RAM because uploads write flash. The shell owns the
+ * queue, async requests, deadlines, admission and socket completion.
  *
  * Uploads stream in 4 KB pieces straight to flash; nothing is buffered
  * whole. A refused upload is still read to its end before the error goes
@@ -31,7 +33,6 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
 #include "freertos/task.h"
 #include "fw_update.h"
 #include "gnss_link.h"
@@ -42,13 +43,11 @@
 #include "station.h"
 #include "um98x_flash.h"
 #include "web_internal.h"
+#include "web_shell_worker.h"
+#include "web_shell_service.h"
 
 static const char *TAG = "web";
 
-#define WORKER_STACK      6144
-#define WORKER_PRIO       4
-#define JOBS_MAX          4
-#define RECV_RETRIES      3
 #define STAGED_TTL_S      900u
 #define SAFE_MODE_DELAY_MS 1000
 
@@ -76,17 +75,15 @@ typedef struct {
     uint32_t retry_in_s;
 } job_t;
 
-static QueueHandle_t s_jobs;
-static TaskHandle_t s_task;
-static atomic_bool s_busy;               /* an upload is being received or refused */
 static atomic_bool s_journal_clear;      /* a journal clear is queued or runs */
-static atomic_int s_pending_resp;
 static esp_timer_handle_t s_expiry;
+static bool queue_job(httpd_req_t *req, const job_t *job);
 
 static uint8_t s_io[WEB_IO_CHUNK];       /* internal RAM: flash writes read from it */
 EXT_RAM_BSS_ATTR static char s_resp[1536];
 EXT_RAM_BSS_ATTR static station_status_t s_st;
 static char s_disposition[96];
+static bool s_cut;
 
 /* ---- upload progress (worker writes, server task reads) ---------------------------------------- */
 
@@ -129,12 +126,7 @@ void web_upload_progress(web_upload_progress_t *out)
 
 bool web_upload_busy(void)
 {
-    return atomic_load(&s_busy);
-}
-
-int web_worker_pending_responses(void)
-{
-    return atomic_load(&s_pending_resp);
+    return web_shell_worker_upload_busy();
 }
 
 /* ---- the uploaded receiver package ------------------------------------------------------------- */
@@ -200,8 +192,8 @@ static void on_expiry(void *arg)
 {
     (void)arg;
     job_t job = { .kind = JOB_RELEASE_EXPIRED };
-    if (s_jobs != NULL) {
-        (void)xQueueSend(s_jobs, &job, 0);
+    if (!queue_job(NULL,&job) && s_expiry != NULL) {
+        (void)esp_timer_start_once(s_expiry,1000000u);
     }
 }
 
@@ -228,42 +220,21 @@ static void release_expired(void)
 /* Read up to `want` bytes. @return bytes read, or -1 when the client is gone. */
 static int recv_some(httpd_req_t *req, uint8_t *buf, size_t want)
 {
-    for (int tries = 0; tries < RECV_RETRIES; tries++) {
-        int n = httpd_req_recv(req, (char *)buf, want);
-        if (n > 0) {
-            return n;
-        }
-        if (n != HTTPD_SOCK_ERR_TIMEOUT) {
-            return -1;
-        }
-    }
-    return -1;
+    int n=web_shell_worker_recv(req,buf,want);
+    if (n<0) s_cut=true;
+    return n;
 }
-
 static bool recv_exact(httpd_req_t *req, uint8_t *buf, size_t len)
 {
-    size_t got = 0;
-    while (got < len) {
-        int n = recv_some(req, buf + got, len - got);
-        if (n < 0) {
-            return false;
-        }
-        got += (size_t)n;
-    }
-    return true;
+    bool ok=web_shell_worker_recv_exact(req,buf,len);
+    if (!ok) s_cut=true;
+    return ok;
 }
-
-/* Read and drop what is left of the body. */
 static bool drain(httpd_req_t *req, uint32_t left)
 {
-    while (left > 0) {
-        int n = recv_some(req, s_io, left < sizeof(s_io) ? left : sizeof(s_io));
-        if (n < 0) {
-            return false;
-        }
-        left -= (uint32_t)n;
-    }
-    return true;
+    bool ok=web_shell_worker_drain(req,left,s_io,sizeof(s_io));
+    if (!ok) s_cut=true;
+    return ok;
 }
 
 /* Refuse after reading the rest: the body is read, so the connection can
@@ -273,31 +244,6 @@ static void refuse(httpd_req_t *req, uint32_t left, web_err_t err, const char *m
 {
     if (drain(req, left)) {
         web_send_error(req, err, message, NULL, retry_in_s, NULL, NULL);
-    }
-}
-
-/* Worker: the answer went out cut short (a download that failed half way):
- * the connection must end, or the client would wait for the rest. */
-static bool s_cut;
-
-static void finish_request(httpd_req_t *req)
-{
-    if (req != NULL) {
-        int fd = httpd_req_to_sockfd(req);
-        if (s_cut || web_conn_req_close(req)) {
-            /* The client asked for the connection to end after this answer
-             * ("Connection: close", HTTP/1.0), or the answer is incomplete:
-             * our side ends now, what the client still sends is drained for
-             * a moment, and the socket is shut, so the server deletes the
-             * session once it has the connection back. The session is the
-             * worker's until the completion below, so its descriptor cannot
-             * have gone to another connection meanwhile. */
-            web_linger_close(req);
-            web_conn_shut(fd);
-        }
-        s_cut = false;
-        web_conn_worker(fd, false);   /* its next request is bounded again */
-        (void)httpd_req_async_handler_complete(req);
     }
 }
 
@@ -316,6 +262,49 @@ static web_err_t app_refusal(uint32_t *retry_in_s)
     }
     return WEB_ERR_BUSY;
 }
+
+/* fw_update is a station-owned service adapter, never a shell dependency. */
+typedef struct {
+    fw_update_upload_t writer;
+    uint8_t sha[32];
+    bool response_held;
+    size_t total;
+} app_upload_t;
+static int app_preflight(void *ctx, size_t total, const void *prefix, size_t prefix_size)
+{
+    (void)prefix; (void)prefix_size;
+    app_upload_t *app=ctx;
+    app->total=total;
+    return fw_update_upload_app_begin((uint32_t)total,&app->writer);
+}
+static int app_consume(void *ctx, const void *data, size_t size)
+{
+    return fw_update_upload_app_write(((app_upload_t *)ctx)->writer,data,size);
+}
+static int app_finalize(void *ctx)
+{
+    app_upload_t *app=ctx;
+    web_shell_worker_response_hold(true);
+    app->response_held=true;
+    progress("app_upload","verifying",(uint32_t)app->total,(uint32_t)app->total);
+    fw_update_upload_t writer=app->writer;
+    app->writer=NULL; /* finish consumes the handle on every outcome */
+    return fw_update_upload_app_finish(writer,app->sha);
+}
+static void app_abort(void *ctx)
+{
+    app_upload_t *app=ctx;
+    if (app->writer) { fw_update_upload_app_abort(app->writer); app->writer=NULL; }
+}
+static void upload_received(void *ctx, size_t got, size_t total)
+{
+    (void)ctx; (void)total;
+    portENTER_CRITICAL(&s_lock);
+    s_prog.bytes=(uint32_t)got;
+    s_prog.seq++;
+    portEXIT_CRITICAL(&s_lock);
+}
+static int upload_read(void *ctx, void *data, size_t want) { return recv_some(ctx,data,want); }
 
 static void upload_app(const job_t *job)
 {
@@ -355,49 +344,41 @@ static void upload_app(const job_t *job)
         web_note_result("app_upload", ESP_ERR_INVALID_VERSION, result);
         return;
     }
-    fw_update_upload_t up = NULL;
-    esp_err_t err = fw_update_upload_app_begin(size, &up);
-    if (err != ESP_OK) {
-        uint32_t retry = UINT32_MAX;
-        web_err_t e = err == ESP_ERR_INVALID_SIZE ? WEB_ERR_TOO_LARGE
-                      : err == ESP_ERR_INVALID_STATE ? app_refusal(&retry)
-                                                      : WEB_ERR_INTERNAL;
-        progress_done(NULL, "refused", err);
-        refuse(req, left, e, e == WEB_ERR_INTERNAL ? esp_err_to_name(err) : NULL, retry);
+    app_upload_t app={0};
+    const esp_partition_t *slot=esp_ota_get_next_update_partition(NULL);
+    web_shell_upload_service_t service={
+        .maximum=slot ? slot->size : 0,.preflight=app_preflight,.consume=app_consume,
+        .finalize=app_finalize,.abort=app_abort,.progress=upload_received,
+    };
+    web_shell_transfer_result_t transfer=web_shell_transfer(&service,&app,size,head,s_io,sizeof(s_io),upload_read,req);
+    esp_err_t err=transfer.error;
+    left=(uint32_t)transfer.left;
+    if (transfer.stage == WEB_SHELL_TRANSFER_READ) {
+        progress_done(NULL,"failed",ESP_ERR_TIMEOUT);
+        s_cut=true;
+        ESP_LOGW(TAG,"app upload aborted after %u of %u bytes",(unsigned)transfer.received,(unsigned)size);
         return;
     }
-    err = fw_update_upload_app_write(up, s_io, head);
-    uint32_t got = (uint32_t)head;
-    while (err == ESP_OK && left > 0) {
-        int n = recv_some(req, s_io, left < sizeof(s_io) ? left : sizeof(s_io));
-        if (n < 0) {
-            /* Client gone: the slot stays as it was. */
-            fw_update_upload_app_abort(up);
-            progress_done(NULL, "failed", ESP_ERR_TIMEOUT);
-            ESP_LOGW(TAG, "app upload aborted after %u of %u bytes", (unsigned)got, (unsigned)size);
-            return;
-        }
-        err = fw_update_upload_app_write(up, s_io, (size_t)n);
-        left -= (uint32_t)n;
-        got += (uint32_t)n;
-        portENTER_CRITICAL(&s_lock);
-        s_prog.bytes = got;
-        s_prog.seq++;
-        portEXIT_CRITICAL(&s_lock);
-    }
-    if (err != ESP_OK) {
-        fw_update_upload_app_abort(up);
-        bool image = err == ESP_ERR_OTA_VALIDATE_FAILED || err == ESP_ERR_INVALID_SIZE;
-        progress_done(NULL, image ? "invalid_image" : "failed", err);
-        refuse(req, left, image ? WEB_ERR_INVALID_IMAGE : WEB_ERR_INTERNAL, image ? NULL : esp_err_to_name(err),
-               UINT32_MAX);
-        web_note_result("app_upload", err, image ? "invalid_image" : "failed");
+    if (transfer.stage == WEB_SHELL_TRANSFER_INVALID) {
+        progress_done(NULL,"refused",ESP_ERR_INVALID_SIZE);
+        refuse(req,left,WEB_ERR_TOO_LARGE,NULL,UINT32_MAX);
         return;
     }
-    progress("app_upload", "verifying", got, size);
-    uint8_t sha[32];
-    atomic_fetch_add(&s_pending_resp, 1);   /* the reboot waits for this response */
-    err = fw_update_upload_app_finish(up, sha);
+    if (transfer.stage == WEB_SHELL_TRANSFER_PREFLIGHT) {
+        uint32_t retry=UINT32_MAX;
+        web_err_t e=err == ESP_ERR_INVALID_SIZE ? WEB_ERR_TOO_LARGE
+                    : err == ESP_ERR_INVALID_STATE ? app_refusal(&retry) : WEB_ERR_INTERNAL;
+        progress_done(NULL,"refused",err);
+        refuse(req,left,e,e == WEB_ERR_INTERNAL ? esp_err_to_name(err) : NULL,retry);
+        return;
+    }
+    if (transfer.stage == WEB_SHELL_TRANSFER_CONSUME) {
+        bool image=err == ESP_ERR_OTA_VALIDATE_FAILED || err == ESP_ERR_INVALID_SIZE;
+        progress_done(NULL,image ? "invalid_image" : "failed",err);
+        refuse(req,left,image ? WEB_ERR_INVALID_IMAGE : WEB_ERR_INTERNAL,image ? NULL : esp_err_to_name(err),UINT32_MAX);
+        web_note_result("app_upload",err,image ? "invalid_image" : "failed");
+        return;
+    }
     if (err != ESP_OK) {
         web_err_t e = err == ESP_ERR_INVALID_SIZE ? WEB_ERR_SIZE_MISMATCH : WEB_ERR_INVALID_IMAGE;
         const char *result = err == ESP_ERR_INVALID_SIZE ? "size_mismatch" : "invalid_image";
@@ -408,7 +389,7 @@ static void upload_app(const job_t *job)
         web_resp_t r;
         web_resp_begin(&r, req, 200, s_resp, sizeof(s_resp));
         wj_obj_open(&r.w, NULL);
-        wj_hex(&r.w, "sha256", sha, sizeof(sha));
+        wj_hex(&r.w, "sha256", app.sha, sizeof(app.sha));
         wj_uint(&r.w, "size", size);
         wj_str(&r.w, "version", info.version);
         wj_str(&r.w, "project", info.project);
@@ -419,7 +400,7 @@ static void upload_app(const job_t *job)
         web_note_result("app_upload", ESP_OK, "ok");
         ESP_LOGW(TAG, "app image %s uploaded: rebooting into it", info.version);
     }
-    atomic_fetch_sub(&s_pending_resp, 1);
+    if (app.response_held) web_shell_worker_response_hold(false);
 }
 
 /* ---- receiver package upload ------------------------------------------------------------------------ */
@@ -655,81 +636,36 @@ static void clear_journal(httpd_req_t *req)
 
 /* ---- task ---------------------------------------------------------------------------------------------- */
 
-static void worker(void *arg)
+static bool run_job(void *ctx, httpd_req_t *req, const void *data, size_t size)
 {
-    (void)arg;
-    for (;;) {
-        job_t job;
-        if (xQueueReceive(s_jobs, &job, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        switch (job.kind) {
-        case JOB_UPLOAD_APP:
-            upload_app(&job);
-            atomic_store(&s_busy, false);
-            break;
-        case JOB_UPLOAD_GNSS:
-            upload_gnss(&job);
-            atomic_store(&s_busy, false);
-            break;
-        case JOB_REFUSE:
-            refuse(job.req, job.size, job.err, NULL, job.retry_in_s);
-            atomic_store(&s_busy, false);
-            break;
-        case JOB_COREDUMP:
-            send_coredump(job.req);
-            break;
-        case JOB_LOG_TEXT:
-            send_log_text(job.req, job.flag);
-            break;
-        case JOB_FLASH_CAPTURE:
-            send_flash_capture(job.req);
-            break;
-        case JOB_FRAME_TIMES:
-            send_frame_times(job.req);
-            break;
-        case JOB_RELEASE_EXPIRED:
-            release_expired();
-            break;
-        case JOB_JOURNAL_CLEAR:
-            clear_journal(job.req);
-            break;
-        case JOB_SAFE_MODE_CLEAR: {
-            vTaskDelay(pdMS_TO_TICKS(SAFE_MODE_DELAY_MS));
-            /* Does not return on success. This task has no core of its own:
-             * lifecycle hands the restart to its task on core 0 and this one
-             * waits (lifecycle.c reboot_now). */
-            esp_err_t err = lifecycle_clear_safe_mode();
-            ESP_LOGW(TAG, "leaving safe mode refused: %s", esp_err_to_name(err));
-            break;
-        }
-        }
-        finish_request(job.req);
+    (void)ctx; (void)size;
+    job_t job; memcpy(&job,data,sizeof(job)); job.req=req;
+    s_cut=false;
+    switch (job.kind) {
+    case JOB_UPLOAD_APP: upload_app(&job); break;
+    case JOB_UPLOAD_GNSS: upload_gnss(&job); break;
+    case JOB_REFUSE: refuse(req,job.size,job.err,NULL,job.retry_in_s); break;
+    case JOB_COREDUMP: send_coredump(req); break;
+    case JOB_LOG_TEXT: send_log_text(req,job.flag); break;
+    case JOB_FLASH_CAPTURE: send_flash_capture(req); break;
+    case JOB_FRAME_TIMES: send_frame_times(req); break;
+    case JOB_RELEASE_EXPIRED: release_expired(); break;
+    case JOB_JOURNAL_CLEAR: clear_journal(req); break;
+    case JOB_SAFE_MODE_CLEAR: {
+        vTaskDelay(pdMS_TO_TICKS(SAFE_MODE_DELAY_MS));
+        esp_err_t err=lifecycle_clear_safe_mode();
+        ESP_LOGW(TAG,"leaving safe mode refused: %s",esp_err_to_name(err));
+        break;
     }
+    }
+    return s_cut;
 }
-
-/* Hand a request to the worker. @return false (nothing queued) when it is full. */
-static bool queue_async(httpd_req_t *req, job_t *job)
+static bool queue_job(httpd_req_t *req, const job_t *job)
 {
-    if (s_jobs == NULL || uxQueueSpacesAvailable(s_jobs) == 0) {
-        return false;
-    }
-    httpd_req_t *copy = NULL;
-    if (httpd_req_async_handler_begin(req, &copy) != ESP_OK) {
-        return false;
-    }
-    job->req = copy;
-    /* Before the worker can run: its body reads are not held to the
-     * server's request deadline (large uploads at the client's pace). */
-    int fd = httpd_req_to_sockfd(req);
-    web_conn_worker(fd, true);
-    if (xQueueSend(s_jobs, job, 0) != pdTRUE) {
-        web_conn_worker(fd, false);
-        (void)httpd_req_async_handler_complete(copy);
-        return false;
-    }
-    return true;
+    bool upload=job->kind==JOB_UPLOAD_APP || job->kind==JOB_UPLOAD_GNSS || job->kind==JOB_REFUSE;
+    return web_shell_worker_submit(req,run_job,NULL,job,sizeof(*job),upload)==ESP_OK;
 }
+static bool queue_async(httpd_req_t *req, job_t *job) { return queue_job(req,job); }
 
 /* Answer at once and close (the body is not read; what is in flight is drained for a moment, web_linger_close). */
 static esp_err_t answer_and_close(httpd_req_t *req, web_err_t err, uint32_t retry_in_s)
@@ -742,7 +678,6 @@ static esp_err_t refuse_upload(httpd_req_t *req, web_err_t err, uint32_t retry_i
 {
     job_t job = { .kind = JOB_REFUSE, .size = (uint32_t)req->content_len, .err = err, .retry_in_s = retry_in_s };
     if (!queue_async(req, &job)) {
-        atomic_store(&s_busy, false);
         return answer_and_close(req, err, retry_in_s);
     }
     return ESP_OK;
@@ -767,7 +702,7 @@ esp_err_t web_upload_app(web_req_t *r)
     if (slot == NULL || req->content_len > slot->size) {
         return answer_and_close(req, WEB_ERR_TOO_LARGE, UINT32_MAX);
     }
-    if (atomic_exchange(&s_busy, true)) {
+    if (!web_shell_worker_upload_begin()) {
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);
     }
     /* The refusals fw_update would give, checked before the first byte. */
@@ -789,7 +724,6 @@ esp_err_t web_upload_app(web_req_t *r)
     job_t job = { .kind = JOB_UPLOAD_APP, .size = (uint32_t)req->content_len, .flag = any_project, .ack = ack,
                   .reinstall = reinstall };
     if (!queue_async(req, &job)) {
-        atomic_store(&s_busy, false);
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);
     }
     return ESP_OK;
@@ -848,7 +782,7 @@ esp_err_t web_upload_gnss(web_req_t *r)
     if (req->content_len > pkg_store_capacity()) {
         return answer_and_close(req, WEB_ERR_TOO_LARGE, UINT32_MAX);
     }
-    if (atomic_exchange(&s_busy, true)) {
+    if (!web_shell_worker_upload_begin()) {
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);
     }
     uint32_t retry = UINT32_MAX;
@@ -858,7 +792,6 @@ esp_err_t web_upload_gnss(web_req_t *r)
     }
     job_t job = { .kind = JOB_UPLOAD_GNSS, .size = (uint32_t)req->content_len };
     if (!queue_async(req, &job)) {
-        atomic_store(&s_busy, false);
         return answer_and_close(req, WEB_ERR_BUSY, UINT32_MAX);
     }
     return ESP_OK;
@@ -929,29 +862,15 @@ esp_err_t web_clear_journal(web_req_t *r)
 esp_err_t web_worker_clear_safe_mode(void)
 {
     job_t job = { .kind = JOB_SAFE_MODE_CLEAR };
-    if (s_jobs == NULL || xQueueSend(s_jobs, &job, 0) != pdTRUE) {
+    if (!queue_job(NULL,&job)) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
 }
 
-esp_err_t web_worker_init(void)
+esp_err_t web_station_jobs_init(void)
 {
-    if (s_jobs != NULL) {
-        return ESP_OK;
-    }
-    s_jobs = xQueueCreate(JOBS_MAX, sizeof(job_t));
-    if (s_jobs == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    const esp_timer_create_args_t args = { .callback = on_expiry, .name = "web_staged" };
-    esp_err_t err = esp_timer_create(&args, &s_expiry);
-    if (err != ESP_OK) {
-        return err;
-    }
-    /* Internal-RAM stack (the default for task stacks): uploads write flash. */
-    if (xTaskCreate(worker, "web_io", WORKER_STACK, NULL, WORKER_PRIO, &s_task) != pdPASS) {
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
+    if (s_expiry) return ESP_OK;
+    const esp_timer_create_args_t args={.callback=on_expiry,.name="web_staged"};
+    return esp_timer_create(&args,&s_expiry);
 }

@@ -200,3 +200,27 @@ void web_build_logs(wj_t *w, uint32_t cursor, bool more, bool gap, const char *t
     wj_strn(w, "text", text != NULL ? text : "", text != NULL ? len : 0);
     wj_obj_close(w);
 }
+
+void web_shell_build_session(wj_t *w, const web_shell_session_snap_t *s)
+{
+    wj_obj_open(w, NULL);
+    wj_int(w, "api", WEB_SHELL_API_VERSION);
+    wj_bool(w, "authenticated", s->authenticated);
+    wj_bool(w, "admin_set", s->admin_set);
+    wj_bool(w, "setup_done", s->setup_done);
+    wj_bool(w, "claim_allowed", s->claim_allowed);
+    wj_bool(w, "on_setup_ap", s->on_setup_ap);
+    wj_bool(w, "public_status", s->public_status);
+    wj_bool(w, "settings_available", s->settings_available);
+    if (s->authenticated) {
+        wj_uint(w, "idle_left_s", s->idle_left_s);
+    } else {
+        wj_null(w, "idle_left_s");
+    }
+    /* Not new disclosures: DHCP, mDNS and the AP's beacon carry them anyway. */
+    wj_str(w, "hostname", s->hostname != NULL ? s->hostname : "");
+    wj_str_or_null(w, "mdns_host", s->mdns_host);
+    wj_str_or_null(w, "ap_ssid", s->ap_ssid);
+    wj_str(w, "setup_step", s->authenticated && !s->setup_done ? s->setup_step : NULL);
+    wj_obj_close(w);
+}

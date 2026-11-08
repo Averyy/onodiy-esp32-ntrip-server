@@ -6,6 +6,9 @@ before tagging ([releases](docs/releases.md)).
 
 ## Unreleased
 
+- Reuse: move the HTTP server, authentication, WebSocket transport and worker
+  into `web_shell`, with bounded station route, status and service adapters.
+
 - Reuse: move product-neutral web cores into the layer-3 `web_shell`
   component; station API adapters and server code stay in `web`.
 

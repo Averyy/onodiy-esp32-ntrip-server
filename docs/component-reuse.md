@@ -27,9 +27,8 @@ Eight components, used unchanged from a pinned revision:
 `um98x_ctl` therefore needs the first seven; `leds` only `board`. The ESP-IDF
 components they use are listed in each `CMakeLists.txt` (`esp_driver_uart`,
 `esp_driver_gpio`, `esp_driver_ledc`, `esp_partition`, `spi_flash`,
-`nvs_flash`, `esp_event`, `esp_timer`). The two updaters are optional sets,
-described below. Nothing else in `components/` is part of this contract:
-the station, web, casters and hub.
+`nvs_flash`, `esp_event`, `esp_timer`). The updaters and backend HTTP shell are optional sets,
+described below. Station supervisors, casters and the hub remain product services.
 
 None of them starts station behaviour on its own: the station supervisor,
 casters and web server live in other components. `um98x_ctl` holds the
@@ -341,3 +340,87 @@ does for the station's.
   is in their headers (PROVISIONAL items).
 - Other ESP-IDF versions, other targets and other partition layouts are not
   built or tested.
+
+
+## Backend HTTP shell
+
+`web_shell` is a layer-3 component. It owns HTTP start/stop, Host/Origin and
+CSRF checks, authentication and remembered sessions, gzip assets and CSP,
+WebSocket subscriptions/backpressure/session expiry, and the asynchronous
+request worker. Its repository dependency closure is `settings`, `diag`,
+`lifecycle`, `network`, `ledger` and `tcp_diag`; it does not link the station,
+casters, hub, monitoring/reporting/health services, receiver control/flashing
+or `fw_update`.
+
+Use ESP-IDF's `CONFIG_HTTPD_WS_SUPPORT`,
+`CONFIG_HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT`,
+`CONFIG_HTTPD_WS_POST_HANDSHAKE_CB_SUPPORT` and `CONFIG_LWIP_SO_RCVBUF`, as in
+`sdkconfig.defaults`; the socket drain requires FIONREAD. Keep the ESP32-S3
+PSRAM settings for the shared buffers. The unchanged `WEB_*` options now live
+in `web_shell/Kconfig`, so they are available without the station adapter.
+
+An application initializes settings, lifecycle and networking as usual, then:
+
+1. Calls `web_shell_init()` with `web_shell_config_t`: an asset-set descriptor
+   (table/count/digest/total, or an empty set for REST/WS only), product metadata,
+   explicit backend storage keys, bounded route/section/status/body capacities,
+   and optional HTTP tick/progress/activity hooks. Product routes use `/api/`; the six
+   shared authentication/status routes, `/ws` and the asset catch-all are
+   reserved. The route capacity excludes those eight shared handlers.
+2. Calls `web_shell_register_status()` with a capture/release pair and context,
+   `web_shell_register_sections()` with bounded serializers, then
+   `web_shell_register_routes()` with URI, method, access, body policy, body
+   limit, callback and context. Wildcards are trailing `/*` only; an optional
+   concrete-path predicate determines 404 versus 405 for other methods.
+3. Calls `web_shell_start()` after `network_init()`. Registration batches are
+   atomic; collisions, reserved names, ambiguous wildcard overlap and registry
+   overflow fail before start. Failed registration latches an error; init can
+   reset registration before the first start attempt. Start seals registration,
+   including across stop/start. A provider can expose authenticated product
+   routes and `/api/status` and `/ws` without any station provider.
+
+The public interfaces are in `web_shell.h`, `web_shell_http.h`,
+`web_shell_provider.h`, `web_shell_worker.h` and `web_shell_service.h`.
+Descriptors/config are copied, but their strings, callbacks and contexts live
+for firmware lifetime. HTTP handlers, tick hooks, status capture/release and
+serializers run on the HTTP task. Capture is once per REST request or WS
+cycle, with uptime captured alongside the snapshot; the two WS visibility
+forms share it. A successful capture always has exactly one release, including
+on failure. Callbacks use consistent cached snapshots or submit nonblocking
+jobs; they never retain a request/body/writer or a released snapshot.
+
+Sections default to admin-only. Public visibility explicitly opts in, and the
+serializer still redacts fields within public sections. REST and WS use the
+same descriptors. Replacement sections emit one named member; keyed arrays
+emit bounded items with stable unique keys. Deltas include changed items;
+removing an item forces a full resync. A serializer failure or bound overflow
+discards the frame, sends the existing REST error envelope, and neither emits
+partial WS JSON nor advances its delta baseline. WS retries without refreshing
+client freshness. Unknown/unavailable product fields must be explicit.
+
+`web_shell_event()` and `web_shell_progress()` copy messages from ordinary
+tasks. Event hooks only copy data/set flags and kick HTTP work; a product's
+optional coalescing-key callback runs on the publishing task and is thread-safe
+and nonblocking. Declared CSP image/connect origins are validated HTTPS origins;
+fixed directives remain shared, with no arbitrary policy or inline/eval option.
+
+Blocking service bodies execute through `web_shell_worker_submit()`: four queue
+slots, a 6144-byte internal-RAM stack, copied job data of at most 64 bytes, and
+shared async acquisition/completion, deadline exemption, socket cleanup and
+upload admission. `web_shell_transfer()` drives bounded preflight, consume,
+finalize, abort and progress callbacks over the worker's I/O. Services own their
+firmware policy and reservations, including cancellation and `not_cancellable`
+refusals. Disconnect/stop aborts an incomplete upload; it does not implicitly
+cancel an already accepted firmware operation. Stop rejects new HTTP submissions,
+shuts owned sockets to unblock reads, runs accepted jobs through cleanup, and
+waits for owned responses before stopping HTTP. Background jobs without a request may continue (including staged-package
+expiry). The worker survives stop; service contexts therefore survive it too. Callbacks must bound their waits.
+
+The station keeps `web_init/web_start/web_stop` in `web.h`, its settings keys
+(`sys/admin_hash`, `web/sessions`, existing public/setup keys) and binary codecs,
+its status builders/parsers, caster and health hooks, receiver staging/expiry,
+progress conversion and firmware-service calls in `components/web`. The legacy
+global asset table still supplies its asset descriptor. Branding/storage
+metadata is carried in C configuration; browser composition and the bundler
+remain unchanged in this phase. The station wire contract remains
+[`components/web/API.md`](../components/web/API.md).

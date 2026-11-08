@@ -486,9 +486,9 @@ TEST_CASE("web conn: the HTTP/1.0 flag follows pipelined requests and stays for 
  *  - readable: data unread or the FIN there; otherwise the clock moves on
  *    to the next arrival, or by the whole wait.
  */
-#define DRAIN_MAX_BYTES (64u * 1024u)   /* web.c LINGER_DRAIN_BYTES */
-#define DRAIN_MAX_MS    2000u           /* web.c LINGER_DRAIN_MS */
-#define DRAIN_BUF       512u            /* web.c drain_drop's buffer */
+#define DRAIN_MAX_BYTES (64u * 1024u)   /* web_shell.c LINGER_DRAIN_BYTES */
+#define DRAIN_MAX_MS    2000u           /* web_shell.c LINGER_DRAIN_MS */
+#define DRAIN_BUF       512u            /* web_shell.c drain_drop's buffer */
 #define NO_FIN          UINT32_MAX
 
 typedef struct {

@@ -36,13 +36,15 @@
 #include "web_core.h"
 #include "web_json.h"
 #include "web_shell_build.h"
+#include "web_shell_provider.h"
+#include "web_shell_error_build.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /** API version (GET /api/session, /api/status, WebSocket hello). */
-#define WEB_API_VERSION 1
+#define WEB_API_VERSION WEB_SHELL_API_VERSION
 
 /** Upper bound of caster slots (CONFIG_NTRIP_MAX_CASTERS range). */
 #define WEB_MAX_SLOTS 8u
@@ -164,6 +166,9 @@ typedef struct {
     const char *antenna;           /**< where the board's antenna goes ("on the socket marked M"), NULL = not named */
     monitor_status_t mon;          /**< the latest sample and the running 24 h (monitor) */
 } web_status_snap_t;
+
+extern const web_shell_section_t web_station_sections[];
+extern const size_t web_station_section_count;
 
 /** Sections of the status object, in the order they are written. */
 typedef enum {
@@ -517,14 +522,6 @@ void web_build_connections(wj_t *w, const diag_journal_entry_t *e, size_t count,
                            size_t slots, bool complete);
 
 /* ---- errors and WebSocket messages ---------------------------------------------------------- */
-
-/**
- * Error body. `message` NULL = the code's default text; `field`, `by`,
- * `reason` NULL = null / left out (reason only appears when set);
- * retry_in_s UINT32_MAX = null.
- */
-void web_build_error(wj_t *w, web_err_t err, const char *message, const char *field, uint32_t retry_in_s,
-                     const char *by, const char *reason);
 
 /** Progress of a job (`progress` messages). */
 typedef struct {
