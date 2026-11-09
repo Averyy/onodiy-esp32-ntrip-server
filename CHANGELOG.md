@@ -16,8 +16,6 @@ before tagging ([releases](docs/releases.md)).
   "Last attempt".
 - Receiver: a restart that shows both its banner (or its "resetting" answer) and
   an unasked version log within 20 s now counts as one restart, not two.
-- Firmware: LG290P receiver packages 01.06 and 02.02 added, with SHA-256 checksums;
-  not yet validated on hardware.
 - Web: the server, login, WebSocket, page shell and UI bundler moved to a shared
   component, `web_shell`, with `web` as the station's adapter. The station's API,
   settings, pages and browser storage are unchanged.
