@@ -62,10 +62,11 @@ Views.settings = {
   create(el) {
     let dirty = false, gone = false, edits = 0;
     const reload = async () => {
+      const started = edits;   /* an answer from before an edit, even one saved since, is out of date */
       let state;
       try { state = await UI.commissioningLoad(); }
-      catch (e) { if (!gone && !dirty) mount(el, msg('bad', errText(e))); return; }
-      if (gone || dirty) return;
+      catch (e) { if (!gone && !dirty && edits === started) mount(el, msg('bad', errText(e))); return; }
+      if (gone || dirty || edits !== started) return;
       const pub = checkbox('Allow status without login', state.public_status === true);
       pub.input.disabled = state.settings_available === false;
       const err = errBox();

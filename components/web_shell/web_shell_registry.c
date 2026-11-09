@@ -204,8 +204,8 @@ bool web_shell_status_stream(const web_shell_registry_t *r, const void *snapshot
 bool web_shell_frame_build(const web_shell_registry_t *r, const void *snapshot,
                            uint32_t uptime_s, bool pub, web_shell_frame_t *f)
 {
-    if (!web_shell_frame_reserve(r, f)) return false;
     f->built = false; f->len = 0; f->count = 0;
+    if (!web_shell_frame_reserve(r, f)) return false;
     f->uptime_s = uptime_s; f->public_form = pub;
     for (size_t sec = 0; sec < r->section_count; sec++) {
         const web_shell_section_t *s = &r->sections[sec];
@@ -218,9 +218,15 @@ bool web_shell_frame_build(const web_shell_registry_t *r, const void *snapshot,
             if (avail > s->max_item_bytes + 1) avail = s->max_item_bytes + 1;
             wj_t w;
             if (s->merge == WEB_SHELL_REPLACE) wj_init_members(&w, f->text+f->len, avail);
-            else wj_init_elements(&w, f->text+f->len, avail);
+            else {
+                /* At the depth the streamed form writes a keyed item, so both accept the same nesting. */
+                wj_init_elements(&w, f->text+f->len, avail);
+                w.depth = 2;
+                w.is_array[2] = true;
+            }
+            uint8_t depth = w.depth;
             char key[WEB_SHELL_ITEM_KEY_MAX + 1] = {0};
-            if (!s->serialize(s->ctx, snapshot, pub, item, &w, key) || !wj_ok(&w) || w.depth != 1) goto fail;
+            if (!s->serialize(s->ctx, snapshot, pub, item, &w, key) || !wj_ok(&w) || w.depth != depth) goto fail;
             if (!w.len) {
                 if (s->merge == WEB_SHELL_REPLACE) goto fail;
                 continue;

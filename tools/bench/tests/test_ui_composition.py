@@ -195,6 +195,23 @@ def test_an_edit_during_a_save_stays_dirty(bundle, tmp_path):
     """)
 
 
+def test_a_reload_from_before_a_saved_edit_does_not_undo_it(bundle, tmp_path):
+    run_ui(bundle, tmp_path, r"""
+      location.hash = '#/settings'; route(); await env.flush();
+      const page = shell.current, input = env.ids['view-body'].querySelector('input');
+      let release;
+      env.loadGate = new Promise(r => { release = r; });
+      const answer = page.view.reload();
+      env.loadGate = null;
+      input.checked = true; input.fire('input', true);
+      env.ids['view-body'].querySelector('form').fire('submit'); await env.flush();
+      assert(!page.view.dirty());
+      release(); await answer; await env.flush();
+      assert.strictEqual(env.ids['view-body'].querySelector('input'), input);
+      assert.equal(input.checked, true);
+    """)
+
+
 def test_a_failed_reload_leaves_an_edited_form_alone(bundle, tmp_path):
     run_ui(bundle, tmp_path, r"""
       location.hash = '#/settings'; route(); await env.flush();

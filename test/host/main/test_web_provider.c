@@ -211,6 +211,16 @@ TEST_CASE("web provider: station REST composition preserves both legacy forms an
     web_shell_frame_dispose(&f); free(s); free(expected); free(actual);
 }
 
+static bool nested_item(void *ctx, const void *snapshot, bool pub, size_t item, wj_t *w, char *key)
+{
+    (void)snapshot; (void)pub; (void)item;
+    size_t n=(size_t)(uintptr_t)ctx;
+    key[0]='a'; key[1]=0;
+    for (size_t i=0;i<n;i++) wj_arr_open(w,NULL);
+    for (size_t i=0;i<n;i++) wj_arr_close(w);
+    return wj_ok(w);
+}
+
 static bool writes_nothing(void *ctx, const void *snapshot, bool pub, size_t item, wj_t *w, char *key)
 {
     (void)ctx; (void)snapshot; (void)pub; (void)item; (void)w; (void)key;
@@ -256,6 +266,22 @@ TEST_CASE("web provider: the streamed REST form is held to the limits a frame is
     TEST_ASSERT_TRUE(stream_status(&roomy,&s));
 }
 
+TEST_CASE("web provider: REST and WebSocket accept the same nesting in a keyed item", "[web_provider]")
+{
+    const size_t max_ok=WJ_MAX_DEPTH-2;   /* an item sits two levels down: the answer, then its array */
+    for (size_t extra=0;extra<2;extra++) {
+        web_shell_registry_t r; init(&r,1,1);
+        web_shell_section_t d={.key="items",.merge=WEB_SHELL_KEYED_ARRAY,.max_bytes=256,.max_items=1,.max_item_bytes=128,
+                               .ctx=(void *)(uintptr_t)(max_ok+extra),.serialize=nested_item};
+        TEST_ASSERT_TRUE(web_shell_registry_sections(&r,&d,1));
+        sample_t s={.value=1}; web_shell_frame_t f={0};
+        bool frame=web_shell_frame_build(&r,&s,1,false,&f);
+        TEST_ASSERT_EQUAL(extra==0,frame);
+        TEST_ASSERT_EQUAL(extra==0,stream_status(&r,&s));
+        web_shell_frame_dispose(&f);
+    }
+}
+
 TEST_CASE("web provider: a frame keeps its block across builds and follows a changed capacity", "[web_provider]")
 {
     web_shell_registry_t r; init(&r,1,3); TEST_ASSERT_TRUE(web_shell_registry_sections(&r,sections,3));
@@ -284,9 +310,15 @@ TEST_CASE("web provider: a frame keeps its block across builds and follows a cha
     TEST_ASSERT_EQUAL_PTR(text,f.text); TEST_ASSERT_TRUE(f.built);
     web_shell_frame_dispose(&f);
     web_shell_frame_attach(&f,text,sizeof(text));
+    TEST_ASSERT_TRUE(web_shell_frame_build(&r,&s,5,false,&f));
     web_shell_registry_t too_big=r; too_big.status_cap=sizeof(text)+1;
     TEST_ASSERT_FALSE(web_shell_frame_build(&too_big,&s,6,false,&f));
     TEST_ASSERT_EQUAL_PTR(text,f.text);
+    /* The frame built before the refused one is gone: nothing renders or commits. */
+    TEST_ASSERT_FALSE(f.built);
+    char none[64]="x"; web_shell_baseline_t kept={0};
+    TEST_ASSERT_EQUAL_UINT(0,web_shell_frame_render(&r,&f,NULL,false,true,0,none,sizeof(none)));
+    web_shell_frame_commit(&f,&kept); TEST_ASSERT_FALSE(kept.valid);
     web_shell_frame_dispose(&f);
     TEST_ASSERT_NULL(f.text);
 }
