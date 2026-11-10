@@ -15,14 +15,14 @@ function(web_shell_ui_bundle)
         message(FATAL_ERROR "Unknown UI arguments: ${UI_UNPARSED_ARGUMENTS}")
     endif()
     set(_bundler "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/ui_bundle.py")
-    find_program(_web_ui_uv uv REQUIRED)
+    # Standard library only: the build needs nothing beyond ESP-IDF's own Python.
     if(COMMAND idf_build_get_property)
         idf_build_get_property(_web_ui_python PYTHON)
     else()
         find_package(Python3 REQUIRED COMPONENTS Interpreter)
         set(_web_ui_python "${Python3_EXECUTABLE}")
     endif()
-    set(_command "${_web_ui_uv}" run --no-project "${_web_ui_python}" "${_bundler}"
+    set(_command "${_web_ui_python}" "${_bundler}"
         --manifest "${UI_MANIFEST}" --product-root "${UI_PRODUCT_ROOT}"
         --asset-manifest "${UI_ASSET_MANIFEST}" --symbol-prefix "${UI_SYMBOL_PREFIX}"
         --max-gz "${UI_MAX_GZ}" --max-project-gz "${UI_MAX_PROJECT_GZ}")
