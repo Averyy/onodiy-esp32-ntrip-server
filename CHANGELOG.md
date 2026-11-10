@@ -4,7 +4,7 @@ Changes per release, newest first. A release's GitHub notes start with its secti
 Changes since the last release go under `## Unreleased`; rename it to the new version
 before tagging ([releases](docs/releases.md)).
 
-## Unreleased
+## v0.1.15
 
 - Updates: an app or receiver package download can be cancelled until its last
   byte is in; the row's button turns into Cancel while it downloads. Nothing is
@@ -65,19 +65,6 @@ For other applications built on these components ([`docs/component-reuse.md`](do
   no warning when PSRAM has no no-init segment.
 - API: additions only, except that callers of `um98x_ctl` that arm the loader prompt
   detector can now get `ESP_ERR_NOT_ALLOWED` from calls other than detection.
-
-Pending, to clear from this list as each is tested on hardware (remove before tagging):
-
-- Download cancel: app tested in QEMU only (cancelled while queued, at 10 %, refused
-  at 100 %); receiver package cancel not tested at all.
-- App row while an update is busy: not tested on hardware.
-- Web split: running on one station since 2026-11-08 (boot, status, Onocoy, app
-  upload); the page in a browser tested against QEMU only. `examples/external-web`
-  has run in QEMU only, and its BOOT recovery not at all.
-- Receiver link, commands, observations, framing, recovery refusal, settings, LEDs and
-  `fw_update` provider: host tests and builds, plus normal streaming on that station;
-  the loader prompt stop and restart count not exercised on hardware.
-- Network options: policy host-tested and compiled only.
 
 ## v0.1.14
 
