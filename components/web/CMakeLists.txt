@@ -55,7 +55,8 @@ idf_component_register(
         board)
 
 # Product-owned assets and metadata, generated from the explicit station composition.
-include("${COMPONENT_DIR}/../web_shell/cmake/web_ui.cmake")
+idf_component_get_property(_web_shell_dir web_shell COMPONENT_DIR)
+include("${_web_shell_dir}/cmake/web_ui.cmake")
 web_shell_ui_bundle(
     TARGET ${COMPONENT_LIB}
     MANIFEST "${COMPONENT_DIR}/ui/product.json"
